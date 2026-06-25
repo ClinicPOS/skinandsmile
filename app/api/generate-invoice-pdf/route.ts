@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import puppeteer from "puppeteer";
 
 export async function POST(request: NextRequest) {
@@ -6,7 +6,7 @@ export async function POST(request: NextRequest) {
     const { html, filename } = await request.json();
 
     if (!html) {
-      return NextResponse.json({ error: "HTML content is required" }, { status: 400 });
+      return Response.json({ error: "HTML content is required" }, { status: 400 });
     }
 
     // Launch Puppeteer
@@ -19,7 +19,6 @@ export async function POST(request: NextRequest) {
 
     // Set content
     await page.setContent(html, { waitUntil: "load" });
-
 
     // Generate PDF
     const pdf = await page.pdf({
@@ -35,24 +34,17 @@ export async function POST(request: NextRequest) {
 
     await browser.close();
 
-    // Return PDF as response
-    return new Response(pdf), {
-  status: 200,
-  headers: {
-    "Content-Type": "application/pdf",
-    "Content-Disposition": `attachment; filename="${filename || "invoice.pdf"}"`,
-  },
-};
+    // Return PDF
+    return new Response(pdf, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${filename || "invoice.pdf"}"`,
+      },
+    });
 
- return new Response(pdf), {
-  status: 200,
-  headers: {
-    "Content-Type": "application/pdf",
-    "Content-Disposition": `attachment; filename="${filename || "invoice.pdf"}"`,
-  },
-};
-} catch (error) {
-  console.error("PDF generation error:", error);
-  return Response.json({ error: "Failed to generate PDF" }, { status: 500 });
-}
+  } catch (error) {
+    console.error("PDF generation error:", error);
+    return Response.json({ error: "Failed to generate PDF" }, { status: 500 });
+  }
 }
