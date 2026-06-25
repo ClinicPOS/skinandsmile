@@ -65,6 +65,8 @@ export default function ReceiptsPage() {
   const [patientName, setPatientName] = useState("");
   const [patientPhoneInput, setPatientPhoneInput] = useState("");
   const [patientEmailInput, setPatientEmailInput] = useState("");
+  const [patientDobInput, setPatientDobInput] = useState("");
+  const [patientSexInput, setPatientSexInput] = useState("");
   const [filteredPatients, setFilteredPatients] = useState<any[]>([]);
   const [showPatientSuggestions, setShowPatientSuggestions] = useState(false);
   const [transactionPatientId, setTransactionPatientId] = useState(""); // Track patient ID for current transaction
@@ -232,6 +234,8 @@ export default function ReceiptsPage() {
     if (patientId) {
       setPatientPhoneInput("");
       setPatientEmailInput("");
+      setPatientDobInput("");
+      setPatientSexInput("");
       setSelectedPatientInfo(null);
     }
     if (e.trim()) {
@@ -250,6 +254,8 @@ export default function ReceiptsPage() {
     setPatientName(patient.name);
     setPatientPhoneInput(patient.phone || "");
     setPatientEmailInput(patient.email || "");
+    setPatientDobInput(patient.date_of_birth || "");
+    setPatientSexInput(patient.sex || "");
     setSelectedPatientInfo({
       date_of_birth: patient.date_of_birth,
       sex: patient.sex,
@@ -391,6 +397,8 @@ export default function ReceiptsPage() {
     setPatientName("");
     setPatientPhoneInput("");
     setPatientEmailInput("");
+    setPatientDobInput("");
+    setPatientSexInput("");
     setSelectedPatientInfo(null);
     setTransactionPatientId("");
     setDoctorId("");
@@ -457,6 +465,8 @@ export default function ReceiptsPage() {
             name: patientName.trim(),
             phone: patientPhoneInput.trim(),
             email: patientEmailInput.trim(),
+            date_of_birth: patientDobInput || null,
+            sex: patientSexInput || null,
           },
         ])
         .select()
@@ -1683,6 +1693,36 @@ export default function ReceiptsPage() {
                   placeholder="e.g. +971..."
                   className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
                 />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-slate-700">
+                  Date of Birth
+                  {patientDobInput && (
+                    <span className="ml-2 font-normal text-cyan-600">
+                      ({calculateAge(patientDobInput)} yrs)
+                    </span>
+                  )}
+                </label>
+                <input
+                  type="date"
+                  value={patientDobInput}
+                  onChange={(e) => setPatientDobInput(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-slate-700">Sex</label>
+                <select
+                  value={patientSexInput}
+                  onChange={(e) => setPatientSexInput(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
+                >
+                  <option value="">Select</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                </select>
               </div>
 
               <div className="space-y-2">
