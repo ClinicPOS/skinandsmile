@@ -31,7 +31,8 @@ export async function POST(request: NextRequest) {
 
     await browser.close();
 
-    return new Response(pdf, {
+    // IMPORTANT FIX: use pdf.buffer (ArrayBuffer), not pdf (Uint8Array)
+    return new Response(pdf.buffer, {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
