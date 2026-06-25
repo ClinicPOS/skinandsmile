@@ -18,7 +18,8 @@ export async function POST(request: NextRequest) {
     const page = await browser.newPage();
 
     // Set content
-    await page.setContent(html, { waitUntil: "networkidle2" });
+    await page.setContent(html, { waitUntil: "load" });
+
 
     // Generate PDF
     const pdf = await page.pdf({
