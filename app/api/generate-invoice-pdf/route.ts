@@ -36,12 +36,14 @@ export async function POST(request: NextRequest) {
     await browser.close();
 
     // Return PDF as response
-    return new NextResponse(pdf, {
-      status: 200,
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="${filename || "invoice.pdf"}"`,
-      },
+    return new Response(pdf, {
+  status: 200,
+  headers: {
+    "Content-Type": "application/pdf",
+    "Content-Disposition": `attachment; filename="${filename || "invoice.pdf"}"`,
+  },
+});
+
     });
   } catch (error) {
     console.error("PDF generation error:", error);
