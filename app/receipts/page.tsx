@@ -2043,6 +2043,9 @@ export default function ReceiptsPage() {
                         setPatientName("");
                         setPatientPhoneInput("");
                         setPatientEmailInput("");
+                        setPatientDobInput("");
+                        setPatientSexInput("");
+                        setSelectedPatientInfo(null);
                         setTransactionPatientId("");
                         setDoctorId("");
                         setSelectedPaymentMethod("");
