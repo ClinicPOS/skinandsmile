@@ -9,7 +9,6 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: "HTML content is required" }, { status: 400 });
     }
 
-    // Launch Puppeteer
     const browser = await puppeteer.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -17,10 +16,8 @@ export async function POST(request: NextRequest) {
 
     const page = await browser.newPage();
 
-    // Set content
     await page.setContent(html, { waitUntil: "load" });
 
-    // Generate PDF
     const pdf = await page.pdf({
       format: "A4",
       margin: {
@@ -34,7 +31,6 @@ export async function POST(request: NextRequest) {
 
     await browser.close();
 
-    // Return PDF
     return new Response(pdf, {
       status: 200,
       headers: {
