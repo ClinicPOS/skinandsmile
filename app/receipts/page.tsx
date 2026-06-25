@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
+import { calculateAge } from "../../lib/utils";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara", "Mixed"];
 const POS_REGISTER_SESSION_KEY = "posRegisterSession";
@@ -67,6 +68,12 @@ export default function ReceiptsPage() {
   const [filteredPatients, setFilteredPatients] = useState<any[]>([]);
   const [showPatientSuggestions, setShowPatientSuggestions] = useState(false);
   const [transactionPatientId, setTransactionPatientId] = useState(""); // Track patient ID for current transaction
+  const [selectedPatientInfo, setSelectedPatientInfo] = useState<{
+    date_of_birth?: string | null;
+    sex?: string | null;
+    nationality?: string | null;
+    emirates_id?: string | null;
+  } | null>(null);
   const [doctorId, setDoctorId] = useState("");
   const [receptionistId, setReceptionistId] = useState("");
   const [notes, setNotes] = useState("");
@@ -225,6 +232,7 @@ export default function ReceiptsPage() {
     if (patientId) {
       setPatientPhoneInput("");
       setPatientEmailInput("");
+      setSelectedPatientInfo(null);
     }
     if (e.trim()) {
       const filtered = patients.filter((patient) => patient.name.toLowerCase().includes(e.toLowerCase()));
@@ -242,6 +250,12 @@ export default function ReceiptsPage() {
     setPatientName(patient.name);
     setPatientPhoneInput(patient.phone || "");
     setPatientEmailInput(patient.email || "");
+    setSelectedPatientInfo({
+      date_of_birth: patient.date_of_birth,
+      sex: patient.sex,
+      nationality: patient.nationality,
+      emirates_id: patient.emirates_id,
+    });
     setShowPatientSuggestions(false);
     setFilteredPatients([]);
   }
@@ -377,6 +391,7 @@ export default function ReceiptsPage() {
     setPatientName("");
     setPatientPhoneInput("");
     setPatientEmailInput("");
+    setSelectedPatientInfo(null);
     setTransactionPatientId("");
     setDoctorId("");
     setSelectedPaymentMethod("");
@@ -1626,13 +1641,38 @@ export default function ReceiptsPage() {
                           onClick={() => selectPatient(patient)}
                           className="w-full px-4 py-2 text-left text-sm text-slate-900 hover:bg-cyan-50 border-b border-slate-100 last:border-b-0 transition"
                         >
-                          {patient.name}
+                          <span className="font-medium">{patient.name}</span>
+                          {patient.phone && (
+                            <span className="ml-2 text-xs text-slate-400">{patient.phone}</span>
+                          )}
+                          {calculateAge(patient.date_of_birth) !== null && (
+                            <span className="ml-2 text-xs text-slate-400">{calculateAge(patient.date_of_birth)} yrs</span>
+                          )}
                         </button>
                       ))}
                     </div>
                   )}
                 </div>
               </div>
+
+              {patientId && selectedPatientInfo && (
+                <div className="rounded-xl border border-cyan-100 bg-cyan-50 px-3 py-2">
+                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-600">
+                    {selectedPatientInfo.sex && (
+                      <span><span className="font-medium">Sex:</span> {selectedPatientInfo.sex}</span>
+                    )}
+                    {calculateAge(selectedPatientInfo.date_of_birth) !== null && (
+                      <span><span className="font-medium">Age:</span> {calculateAge(selectedPatientInfo.date_of_birth)} yrs</span>
+                    )}
+                    {selectedPatientInfo.nationality && (
+                      <span><span className="font-medium">Nationality:</span> {selectedPatientInfo.nationality}</span>
+                    )}
+                    {selectedPatientInfo.emirates_id && (
+                      <span><span className="font-medium">Emirates ID:</span> {selectedPatientInfo.emirates_id}</span>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <label className="block text-sm font-semibold text-slate-700">Patient Phone (Optional)</label>

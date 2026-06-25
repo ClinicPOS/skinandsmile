@@ -3,43 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-
-type Patient = {
-  id: string;
-  name: string;
-  phone: string | null;
-  email?: string | null;
-  notes?: string | null;
-};
-
-type Doctor = {
-  id: string;
-  name: string;
-  specialty: string;
-};
-
-type Service = {
-  id: string;
-  name: string;
-  price: number;
-};
-
-type Receptionist = {
-  id: string;
-  name: string;
-  shift: string;
-  pin?: string | null;
-};
-
-type CashRegisterSession = {
-  id: string;
-  receptionist_id: string;
-  opening_cash: number;
-  closing_cash: number | null;
-  variance: number | null;
-  opened_at: string;
-  closed_at: string | null;
-};
+import { Patient, Doctor, Service, Receptionist, CashRegisterSession } from "../../lib/types";
+import { calculateAge } from "../../lib/utils";
 
 const BACKEND_PIN = "0404";
 
@@ -59,11 +24,20 @@ export default function BackendPage() {
   const [patientEmail, setPatientEmail] = useState("");
   const [patientNotes, setPatientNotes] = useState("");
   const [patientSearch, setPatientSearch] = useState("");
+  const [patientDateOfBirth, setPatientDateOfBirth] = useState("");
+  const [patientSex, setPatientSex] = useState("");
+  const [patientNationality, setPatientNationality] = useState("");
+  const [patientEmiratesId, setPatientEmiratesId] = useState("");
+
   const [editingPatientId, setEditingPatientId] = useState("");
   const [editingPatientName, setEditingPatientName] = useState("");
   const [editingPatientPhone, setEditingPatientPhone] = useState("");
   const [editingPatientEmail, setEditingPatientEmail] = useState("");
   const [editingPatientNotes, setEditingPatientNotes] = useState("");
+  const [editingPatientDob, setEditingPatientDob] = useState("");
+  const [editingPatientSex, setEditingPatientSex] = useState("");
+  const [editingPatientNationality, setEditingPatientNationality] = useState("");
+  const [editingPatientEmiratesId, setEditingPatientEmiratesId] = useState("");
 
   const [doctorName, setDoctorName] = useState("");
   const [doctorSpecialty, setDoctorSpecialty] = useState("");
@@ -184,6 +158,10 @@ export default function BackendPage() {
         phone: patientPhone,
         email: patientEmail,
         notes: patientNotes,
+        date_of_birth: patientDateOfBirth || null,
+        sex: patientSex || null,
+        nationality: patientNationality || null,
+        emirates_id: patientEmiratesId || null,
       },
     ]);
 
@@ -196,6 +174,10 @@ export default function BackendPage() {
     setPatientPhone("");
     setPatientEmail("");
     setPatientNotes("");
+    setPatientDateOfBirth("");
+    setPatientSex("");
+    setPatientNationality("");
+    setPatientEmiratesId("");
     loadAll();
   }
 
@@ -212,6 +194,10 @@ export default function BackendPage() {
         phone: editingPatientPhone,
         email: editingPatientEmail,
         notes: editingPatientNotes,
+        date_of_birth: editingPatientDob || null,
+        sex: editingPatientSex || null,
+        nationality: editingPatientNationality || null,
+        emirates_id: editingPatientEmiratesId || null,
       })
       .eq("id", id);
 
@@ -225,6 +211,10 @@ export default function BackendPage() {
     setEditingPatientPhone("");
     setEditingPatientEmail("");
     setEditingPatientNotes("");
+    setEditingPatientDob("");
+    setEditingPatientSex("");
+    setEditingPatientNationality("");
+    setEditingPatientEmiratesId("");
     loadAll();
   }
 
@@ -246,6 +236,10 @@ export default function BackendPage() {
       setEditingPatientPhone("");
       setEditingPatientEmail("");
       setEditingPatientNotes("");
+      setEditingPatientDob("");
+      setEditingPatientSex("");
+      setEditingPatientNationality("");
+      setEditingPatientEmiratesId("");
     }
     loadAll();
   }
@@ -563,6 +557,34 @@ export default function BackendPage() {
               placeholder="Notes"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
+            <input
+              type="date"
+              value={patientDateOfBirth}
+              onChange={(e) => setPatientDateOfBirth(e.target.value)}
+              title="Date of Birth"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
+            <select
+              value={patientSex}
+              onChange={(e) => setPatientSex(e.target.value)}
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            >
+              <option value="">Sex</option>
+              <option value="Male">Male</option>
+              <option value="Female">Female</option>
+            </select>
+            <input
+              value={patientNationality}
+              onChange={(e) => setPatientNationality(e.target.value)}
+              placeholder="Nationality"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
+            <input
+              value={patientEmiratesId}
+              onChange={(e) => setPatientEmiratesId(e.target.value)}
+              placeholder="Emirates ID"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
           </div>
           <button
             onClick={addPatient}
@@ -579,22 +601,60 @@ export default function BackendPage() {
                     <input
                       value={editingPatientName}
                       onChange={(e) => setEditingPatientName(e.target.value)}
+                      placeholder="Name"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
                     <input
                       value={editingPatientPhone}
                       onChange={(e) => setEditingPatientPhone(e.target.value)}
+                      placeholder="Phone"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
                     <input
                       value={editingPatientEmail}
                       onChange={(e) => setEditingPatientEmail(e.target.value)}
+                      placeholder="Email"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
                     <input
                       value={editingPatientNotes}
                       onChange={(e) => setEditingPatientNotes(e.target.value)}
                       placeholder="Notes"
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="mb-0.5 block text-xs text-slate-500">Date of Birth</label>
+                        <input
+                          type="date"
+                          value={editingPatientDob}
+                          onChange={(e) => setEditingPatientDob(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-0.5 block text-xs text-slate-500">Sex</label>
+                        <select
+                          value={editingPatientSex}
+                          onChange={(e) => setEditingPatientSex(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                        >
+                          <option value="">Select</option>
+                          <option value="Male">Male</option>
+                          <option value="Female">Female</option>
+                        </select>
+                      </div>
+                    </div>
+                    <input
+                      value={editingPatientNationality}
+                      onChange={(e) => setEditingPatientNationality(e.target.value)}
+                      placeholder="Nationality"
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
+                    <input
+                      value={editingPatientEmiratesId}
+                      onChange={(e) => setEditingPatientEmiratesId(e.target.value)}
+                      placeholder="Emirates ID"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
                     <div className="flex gap-2">
@@ -616,9 +676,25 @@ export default function BackendPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-slate-900">{patient.name}</p>
-                      <p className="text-sm text-slate-500">{patient.phone || "-"}</p>
-                      <p className="text-sm text-slate-500">{patient.email || "-"}</p>
-                      <p className="text-sm text-slate-500">{patient.notes || "-"}</p>
+                      <p className="text-xs text-slate-500">{patient.phone || "-"}</p>
+                      <p className="text-xs text-slate-500">{patient.email || "-"}</p>
+                      {(patient.date_of_birth || patient.sex || patient.nationality) && (
+                        <p className="text-xs text-slate-400">
+                          {[
+                            patient.sex,
+                            patient.date_of_birth ? `${calculateAge(patient.date_of_birth)} yrs` : null,
+                            patient.nationality,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </p>
+                      )}
+                      {patient.emirates_id && (
+                        <p className="text-xs text-slate-400">ID: {patient.emirates_id}</p>
+                      )}
+                      {patient.notes && (
+                        <p className="text-xs italic text-slate-400">{patient.notes}</p>
+                      )}
                     </div>
                     <div className="flex gap-2">
                       <button
@@ -628,6 +704,10 @@ export default function BackendPage() {
                           setEditingPatientPhone(patient.phone || "");
                           setEditingPatientEmail(patient.email || "");
                           setEditingPatientNotes(patient.notes || "");
+                          setEditingPatientDob(patient.date_of_birth || "");
+                          setEditingPatientSex(patient.sex || "");
+                          setEditingPatientNationality(patient.nationality || "");
+                          setEditingPatientEmiratesId(patient.emirates_id || "");
                         }}
                         className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600"
                       >
