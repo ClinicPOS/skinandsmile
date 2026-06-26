@@ -603,12 +603,26 @@ export default function ReceiptsPage() {
 
     const activeReceptionistId = receptionistId || loginReceptionistId;
 
-    if (!transactionPatientId || !doctorId || !activeReceptionistId || selectedServices.length === 0) {
+    if (!transactionPatientId || !activeReceptionistId || selectedServices.length === 0) {
       alert("Please complete the receipt before finishing the transaction.");
       return false;
     }
 
     setIsSavingReceipt(true);
+
+    // Save Emirates ID or Passport if receptionist filled them in for an existing patient
+    if (patientId) {
+      const updates: Record<string, string> = {};
+      if (patientEmiratesIdInput.trim() && !selectedPatientInfo?.emirates_id) {
+        updates.emirates_id = patientEmiratesIdInput.trim();
+      }
+      if (patientPassportInput.trim() && !selectedPatientInfo?.passport_number) {
+        updates.passport_number = patientPassportInput.trim();
+      }
+      if (Object.keys(updates).length > 0) {
+        await supabase.from("patients").update(updates).eq("id", patientId);
+      }
+    }
 
     const { data: receiptData, error: receiptError } = await supabase
       .from("receipts")
@@ -1680,30 +1694,30 @@ export default function ReceiptsPage() {
               <div className="space-y-2">
                 <label className="block text-sm font-semibold text-slate-700">
                   Emirates ID
-                  {patientId && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
+                  {patientId && selectedPatientInfo?.emirates_id && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
                 </label>
                 <input
                   type="text"
                   value={patientEmiratesIdInput}
-                  onChange={(e) => !patientId && setPatientEmiratesIdInput(e.target.value)}
-                  readOnly={!!patientId}
+                  onChange={(e) => !(patientId && selectedPatientInfo?.emirates_id) && setPatientEmiratesIdInput(e.target.value)}
+                  readOnly={!!(patientId && selectedPatientInfo?.emirates_id)}
                   placeholder="Emirates ID (optional)"
-                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
+                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId && selectedPatientInfo?.emirates_id ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
                 />
               </div>
 
               <div className="space-y-2">
                 <label className="block text-sm font-semibold text-slate-700">
                   Passport Number
-                  {patientId && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
+                  {patientId && selectedPatientInfo?.passport_number && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
                 </label>
                 <input
                   type="text"
                   value={patientPassportInput}
-                  onChange={(e) => !patientId && setPatientPassportInput(e.target.value)}
-                  readOnly={!!patientId}
+                  onChange={(e) => !(patientId && selectedPatientInfo?.passport_number) && setPatientPassportInput(e.target.value)}
+                  readOnly={!!(patientId && selectedPatientInfo?.passport_number)}
                   placeholder="Passport number (optional)"
-                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
+                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId && selectedPatientInfo?.passport_number ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
                 />
               </div>
 
