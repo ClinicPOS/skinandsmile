@@ -28,6 +28,7 @@ export default function BackendPage() {
   const [patientSex, setPatientSex] = useState("");
   const [patientNationality, setPatientNationality] = useState("");
   const [patientEmiratesId, setPatientEmiratesId] = useState("");
+  const [patientPassportNumber, setPatientPassportNumber] = useState("");
 
   const [editingPatientId, setEditingPatientId] = useState("");
   const [editingPatientName, setEditingPatientName] = useState("");
@@ -38,6 +39,7 @@ export default function BackendPage() {
   const [editingPatientSex, setEditingPatientSex] = useState("");
   const [editingPatientNationality, setEditingPatientNationality] = useState("");
   const [editingPatientEmiratesId, setEditingPatientEmiratesId] = useState("");
+  const [editingPatientPassportNumber, setEditingPatientPassportNumber] = useState("");
 
   const [doctorName, setDoctorName] = useState("");
   const [doctorSpecialty, setDoctorSpecialty] = useState("");
@@ -162,6 +164,7 @@ export default function BackendPage() {
         sex: patientSex || null,
         nationality: patientNationality || null,
         emirates_id: patientEmiratesId || null,
+        passport_number: patientPassportNumber || null,
       },
     ]);
 
@@ -178,6 +181,7 @@ export default function BackendPage() {
     setPatientSex("");
     setPatientNationality("");
     setPatientEmiratesId("");
+    setPatientPassportNumber("");
     loadAll();
   }
 
@@ -198,6 +202,7 @@ export default function BackendPage() {
         sex: editingPatientSex || null,
         nationality: editingPatientNationality || null,
         emirates_id: editingPatientEmiratesId || null,
+        passport_number: editingPatientPassportNumber || null,
       })
       .eq("id", id);
 
@@ -215,6 +220,7 @@ export default function BackendPage() {
     setEditingPatientSex("");
     setEditingPatientNationality("");
     setEditingPatientEmiratesId("");
+    setEditingPatientPassportNumber("");
     loadAll();
   }
 
@@ -240,6 +246,7 @@ export default function BackendPage() {
       setEditingPatientSex("");
       setEditingPatientNationality("");
       setEditingPatientEmiratesId("");
+      setEditingPatientPassportNumber("");
     }
     loadAll();
   }
@@ -585,6 +592,12 @@ export default function BackendPage() {
               placeholder="Emirates ID"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
+            <input
+              value={patientPassportNumber}
+              onChange={(e) => setPatientPassportNumber(e.target.value)}
+              placeholder="Passport Number"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
           </div>
           <button
             onClick={addPatient}
@@ -657,6 +670,12 @@ export default function BackendPage() {
                       placeholder="Emirates ID"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
+                    <input
+                      value={editingPatientPassportNumber}
+                      onChange={(e) => setEditingPatientPassportNumber(e.target.value)}
+                      placeholder="Passport Number"
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
                     <div className="flex gap-2">
                       <button
                         onClick={() => updatePatient(patient.id)}
@@ -692,6 +711,9 @@ export default function BackendPage() {
                       {patient.emirates_id && (
                         <p className="text-xs text-slate-400">ID: {patient.emirates_id}</p>
                       )}
+                      {patient.passport_number && (
+                        <p className="text-xs text-slate-400">Passport: {patient.passport_number}</p>
+                      )}
                       {patient.notes && (
                         <p className="text-xs italic text-slate-400">{patient.notes}</p>
                       )}
@@ -708,6 +730,7 @@ export default function BackendPage() {
                           setEditingPatientSex(patient.sex || "");
                           setEditingPatientNationality(patient.nationality || "");
                           setEditingPatientEmiratesId(patient.emirates_id || "");
+                          setEditingPatientPassportNumber(patient.passport_number || "");
                         }}
                         className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600"
                       >

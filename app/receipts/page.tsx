@@ -67,6 +67,8 @@ export default function ReceiptsPage() {
   const [patientEmailInput, setPatientEmailInput] = useState("");
   const [patientDobInput, setPatientDobInput] = useState("");
   const [patientSexInput, setPatientSexInput] = useState("");
+  const [patientEmiratesIdInput, setPatientEmiratesIdInput] = useState("");
+  const [patientPassportInput, setPatientPassportInput] = useState("");
   const [filteredPatients, setFilteredPatients] = useState<any[]>([]);
   const [showPatientSuggestions, setShowPatientSuggestions] = useState(false);
   const [transactionPatientId, setTransactionPatientId] = useState(""); // Track patient ID for current transaction
@@ -75,6 +77,7 @@ export default function ReceiptsPage() {
     sex?: string | null;
     nationality?: string | null;
     emirates_id?: string | null;
+    passport_number?: string | null;
   } | null>(null);
   const [doctorId, setDoctorId] = useState("");
   const [receptionistId, setReceptionistId] = useState("");
@@ -236,6 +239,8 @@ export default function ReceiptsPage() {
       setPatientEmailInput("");
       setPatientDobInput("");
       setPatientSexInput("");
+      setPatientEmiratesIdInput("");
+      setPatientPassportInput("");
       setSelectedPatientInfo(null);
     }
     if (e.trim()) {
@@ -256,11 +261,14 @@ export default function ReceiptsPage() {
     setPatientEmailInput(patient.email || "");
     setPatientDobInput(patient.date_of_birth || "");
     setPatientSexInput(patient.sex || "");
+    setPatientEmiratesIdInput(patient.emirates_id || "");
+    setPatientPassportInput(patient.passport_number || "");
     setSelectedPatientInfo({
       date_of_birth: patient.date_of_birth,
       sex: patient.sex,
       nationality: patient.nationality,
       emirates_id: patient.emirates_id,
+      passport_number: patient.passport_number,
     });
     setShowPatientSuggestions(false);
     setFilteredPatients([]);
@@ -399,6 +407,8 @@ export default function ReceiptsPage() {
     setPatientEmailInput("");
     setPatientDobInput("");
     setPatientSexInput("");
+    setPatientEmiratesIdInput("");
+    setPatientPassportInput("");
     setSelectedPatientInfo(null);
     setTransactionPatientId("");
     setDoctorId("");
@@ -449,8 +459,8 @@ export default function ReceiptsPage() {
       return;
     }
 
-    if (!patientName.trim() || !doctorId || !receptionistId || selectedServices.length === 0) {
-      alert("Please complete all required fields and add at least one service.");
+    if (!patientName.trim() || !receptionistId || selectedServices.length === 0) {
+      alert("Please fill in patient name and add at least one service.");
       return;
     }
 
@@ -467,6 +477,8 @@ export default function ReceiptsPage() {
             email: patientEmailInput.trim(),
             date_of_birth: patientDobInput || null,
             sex: patientSexInput || null,
+            emirates_id: patientEmiratesIdInput.trim() || null,
+            passport_number: patientPassportInput.trim() || null,
           },
         ])
         .select()
@@ -1665,6 +1677,36 @@ export default function ReceiptsPage() {
                 </div>
               </div>
 
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-slate-700">
+                  Emirates ID
+                  {patientId && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
+                </label>
+                <input
+                  type="text"
+                  value={patientEmiratesIdInput}
+                  onChange={(e) => !patientId && setPatientEmiratesIdInput(e.target.value)}
+                  readOnly={!!patientId}
+                  placeholder="Emirates ID (optional)"
+                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-slate-700">
+                  Passport Number
+                  {patientId && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
+                </label>
+                <input
+                  type="text"
+                  value={patientPassportInput}
+                  onChange={(e) => !patientId && setPatientPassportInput(e.target.value)}
+                  readOnly={!!patientId}
+                  placeholder="Passport number (optional)"
+                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
+                />
+              </div>
+
               {patientId && selectedPatientInfo && (
                 <div className="rounded-xl border border-cyan-100 bg-cyan-50 px-3 py-2">
                   <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-600">
@@ -1676,9 +1718,6 @@ export default function ReceiptsPage() {
                     )}
                     {selectedPatientInfo.nationality && (
                       <span><span className="font-medium">Nationality:</span> {selectedPatientInfo.nationality}</span>
-                    )}
-                    {selectedPatientInfo.emirates_id && (
-                      <span><span className="font-medium">Emirates ID:</span> {selectedPatientInfo.emirates_id}</span>
                     )}
                   </div>
                 </div>
@@ -1726,13 +1765,13 @@ export default function ReceiptsPage() {
               </div>
 
               <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">Doctor</label>
+                <label className="block text-sm font-semibold text-slate-700">Doctor / Therapist <span className="font-normal text-slate-400">(Optional)</span></label>
                 <select
                   value={doctorId}
                   onChange={(e) => setDoctorId(e.target.value)}
                   className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
                 >
-                  <option value="">Select Doctor</option>
+                  <option value="">No doctor / therapist</option>
                   {doctors.map((doctor) => (
                     <option key={doctor.id} value={doctor.id}>
                       {doctor.name}
@@ -2045,6 +2084,8 @@ export default function ReceiptsPage() {
                         setPatientEmailInput("");
                         setPatientDobInput("");
                         setPatientSexInput("");
+                        setPatientEmiratesIdInput("");
+                        setPatientPassportInput("");
                         setSelectedPatientInfo(null);
                         setTransactionPatientId("");
                         setDoctorId("");

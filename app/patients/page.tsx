@@ -15,6 +15,7 @@ export default function PatientsPage() {
   const [sex, setSex] = useState("");
   const [nationality, setNationality] = useState("");
   const [emiratesId, setEmiratesId] = useState("");
+  const [passportNumber, setPassportNumber] = useState("");
 
   const [patients, setPatients] = useState<Patient[]>([]);
   const [search, setSearch] = useState("");
@@ -50,6 +51,7 @@ export default function PatientsPage() {
         sex: sex || null,
         nationality: nationality.trim() || null,
         emirates_id: emiratesId.trim() || null,
+        passport_number: passportNumber.trim() || null,
       },
     ]);
 
@@ -67,6 +69,7 @@ export default function PatientsPage() {
     setSex("");
     setNationality("");
     setEmiratesId("");
+    setPassportNumber("");
     loadPatients();
   }
 
@@ -155,6 +158,14 @@ export default function PatientsPage() {
               className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
 
+            <input
+              type="text"
+              placeholder="Passport Number (optional)"
+              value={passportNumber}
+              onChange={(e) => setPassportNumber(e.target.value)}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
+
             <textarea
               placeholder="Notes"
               value={notes}
@@ -211,6 +222,9 @@ export default function PatientsPage() {
                     {patient.nationality && <span>{patient.nationality}</span>}
                     {patient.emirates_id && (
                       <span>ID: {patient.emirates_id}</span>
+                    )}
+                    {patient.passport_number && (
+                      <span>Passport: {patient.passport_number}</span>
                     )}
                     {patient.email && <span>{patient.email}</span>}
                     {patient.notes && (

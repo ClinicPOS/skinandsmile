@@ -8,6 +8,7 @@ export type Patient = {
   sex?: string | null;
   nationality?: string | null;
   emirates_id?: string | null;
+  passport_number?: string | null;
 };
 
 export type Doctor = {
