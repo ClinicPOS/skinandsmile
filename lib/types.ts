@@ -11,6 +11,7 @@ export type Clinic = {
 
 export type Patient = {
   id: string;
+  patient_number?: number | null;
   name: string;
   phone: string | null;
   email?: string | null;

@@ -41,6 +41,13 @@ export default function PatientsPage() {
       return;
     }
 
+    const { data: maxPatient } = await supabase
+      .from("patients")
+      .select("patient_number")
+      .order("patient_number", { ascending: false })
+      .limit(1);
+    const nextNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
+
     const { error } = await supabase.from("patients").insert([
       {
         name: name.trim(),
@@ -52,6 +59,7 @@ export default function PatientsPage() {
         nationality: nationality.trim() || null,
         emirates_id: emiratesId.trim() || null,
         passport_number: passportNumber.trim() || null,
+        patient_number: nextNumber,
       },
     ]);
 

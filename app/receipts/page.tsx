@@ -512,6 +512,13 @@ export default function ReceiptsPage() {
 
     // If patientId is empty but patientName exists, create new patient
     if (!patientId && patientName.trim()) {
+      const { data: maxPatient } = await supabase
+        .from("patients")
+        .select("patient_number")
+        .order("patient_number", { ascending: false })
+        .limit(1);
+      const nextPatientNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
+
       const { data: newPatient, error: createError } = await supabase
         .from("patients")
         .insert([
@@ -523,6 +530,7 @@ export default function ReceiptsPage() {
             sex: patientSexInput || null,
             emirates_id: patientEmiratesIdInput.trim() || null,
             passport_number: patientPassportInput.trim() || null,
+            patient_number: nextPatientNumber,
           },
         ])
         .select()
@@ -1435,7 +1443,9 @@ export default function ReceiptsPage() {
     const selectedPatient = patients.find((p) => p.id === transactionPatientId);
     const patientNameForReceipt = selectedPatient?.name || patientName || "-";
     const patientMobileForReceipt = selectedPatient?.phone || patientPhoneInput || "-";
-    const patientIdForReceipt = selectedPatient?.patient_id || selectedPatient?.patient_code || selectedPatient?.id || "-";
+    const patientIdForReceipt = selectedPatient?.patient_number
+      ? `#${String(selectedPatient.patient_number).padStart(5, "0")}`
+      : "-";
     const doctorNameForReceipt = doctors.find((d) => d.id === doctorId)?.name || "-";
     const cashierName =
       receptionists.find((person) => person.id === (receptionistId || loginReceptionistId))?.name || "Reception";
