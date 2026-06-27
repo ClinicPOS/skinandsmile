@@ -81,6 +81,7 @@ export default function ReceiptsPage() {
     nationality?: string | null;
     emirates_id?: string | null;
     passport_number?: string | null;
+    email?: string | null;
   } | null>(null);
   const [doctorId, setDoctorId] = useState("");
   const [receptionistId, setReceptionistId] = useState("");
@@ -301,6 +302,7 @@ export default function ReceiptsPage() {
       nationality: patient.nationality,
       emirates_id: patient.emirates_id,
       passport_number: patient.passport_number,
+      email: patient.email,
     });
     setShowPatientSuggestions(false);
     setFilteredPatients([]);
@@ -651,15 +653,19 @@ export default function ReceiptsPage() {
 
     setIsSavingReceipt(true);
 
-    // Save Emirates ID or Passport if receptionist filled them in for an existing patient
+    // Save any missing patient fields if receptionist filled them in for an existing patient
     if (patientId) {
       const updates: Record<string, string> = {};
-      if (patientEmiratesIdInput.trim() && !selectedPatientInfo?.emirates_id) {
+      if (patientEmiratesIdInput.trim() && !selectedPatientInfo?.emirates_id)
         updates.emirates_id = patientEmiratesIdInput.trim();
-      }
-      if (patientPassportInput.trim() && !selectedPatientInfo?.passport_number) {
+      if (patientPassportInput.trim() && !selectedPatientInfo?.passport_number)
         updates.passport_number = patientPassportInput.trim();
-      }
+      if (patientDobInput && !selectedPatientInfo?.date_of_birth)
+        updates.date_of_birth = patientDobInput;
+      if (patientSexInput && !selectedPatientInfo?.sex)
+        updates.sex = patientSexInput;
+      if (patientEmailInput.trim() && !selectedPatientInfo?.email)
+        updates.email = patientEmailInput.trim();
       if (Object.keys(updates).length > 0) {
         await supabase.from("patients").update(updates).eq("id", patientId);
       }
