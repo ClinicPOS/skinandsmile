@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Patient, Doctor, Service, Receptionist, CashRegisterSession } from "../../lib/types";
+import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 
 const BACKEND_PIN = "0404";
@@ -17,6 +17,8 @@ export default function BackendPage() {
   const [services, setServices] = useState<Service[]>([]);
   const [receptionists, setReceptionists] = useState<Receptionist[]>([]);
   const [cashRegisterSessions, setCashRegisterSessions] = useState<CashRegisterSession[]>([]);
+  const [clinics, setClinics] = useState<Clinic[]>([]);
+  const [selectedClinicId, setSelectedClinicId] = useState<string>("all");
   const [isRegisterTableReady, setIsRegisterTableReady] = useState(true);
 
   const [patientName, setPatientName] = useState("");
@@ -60,6 +62,7 @@ export default function BackendPage() {
   const [editingReceptionistName, setEditingReceptionistName] = useState("");
   const [editingReceptionistShift, setEditingReceptionistShift] = useState("");
   const [editingReceptionistPin, setEditingReceptionistPin] = useState("");
+  const [editingReceptionistClinicId, setEditingReceptionistClinicId] = useState("");
 
   const recordSummary = useMemo(
     () => [
@@ -80,14 +83,26 @@ export default function BackendPage() {
 
   const filteredPatients = useMemo(() => {
     const keyword = patientSearch.trim().toLowerCase();
-    if (!keyword) {
-      return patients;
-    }
-
+    if (!keyword) return patients;
     return patients.filter((patient) =>
       String(patient.name || "").toLowerCase().includes(keyword)
     );
   }, [patients, patientSearch]);
+
+  const displayedDoctors = useMemo(() =>
+    selectedClinicId === "all" ? doctors : doctors.filter(d => d.clinic_id === selectedClinicId),
+    [doctors, selectedClinicId]
+  );
+
+  const displayedServices = useMemo(() =>
+    selectedClinicId === "all" ? services : services.filter(s => s.clinic_id === selectedClinicId),
+    [services, selectedClinicId]
+  );
+
+  const displayedReceptionists = useMemo(() =>
+    selectedClinicId === "all" ? receptionists : receptionists.filter(r => r.clinic_id === selectedClinicId),
+    [receptionists, selectedClinicId]
+  );
 
   useEffect(() => {
     if (isUnlocked) {
@@ -105,6 +120,7 @@ export default function BackendPage() {
       servicesResult,
       receptionistsResult,
       cashSessionsResult,
+      clinicsResult,
     ] = await Promise.all([
       supabase.from("patients").select("*"),
       supabase.from("doctors").select("*"),
@@ -115,12 +131,14 @@ export default function BackendPage() {
         .select("*")
         .gte("opened_at", startOfDay.toISOString())
         .order("opened_at", { ascending: false }),
+      supabase.from("clinics").select("*").order("name"),
     ]);
 
     setPatients((patientsResult.data || []) as Patient[]);
     setDoctors((doctorsResult.data || []) as Doctor[]);
     setServices((servicesResult.data || []) as Service[]);
     setReceptionists((receptionistsResult.data || []) as Receptionist[]);
+    setClinics((clinicsResult.data || []) as Clinic[]);
 
     if (cashSessionsResult.error) {
       setCashRegisterSessions([]);
@@ -256,11 +274,16 @@ export default function BackendPage() {
       alert("Doctor name is required.");
       return;
     }
+    if (selectedClinicId === "all") {
+      alert("Please select a specific clinic before adding a doctor.");
+      return;
+    }
 
     const { error } = await supabase.from("doctors").insert([
       {
         name: doctorName,
         specialty: doctorSpecialty,
+        clinic_id: selectedClinicId,
       },
     ]);
 
@@ -328,10 +351,16 @@ export default function BackendPage() {
       return;
     }
 
+    if (selectedClinicId === "all") {
+      alert("Please select a specific clinic before adding a service.");
+      return;
+    }
+
     const { error } = await supabase.from("services").insert([
       {
         name: serviceName,
         price: parsedPrice,
+        clinic_id: selectedClinicId,
       },
     ]);
 
@@ -404,11 +433,17 @@ export default function BackendPage() {
       return;
     }
 
+    if (selectedClinicId === "all") {
+      alert("Please select a specific clinic before adding a receptionist.");
+      return;
+    }
+
     const { error } = await supabase.from("receptionist").insert([
       {
         name: receptionistName,
         shift: receptionistShift,
         pin: receptionistPin,
+        clinic_id: selectedClinicId,
       },
     ]);
 
@@ -434,9 +469,10 @@ export default function BackendPage() {
       return;
     }
 
-    const updatePayload: { name: string; shift: string; pin?: string } = {
+    const updatePayload: { name: string; shift: string; pin?: string; clinic_id?: string } = {
       name: editingReceptionistName,
       shift: editingReceptionistShift,
+      clinic_id: editingReceptionistClinicId || undefined,
     };
 
     if (editingReceptionistPin) {
@@ -457,6 +493,7 @@ export default function BackendPage() {
     setEditingReceptionistName("");
     setEditingReceptionistShift("");
     setEditingReceptionistPin("");
+    setEditingReceptionistClinicId("");
     loadAll();
   }
 
@@ -521,6 +558,24 @@ export default function BackendPage() {
       title="Backend"
       description="One screen for clinic master data: patients, doctors, services, and receptionists."
     >
+      <div className="mb-5 flex flex-wrap items-center gap-3">
+        <span className="text-sm font-semibold text-slate-700">Viewing clinic:</span>
+        <select
+          value={selectedClinicId}
+          onChange={(e) => setSelectedClinicId(e.target.value)}
+          className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+        >
+          <option value="all">All Clinics</option>
+          {clinics.map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
+        {selectedClinicId !== "all" && (
+          <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700">
+            {clinics.find(c => c.id === selectedClinicId)?.room}
+          </span>
+        )}
+      </div>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         {recordSummary.map((item) => (
           <div key={item.label} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -774,7 +829,7 @@ export default function BackendPage() {
           </button>
 
           <div className="mt-4 space-y-2">
-            {doctors.map((doctor) => (
+            {displayedDoctors.map((doctor) => (
               <div key={doctor.id} className="rounded-2xl border border-slate-200 p-3">
                 {editingDoctorId === doctor.id ? (
                   <div className="space-y-2">
@@ -859,7 +914,7 @@ export default function BackendPage() {
           </button>
 
           <div className="mt-4 space-y-2">
-            {services.map((service) => (
+            {displayedServices.map((service) => (
               <div key={service.id} className="rounded-2xl border border-slate-200 p-3">
                 {editingServiceId === service.id ? (
                   <div className="space-y-2">
@@ -957,7 +1012,7 @@ export default function BackendPage() {
           </button>
 
           <div className="mt-4 space-y-2">
-            {receptionists.map((person) => (
+            {displayedReceptionists.map((person) => (
               <div key={person.id} className="rounded-2xl border border-slate-200 p-3">
                 {editingReceptionistId === person.id ? (
                   <div className="space-y-2">
@@ -974,6 +1029,16 @@ export default function BackendPage() {
                       <option value="">Select shift</option>
                       <option value="Morning">Morning</option>
                       <option value="Evening">Evening</option>
+                    </select>
+                    <select
+                      value={editingReceptionistClinicId}
+                      onChange={(e) => setEditingReceptionistClinicId(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    >
+                      <option value="">Assign Clinic</option>
+                      {clinics.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
                     </select>
                     <input
                       type="password"
@@ -994,6 +1059,7 @@ export default function BackendPage() {
                         onClick={() => {
                           setEditingReceptionistId("");
                           setEditingReceptionistPin("");
+                          setEditingReceptionistClinicId("");
                         }}
                         className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600"
                       >
@@ -1014,6 +1080,7 @@ export default function BackendPage() {
                           setEditingReceptionistName(person.name || "");
                           setEditingReceptionistShift(person.shift || "");
                           setEditingReceptionistPin("");
+                          setEditingReceptionistClinicId(person.clinic_id || "");
                         }}
                         className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600"
                       >

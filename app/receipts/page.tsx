@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
+import { Clinic } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara", "Mixed"];
@@ -60,6 +61,8 @@ export default function ReceiptsPage() {
   const [doctors, setDoctors] = useState<any[]>([]);
   const [receptionists, setReceptionists] = useState<any[]>([]);
   const [services, setServices] = useState<any[]>([]);
+  const [clinics, setClinics] = useState<Clinic[]>([]);
+  const [activeClinic, setActiveClinic] = useState<Clinic | null>(null);
 
   const [patientId, setPatientId] = useState("");
   const [patientName, setPatientName] = useState("");
@@ -151,12 +154,27 @@ export default function ReceiptsPage() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!receptionistId || clinics.length === 0) return;
+    const savedSession = localStorage.getItem(POS_REGISTER_SESSION_KEY);
+    if (!savedSession) return;
+    try {
+      const parsed = JSON.parse(savedSession);
+      if (!parsed?.clinicId) return;
+      const clinic = clinics.find((c) => c.id === parsed.clinicId);
+      if (clinic) setActiveClinic(clinic);
+    } catch {
+      // ignore
+    }
+  }, [receptionistId, clinics]);
+
   async function loadData() {
-    const [patientResult, doctorResult, receptionistResult, serviceResult] = await Promise.allSettled([
+    const [patientResult, doctorResult, receptionistResult, serviceResult, clinicResult] = await Promise.allSettled([
       supabase.from("patients").select("*"),
       supabase.from("doctors").select("*"),
       supabase.from("receptionist").select("*"),
       supabase.from("services").select("*"),
+      supabase.from("clinics").select("*"),
     ]);
 
     if (patientResult.status === "fulfilled") {
@@ -173,6 +191,10 @@ export default function ReceiptsPage() {
 
     if (serviceResult.status === "fulfilled") {
       setServices((serviceResult.value.data || []) as any[]);
+    }
+
+    if (clinicResult.status === "fulfilled") {
+      setClinics((clinicResult.value.data || []) as Clinic[]);
     }
   }
 
@@ -201,9 +223,19 @@ export default function ReceiptsPage() {
   const vat = 0;
   const total = subtotal;
 
+  const clinicServices = useMemo(() => {
+    if (!activeClinic) return [];
+    return services.filter((s) => s.clinic_id === activeClinic.id);
+  }, [services, activeClinic]);
+
+  const clinicDoctors = useMemo(() => {
+    if (!activeClinic) return [];
+    return doctors.filter((d) => d.clinic_id === activeClinic.id);
+  }, [doctors, activeClinic]);
+
   const filteredServices = useMemo(() => {
     const query = serviceSearch.trim().toLowerCase();
-    const filtered = services.filter((service) => {
+    const filtered = clinicServices.filter((service) => {
       const name = String(service.name || "");
       const inCategory = matchesServiceCategory(name, serviceCategory);
       const inSearch = !query || name.toLowerCase().includes(query);
@@ -224,13 +256,13 @@ export default function ReceiptsPage() {
       }
       return aName.localeCompare(bName);
     });
-  }, [services, serviceCategory, serviceSearch]);
+  }, [clinicServices, serviceCategory, serviceSearch]);
 
   const recentServices = useMemo(() => {
     return recentServiceIds
-      .map((serviceId) => services.find((service) => String(service.id) === serviceId))
+      .map((serviceId) => clinicServices.find((service) => String(service.id) === serviceId))
       .filter(Boolean);
-  }, [recentServiceIds, services]);
+  }, [recentServiceIds, clinicServices]);
 
   function handlePatientNameChange(e: string) {
     setPatientName(e);
@@ -307,6 +339,12 @@ export default function ReceiptsPage() {
       return;
     }
 
+    const clinicForReceptionist = clinics.find((c) => c.id === selectedReceptionist.clinic_id);
+    if (!clinicForReceptionist) {
+      alert("This receptionist is not assigned to a clinic. Please assign one in the Backend > Receptionists section.");
+      return;
+    }
+
     const parsedOpeningCash = Number(openingCashInput);
     if (!Number.isFinite(parsedOpeningCash) || parsedOpeningCash < 0) {
       alert("Please enter a valid opening cash amount.");
@@ -339,6 +377,7 @@ export default function ReceiptsPage() {
 
     const session = {
       receptionistId: loginReceptionistId,
+      clinicId: clinicForReceptionist.id,
       openingCash: parsedOpeningCash,
       openedAt,
       registerSessionId: createdRegisterSessionId,
@@ -350,6 +389,7 @@ export default function ReceiptsPage() {
     setOpeningCash(parsedOpeningCash);
     setRegisterOpenedAt(openedAt);
     setRegisterSessionId(createdRegisterSessionId);
+    setActiveClinic(clinicForReceptionist);
     setIsPosUnlocked(true);
     setPinInput("");
     setOpeningCashInput("");
@@ -390,6 +430,7 @@ export default function ReceiptsPage() {
 
     localStorage.removeItem(POS_REGISTER_SESSION_KEY);
     setIsPosUnlocked(false);
+    setActiveClinic(null);
     setShowCloseRegisterModal(false);
     setClosingCashInput("");
     setOpeningCash(null);
@@ -1354,7 +1395,15 @@ export default function ReceiptsPage() {
 </html>`;
   }
 
-  function buildThermalReceiptHtml(logoPath: string, title: string) {
+  function buildThermalReceiptHtml(title: string) {
+    const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo3.png";
+    const clinicDisplayName = activeClinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
+    const clinicAddress = activeClinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
+    const clinicRoom = activeClinic?.room ? `2nd Floor, Room ${activeClinic.room}` : "";
+    const clinicTrn = activeClinic?.trn || "";
+    const clinicPhone = activeClinic?.phone || "";
+    const clinicWhatsapp = activeClinic?.whatsapp || "";
+    const isSkinAndSmile = !activeClinic || activeClinic.logo !== "altamuze";
     const now = new Date();
     const serial = String(now.getTime()).slice(-5);
     const invoiceNo = `INV-${now.getFullYear()}${serial}`;
@@ -1464,14 +1513,12 @@ export default function ReceiptsPage() {
 
         <div class="double">TAX INVOICE</div>
 
-        <div class="clinic-name">SKIN &amp; SMILE<br/>DENTAL CLINIC</div>
+        <div class="clinic-name">${clinicDisplayName}</div>
 
         <div class="address">
-          <div>Al Satwa, Dubai, UAE</div>
-          <div>Same Building of Almaya Supermarket</div>
-          <div>Near Satwa Bus Station</div>
-          <div>2nd Floor, Room 207</div>
-          <div style="margin-top:2px;font-weight:700;">TRN: 100495728600001</div>
+          ${clinicAddress.split("\n").map((line: string) => `<div>${line}</div>`).join("")}
+          ${clinicRoom ? `<div>${clinicRoom}</div>` : ""}
+          ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
         </div>
 
         <div class="hr"></div>
@@ -1508,14 +1555,16 @@ export default function ReceiptsPage() {
 
         <div class="footer-center">VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه</div>
         <div class="footer-center">Thank you for visiting us / شكراً لزيارتك لنا</div>
+        ${isSkinAndSmile ? `
         <div class="footer-center" style="margin-top:6px;">Follow us:</div>
         <div class="footer-center">Instagram: @skinandsmiledentalclinic</div>
         <div class="footer-center">TikTok: @skinandsmile</div>
+        ` : ""}
 
         <div class="hr"></div>
 
-        <div class="row"><span>For appointments - Number</span><span>: 04 272 5458</span></div>
-        <div class="row"><span>WhatsApp</span><span>: 056 423 3443</span></div>
+        ${clinicPhone ? `<div class="row"><span>For appointments - Number</span><span>: ${clinicPhone}</span></div>` : ""}
+        ${clinicWhatsapp ? `<div class="row"><span>WhatsApp</span><span>: ${clinicWhatsapp}</span></div>` : ""}
 
         <div class="hr"></div>
 
@@ -1525,7 +1574,7 @@ export default function ReceiptsPage() {
   }
 
   function printReceipt() {
-    const receiptHtml = buildThermalReceiptHtml("/images/logo3.png", "Receipt");
+    const receiptHtml = buildThermalReceiptHtml("Receipt");
 
     function openReceiptWindow(autoPrint: boolean) {
       const w = window.open("", "_blank", "width=400,height=600");
@@ -1553,7 +1602,7 @@ export default function ReceiptsPage() {
   }
 
   function previewReceipt() {
-    const receiptHtml = buildThermalReceiptHtml("/images/logo3.png", "Receipt Preview");
+    const receiptHtml = buildThermalReceiptHtml("Receipt Preview");
 
     setReceiptPreviewHtml(receiptHtml);
     setShowReceiptPreview(true);
@@ -1640,7 +1689,10 @@ export default function ReceiptsPage() {
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-700">Register Open</p>
-                  <p className="mt-1 text-sm text-slate-700">
+                  <p className="mt-1 text-sm font-semibold text-slate-800">
+                    {activeClinic?.name || ""}
+                  </p>
+                  <p className="mt-0.5 text-sm text-slate-700">
                     Receptionist: {receptionists.find((person) => person.id === receptionistId)?.name || "-"}
                   </p>
                   <p className="mt-1 text-sm text-slate-700">Opening Cash: AED {Number(openingCash || 0).toFixed(2)}</p>
@@ -1786,7 +1838,7 @@ export default function ReceiptsPage() {
                   className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
                 >
                   <option value="">No doctor / therapist</option>
-                  {doctors.map((doctor) => (
+                  {clinicDoctors.map((doctor) => (
                     <option key={doctor.id} value={doctor.id}>
                       {doctor.name}
                     </option>

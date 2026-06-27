@@ -1,3 +1,14 @@
+export type Clinic = {
+  id: string;
+  name: string;
+  room: string | null;
+  address: string | null;
+  phone: string | null;
+  whatsapp: string | null;
+  trn: string | null;
+  logo: string | null;
+};
+
 export type Patient = {
   id: string;
   name: string;
@@ -15,12 +26,14 @@ export type Doctor = {
   id: string;
   name: string;
   specialty: string;
+  clinic_id?: string | null;
 };
 
 export type Service = {
   id: string;
   name: string;
   price: number;
+  clinic_id?: string | null;
 };
 
 export type Receptionist = {
@@ -28,6 +41,7 @@ export type Receptionist = {
   name: string;
   shift: string;
   pin?: string | null;
+  clinic_id?: string | null;
 };
 
 export type CashRegisterSession = {
