@@ -8,6 +8,7 @@ const navigation = [
   { href: "/receipt-history", label: "Receipt History" },
   { href: "/treatment-history", label: "Treatment History" },
   { href: "/receipts", label: "POS" },
+  { href: "/reports", label: "Reports" },
 ];
 
 const dailyQuotes = [
