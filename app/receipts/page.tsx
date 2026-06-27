@@ -736,7 +736,7 @@ export default function ReceiptsPage() {
     }
 
     setCurrentReceipt(receiptData);
-    return true;
+    return receiptData;
   }
 
   function generateInvoiceHtml() {
@@ -1424,7 +1424,7 @@ export default function ReceiptsPage() {
 </html>`;
   }
 
-  function buildThermalReceiptHtml(title: string) {
+  function buildThermalReceiptHtml(title: string, savedReceipt?: any) {
     const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo3.png";
     const clinicDisplayName = activeClinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
     const clinicAddress = activeClinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
@@ -1434,8 +1434,9 @@ export default function ReceiptsPage() {
     const clinicWhatsapp = activeClinic?.whatsapp || "";
     const isSkinAndSmile = !activeClinic || activeClinic.logo !== "altamuze";
     const now = new Date();
-    const invoiceNo = currentReceipt?.receipt_number
-      ? `#${String(currentReceipt.receipt_number).padStart(5, "0")}`
+    const receiptForDisplay = savedReceipt ?? currentReceipt;
+    const invoiceNo = receiptForDisplay?.receipt_number
+      ? `#${String(receiptForDisplay.receipt_number).padStart(5, "0")}`
       : "DRAFT";
     const dateValue = now.toLocaleDateString("en-GB");
     const timeValue = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
@@ -1605,8 +1606,8 @@ export default function ReceiptsPage() {
     </html>`;
   }
 
-  function printReceipt() {
-    const receiptHtml = buildThermalReceiptHtml("Receipt");
+  function printReceipt(savedReceipt?: any) {
+    const receiptHtml = buildThermalReceiptHtml("Receipt", savedReceipt);
 
     function openReceiptWindow(autoPrint: boolean) {
       const w = window.open("", "_blank", "width=400,height=600");
@@ -2156,12 +2157,33 @@ export default function ReceiptsPage() {
                   </p>
                   <div className="grid gap-3">
                     <button
-                      onClick={() => {
-                        printReceipt();
+                      onClick={async () => {
+                        const savedReceipt = await confirmPaymentAndSave();
+                        if (!savedReceipt) return;
+                        printReceipt(savedReceipt);
+                        setShowPrintModal(false);
+                        setPatientId("");
+                        setPatientName("");
+                        setPatientPhoneInput("");
+                        setPatientEmailInput("");
+                        setPatientDobInput("");
+                        setPatientSexInput("");
+                        setPatientEmiratesIdInput("");
+                        setPatientPassportInput("");
+                        setSelectedPatientInfo(null);
+                        setTransactionPatientId("");
+                        setDoctorId("");
+                        setSelectedPaymentMethod("");
+                        setNotes("");
+                        setSelectedServices([]);
+                        setFilteredPatients([]);
+                        setShowPatientSuggestions(false);
+                        router.refresh();
                       }}
                       className="inline-flex items-center justify-center rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400"
+                      disabled={isSavingReceipt}
                     >
-                      Print Receipt
+                      {isSavingReceipt ? "Saving..." : "Print Receipt"}
                     </button>
                     <button
                       onClick={previewReceipt}
