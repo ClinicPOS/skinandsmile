@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 
@@ -19,6 +19,8 @@ export default function RefundsPage() {
   const [refundReason, setRefundReason] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [refundMessage, setRefundMessage] = useState("");
+  const [lastRefund, setLastRefund] = useState<any | null>(null);
+  const [refundedItems, setRefundedItems] = useState<any[]>([]);
 
   async function handleUnlock() {
     if (pinInput === BOSS_PIN) {
@@ -82,7 +84,6 @@ export default function RefundsPage() {
       const itemsToRefund = receiptItems.filter((item) => checkedItems.has(item.id));
       const totalRefund = itemsToRefund.reduce((sum, item) => sum + Number(item.total || item.price || 0), 0);
 
-      // Create refund record
       const { data: refundData, error: refundError } = await supabase
         .from("refunds")
         .insert([
@@ -103,7 +104,6 @@ export default function RefundsPage() {
         return;
       }
 
-      // Create refund items
       const refundItems = itemsToRefund.map((item) => ({
         refund_id: refundData.id,
         receipt_item_id: item.id,
@@ -120,6 +120,8 @@ export default function RefundsPage() {
       }
 
       setRefundMessage(`✓ Refund processed for AED ${totalRefund.toFixed(2)}`);
+      setLastRefund(refundData);
+      setRefundedItems(itemsToRefund);
       setSelectedReceipt(null);
       setCheckedItems(new Set());
       setRefundReason("");
@@ -130,6 +132,117 @@ export default function RefundsPage() {
     }
 
     setIsProcessing(false);
+  }
+
+  function buildRefundReceiptHtml(): string {
+    if (!lastRefund) return "";
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-GB");
+    const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+    const totalRefund = lastRefund.total_amount || 0;
+    const itemsHtml = refundedItems
+      .map(
+        (item) => `
+          <div class="row item-row">
+            <span class="item-name">${item.services?.name || "Unknown"}</span>
+            <span class="amount">-AED ${Number(item.total || item.price).toFixed(2)}</span>
+          </div>`
+      )
+      .join("");
+
+    return `<!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>Refund Receipt</title>
+        <style>
+          * { box-sizing: border-box; }
+          body {
+            font-family: Arial, Helvetica, sans-serif;
+            width: 72mm;
+            margin: 0;
+            padding: 2mm;
+            font-size: 10px;
+            line-height: 1.25;
+            color: #000;
+            background: #fff;
+          }
+          .center { text-align: center; }
+          .hr { border-top: 1px dashed #000; margin: 5px 0; }
+          .double {
+            border-top: 2px solid #000;
+            border-bottom: 2px solid #000;
+            padding: 3px 0;
+            margin: 5px 0;
+            text-align: center;
+            font-weight: 700;
+            color: #c41e3a;
+          }
+          .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
+          .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 6px;
+            margin: 1px 0;
+          }
+          .item-row { margin: 2px 0; }
+          .item-name { flex: 1; min-width: 0; }
+          .amount { text-align: right; white-space: nowrap; color: #c41e3a; font-weight: 700; }
+          .footer-center { text-align: center; margin-top: 4px; }
+          @media print {
+            @page { size: 80mm auto; margin: 0; }
+            body { width: 72mm; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="double" style="color: #c41e3a;">REFUND RECEIPT</div>
+
+        <div class="clinic-name">REFUND AUTHORIZATION</div>
+
+        <div class="hr"></div>
+
+        <div class="row"><span>Date / التاريخ</span><span>: ${dateStr}</span></div>
+        <div class="row"><span>Time / الوقت</span><span>: ${timeStr}</span></div>
+        <div class="row"><span>Original Receipt</span><span>: ${String(lastRefund.receipt_id).slice(0, 8)}...</span></div>
+
+        <div class="hr"></div>
+
+        <div style="text-align: center; font-weight: 700; margin: 3px 0; color: #c41e3a;">Services Refunded</div>
+        <div class="hr" style="margin-top: 2px;"></div>
+        ${itemsHtml}
+
+        <div class="hr"></div>
+
+        <div class="row" style="font-weight: 700; color: #c41e3a; font-size: 12px;"><span>REFUND TOTAL</span><span>-AED ${totalRefund.toFixed(2)}</span></div>
+
+        <div class="hr"></div>
+
+        <div class="row"><span>Reason / السبب</span><span style="text-align: right; font-size: 9px;">: ${lastRefund.reason || "-"}</span></div>
+        <div class="row"><span>Payment Method</span><span>: ${lastRefund.payment_method || "-"}</span></div>
+
+        <div class="hr"></div>
+
+        <div class="footer-center" style="font-size: 9px; margin-top: 6px;">Refund Processed by: Boss</div>
+        <div class="footer-center" style="font-size: 8px;">Authorization required for refunds</div>
+        <div class="footer-center" style="font-size: 8px; margin-top: 4px;">Thank you</div>
+      </body>
+    </html>`;
+  }
+
+  function printRefund() {
+    const html = buildRefundReceiptHtml();
+    if (!html) return;
+    const w = window.open("", "_blank", "width=400,height=600");
+    if (!w) {
+      alert("Please allow popups to print the receipt.");
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 500);
   }
 
   if (!isUnlocked) {
@@ -251,8 +364,8 @@ export default function RefundsPage() {
             </div>
 
             {checkedItems.size > 0 && (
-              <div className="mt-4 rounded-2xl border border-teal-200 bg-teal-50 p-3">
-                <p className="text-sm font-semibold text-teal-900">
+              <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3">
+                <p className="text-sm font-semibold text-red-900">
                   Total to Refund: AED {receiptItems
                     .filter((item) => checkedItems.has(item.id))
                     .reduce((sum, item) => sum + Number(item.total || item.price || 0), 0)
@@ -261,7 +374,6 @@ export default function RefundsPage() {
               </div>
             )}
 
-            {/* Reason input */}
             <div className="mt-4">
               <label className="block text-sm font-semibold text-slate-700">Reason</label>
               <input
@@ -273,7 +385,6 @@ export default function RefundsPage() {
               />
             </div>
 
-            {/* Process button */}
             <button
               onClick={processRefund}
               disabled={isProcessing || checkedItems.size === 0}
@@ -287,6 +398,22 @@ export default function RefundsPage() {
                 {refundMessage}
               </p>
             )}
+          </div>
+        )}
+
+        {/* Refund success with print button */}
+        {lastRefund && (
+          <div className="rounded-3xl border border-green-200 bg-green-50 p-5 shadow-sm">
+            <p className="text-sm font-semibold text-green-900">✓ Refund Processed</p>
+            <p className="mt-2 text-sm text-green-800">
+              Amount: AED {lastRefund.total_amount.toFixed(2)}
+            </p>
+            <button
+              onClick={printRefund}
+              className="mt-3 w-full rounded-2xl bg-green-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-green-500"
+            >
+              Print Refund Receipt
+            </button>
           </div>
         )}
       </div>
