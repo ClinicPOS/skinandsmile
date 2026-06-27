@@ -127,6 +127,7 @@ export default function ReceiptsPage() {
   const [isLoadingCashSummary, setIsLoadingCashSummary] = useState(false);
   const [showReceiptPreview, setShowReceiptPreview] = useState(false);
   const [receiptPreviewHtml, setReceiptPreviewHtml] = useState("");
+  const [currentReceipt, setCurrentReceipt] = useState<any | null>(null);
   const receiptPreviewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const router = useRouter();
 
@@ -674,6 +675,15 @@ export default function ReceiptsPage() {
       }
     }
 
+    // Generate receipt number
+    const { data: maxReceipt } = await supabase
+      .from("receipts")
+      .select("receipt_number")
+      .order("receipt_number", { ascending: false })
+      .limit(1);
+    const nextNumber = ((maxReceipt?.[0]?.receipt_number as number) || 0) + 1;
+    const receiptNumber = String(nextNumber).padStart(5, "0");
+
     const { data: receiptData, error: receiptError } = await supabase
       .from("receipts")
       .insert([
@@ -681,6 +691,7 @@ export default function ReceiptsPage() {
           patient_id: transactionPatientId,
           doctor_id: doctorId,
           receptionist_id: activeReceptionistId,
+          receipt_number: nextNumber,
           subtotal: subtotal,
           vat: vat,
           total: total,
@@ -716,6 +727,7 @@ export default function ReceiptsPage() {
       return false;
     }
 
+    setCurrentReceipt(receiptData);
     return true;
   }
 
@@ -1414,8 +1426,9 @@ export default function ReceiptsPage() {
     const clinicWhatsapp = activeClinic?.whatsapp || "";
     const isSkinAndSmile = !activeClinic || activeClinic.logo !== "altamuze";
     const now = new Date();
-    const serial = String(now.getTime()).slice(-5);
-    const invoiceNo = `INV-${now.getFullYear()}${serial}`;
+    const invoiceNo = currentReceipt?.receipt_number
+      ? `#${String(currentReceipt.receipt_number).padStart(5, "0")}`
+      : "DRAFT";
     const dateValue = now.toLocaleDateString("en-GB");
     const timeValue = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
 
