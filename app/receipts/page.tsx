@@ -697,7 +697,7 @@ export default function ReceiptsPage() {
       .insert([
         {
           patient_id: transactionPatientId,
-          doctor_id: doctorId,
+          doctor_id: doctorId || null,
           receptionist_id: activeReceptionistId,
           receipt_number: nextNumber,
           subtotal: subtotal,
