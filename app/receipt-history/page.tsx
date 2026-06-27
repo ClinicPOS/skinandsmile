@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
@@ -6,6 +6,7 @@ import { supabase } from "../../lib/supabase";
 
 type Receipt = {
   id: string;
+  receipt_number?: number | null;
   patient_id: string;
   doctor_id: string;
   receptionist_id: string;
@@ -26,6 +27,18 @@ type Patient = {
   id: string;
   name: string;
   phone?: string | null;
+  patient_number?: number | null;
+};
+
+type Clinic = {
+  id: string;
+  name: string;
+  address?: string | null;
+  room?: string | null;
+  trn?: string | null;
+  phone?: string | null;
+  whatsapp?: string | null;
+  logo?: string | null;
 };
 
 type ReceiptItem = {
@@ -43,6 +56,7 @@ export default function ReceiptHistoryPage() {
   const [receptionists, setReceptionists] = useState<LookupItem[]>([]);
   const [services, setServices] = useState<LookupItem[]>([]);
   const [receiptItems, setReceiptItems] = useState<ReceiptItem[]>([]);
+  const [clinics, setClinics] = useState<Clinic[]>([]);
   const [selectedReceiptId, setSelectedReceiptId] = useState<string>("");
 
   useEffect(() => {
@@ -50,21 +64,23 @@ export default function ReceiptHistoryPage() {
   }, []);
 
   async function loadHistory() {
-    const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult] = await Promise.all([
+    const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult, clinicResult] = await Promise.all([
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
-      supabase.from("patients").select("id, name, phone").order("name", { ascending: true }),
+      supabase.from("patients").select("id, name, phone, patient_number").order("name", { ascending: true }),
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
       supabase.from("receptionist").select("id, name").order("name", { ascending: true }),
       supabase.from("services").select("id, name").order("name", { ascending: true }),
       supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total"),
+      supabase.from("clinics").select("*"),
     ]);
 
     setReceipts((receiptResult.data as Receipt[]) || []);
-    setPatients((patientResult.data as LookupItem[]) || []);
+    setPatients((patientResult.data as Patient[]) || []);
     setDoctors((doctorResult.data as LookupItem[]) || []);
     setReceptionists((receptionistResult.data as LookupItem[]) || []);
     setServices((serviceResult.data as LookupItem[]) || []);
     setReceiptItems((itemResult.data as ReceiptItem[]) || []);
+    setClinics((clinicResult.data as Clinic[]) || []);
 
     if (!selectedReceiptId && receiptResult.data?.length) {
       setSelectedReceiptId(receiptResult.data[0].id);
@@ -97,33 +113,46 @@ export default function ReceiptHistoryPage() {
   }
 
   function printSelectedReceipt() {
-    if (!selectedReceipt) {
-      return;
-    }
+    if (!selectedReceipt) return;
 
-    const clinicName = "SKIN & SMILE DENTAL CLINIC";
-    const clinicNameAR = "Ø¹ÙŠØ§Ø¯Ø© Ø³ÙƒÙ† Ø¢Ù†Ø¯ Ø³Ù…Ø§ÙŠÙ„ Ù„Ø·Ø¨ Ø§Ù„Ø£Ø³Ù†Ø§Ù†";
-    const trn = "123456789";
-    const phone = "+971 XX XXX XXXX";
-    const logoPath = "/images/logo2.png";
-    const dateStr = selectedReceipt.created_at
-      ? new Date(selectedReceipt.created_at).toLocaleString()
-      : new Date().toLocaleString();
+    const clinic = clinics[0];
+    const logoPath = clinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo3.png";
+    const clinicDisplayName = clinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
+    const clinicAddress = clinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
+    const clinicRoom = clinic?.room ? `2nd Floor, Room ${clinic.room}` : "";
+    const clinicTrn = clinic?.trn || "";
+    const clinicPhone = clinic?.phone || "";
+    const clinicWhatsapp = clinic?.whatsapp || "";
+    const isSkinAndSmile = !clinic || clinic.logo !== "altamuze";
 
-    const patientNameForReceipt = getPatientName(selectedReceipt.patient_id);
+    const createdAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
+    const invoiceNo = selectedReceipt.receipt_number
+      ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
+      : "-";
+    const dateValue = createdAt.toLocaleDateString("en-GB");
+    const timeValue = createdAt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+
+    const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
+    const patientNameForReceipt = patient?.name || "-";
+    const patientMobileForReceipt = patient?.phone || "-";
+    const patientIdForReceipt = patient?.patient_number
+      ? `#${String(patient.patient_number).padStart(5, "0")}`
+      : "-";
     const doctorNameForReceipt = doctors.find((d) => d.id === selectedReceipt.doctor_id)?.name || "-";
-    const receptionistNameForReceipt =
-      receptionists.find((person) => person.id === selectedReceipt.receptionist_id)?.name || "-";
+    const cashierName = receptionists.find((r) => r.id === selectedReceipt.receptionist_id)?.name || "Reception";
 
     const itemsHtml = selectedReceiptLineItems
-      .map(
-        (item) => `
-          <div style="display:flex;justify-content:space-between;margin:6px 0;">
-            <div style="max-width:60%;font-size:13px;">${item.name} x${item.quantity}</div>
-            <div style="min-width:80px;text-align:right;font-size:13px;">AED ${Number(item.total).toFixed(2)}</div>
-          </div>`
-      )
+      .map((item) => `
+        <div class="row item-row">
+          <span class="item-name">${item.name}</span>
+          <span class="amount">AED ${Number(item.total).toFixed(2)}</span>
+        </div>`)
       .join("");
+
+    const paymentSection = `
+      <div class="row"><span>Payment Method / \u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u062f\u0641\u0639</span><span>: ${(selectedReceipt.payment_method || "-").toUpperCase()}</span></div>
+      <div class="row"><span>Amount Paid / \u0627\u0644\u0645\u0628\u0644\u063a \u0627\u0644\u0645\u062f\u0641\u0648\u0639</span><span>: AED ${Number(selectedReceipt.total).toFixed(2)}</span></div>
+    `;
 
     const receiptHtml = `<!doctype html>
     <html>
@@ -131,64 +160,71 @@ export default function ReceiptHistoryPage() {
         <meta charset="utf-8" />
         <title>Receipt</title>
         <style>
-          body{font-family: Arial, Helvetica, sans-serif; width:72mm; margin:0 auto; padding:6px; color:#000}
-          .center{text-align:center}
-          .separator{border-top:1px dashed #000;margin:8px 0}
-          .total{font-weight:700; margin-top:8px; font-size:15px}
-          .logo-wrap{display:flex;justify-content:center;margin:0 0 6px 0}
-          .logo{max-width:50mm;max-height:28mm;object-fit:contain}
-          @media print{
-            body{width:72mm}
-            @page{size:80mm auto;margin:2mm}
-          }
+          * { box-sizing: border-box; }
+          body { font-family: Arial, Helvetica, sans-serif; width: 72mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.25; color: #000; background: #fff; overflow-x: hidden; }
+          .center { text-align: center; }
+          .hr { border-top: 1px dashed #000; margin: 5px 0; }
+          .double { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 3px 0; margin: 5px 0; text-align: center; font-weight: 700; }
+          .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
+          .logo { max-width: 35mm; max-height: 20mm; object-fit: contain; }
+          .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
+          .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
+          .row { display: flex; justify-content: space-between; gap: 6px; margin: 1px 0; }
+          .row span:first-child { min-width: 30mm; }
+          .row span:last-child { text-align: right; flex: 1; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+          .head-row { display: flex; justify-content: space-between; font-weight: 700; }
+          .item-row { margin: 2px 0; }
+          .item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+          .amount { text-align: right; white-space: nowrap; }
+          .footer-center { text-align: center; margin-top: 4px; }
+          @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; } }
         </style>
       </head>
       <body>
-        <div class="center">
-          <div class="logo-wrap" id="logo-wrap">
-            <img
-              src="${logoPath}"
-              alt="Clinic logo"
-              class="logo"
-              onerror="document.getElementById('logo-wrap').style.display='none'"
-            />
-          </div>
-          <div style="font-size:18px;font-weight:700">${clinicName}</div>
-          <div style="font-size:14px;margin-top:4px">${clinicNameAR}</div>
-          <div style="margin-top:8px;font-size:12px">TRN: ${trn}</div>
+        <div class="logo-wrap" id="logo-wrap">
+          <img src="${logoPath}" alt="Clinic logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'" />
         </div>
-
-        <div style="height:10px"></div>
-
-        <div style="font-size:13px;margin-bottom:6px">
-          <div><strong>Date:</strong> ${dateStr}</div>
-          <div style="margin-top:6px"><strong>Receipt #:</strong> ${selectedReceipt.id.slice(0, 8)}</div>
-          <div style="margin-top:6px"><strong>Patient / Ø§Ù„Ù…Ø±ÙŠØ¶:</strong> ${patientNameForReceipt}</div>
-          <div style="margin-top:4px"><strong>Doctor / Ø§Ù„Ø·Ø¨ÙŠØ¨:</strong> ${doctorNameForReceipt}</div>
-          <div style="margin-top:4px"><strong>Receptionist / Ø§Ù„Ø§Ø³ØªÙ‚Ø¨Ø§Ù„:</strong> ${receptionistNameForReceipt}</div>
-          <div style="margin-top:4px"><strong>Payment / Ø·Ø±ÙŠÙ‚Ø© Ø§Ù„Ø¯ÙØ¹:</strong> ${selectedReceipt.payment_method || "-"}</div>
+        <div class="double">TAX INVOICE</div>
+        <div class="clinic-name">${clinicDisplayName}</div>
+        <div class="address">
+          ${clinicAddress.split("\n").map((line: string) => `<div>${line}</div>`).join("")}
+          ${clinicRoom ? `<div>${clinicRoom}</div>` : ""}
+          ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
         </div>
-
-        <div class="separator"></div>
-
-        <div>
-          ${itemsHtml}
-        </div>
-
-        <div class="separator"></div>
-
-        <div style="font-size:13px">
-          <div style="display:flex;justify-content:space-between;margin:6px 0"><div>Subtotal / Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹ Ø§Ù„ÙØ±Ø¹ÙŠ</div><div>AED ${Number(selectedReceipt.subtotal || 0).toFixed(2)}</div></div>
-          <div style="display:flex;justify-content:space-between;margin:6px 0"><div>VAT / Ø¶Ø±ÙŠØ¨Ø© Ø§Ù„Ù‚ÙŠÙ…Ø© Ø§Ù„Ù…Ø¶Ø§ÙØ©</div><div>AED ${Number(selectedReceipt.vat || 0).toFixed(2)}</div></div>
-          <div class="total" style="display:flex;justify-content:space-between"><div>Total / Ø§Ù„Ø¥Ø¬Ù…Ø§Ù„ÙŠ</div><div>AED ${Number(selectedReceipt.total || 0).toFixed(2)}</div></div>
-        </div>
-
-        ${selectedReceipt.notes ? `<div class="separator"></div><div style="font-size:12px;margin-top:8px;padding:6px;background:#f5f5f5;border-radius:3px"><strong>Notes:</strong><div style="margin-top:4px">${selectedReceipt.notes}</div></div>` : ""}
-
-        <div style="margin-top:12px;text-align:center;font-size:13px">
-          <div>Thank you for visiting! / Ø´ÙƒØ±Ø§Ù‹ Ù„Ø²ÙŠØ§Ø±ØªÙƒÙ…</div>
-          <div style="margin-top:6px">Phone / Ù‡Ø§ØªÙ: ${phone}</div>
-        </div>
+        <div class="hr"></div>
+        <div class="row"><span>Invoice No / \u0631\u0642\u0645 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629</span><span>: ${invoiceNo}</span></div>
+        <div class="row"><span>Date / \u0627\u0644\u062a\u0627\u0631\u064a\u062e</span><span>: ${dateValue}</span></div>
+        <div class="row"><span>Time / \u0627\u0644\u0648\u0642\u062a</span><span>: ${timeValue}</span></div>
+        <div class="row"><span>Cashier / \u0623\u0645\u064a\u0646 \u0627\u0644\u0635\u0646\u062f\u0648\u0642</span><span>: ${cashierName}</span></div>
+        <div class="row"><span>Doctor / \u0627\u0644\u0637\u0628\u064a\u0628</span><span>: ${doctorNameForReceipt}</span></div>
+        <div class="row"><span>Patient Name / \u0627\u0633\u0645 \u0627\u0644\u0645\u0631\u064a\u0636</span><span>: ${patientNameForReceipt}</span></div>
+        <div class="row"><span>Patient ID / \u0645\u0639\u0631\u0641 \u0627\u0644\u0645\u0631\u064a\u0636</span><span>: ${patientIdForReceipt}</span></div>
+        <div class="row"><span>Mobile / \u0627\u0644\u0647\u0627\u062a\u0641</span><span>: ${patientMobileForReceipt}</span></div>
+        <div class="hr"></div>
+        <div class="head-row"><span>DESCRIPTION / \u0627\u0644\u0648\u0635\u0641</span><span>AMOUNT / \u0627\u0644\u0645\u0628\u0644\u063a</span></div>
+        <div class="hr" style="margin-top:2px;"></div>
+        ${itemsHtml || '<div class="center">No services selected</div>'}
+        <div class="hr"></div>
+        <div class="row"><span>Subtotal / \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0627\u0644\u062c\u0632\u0626\u064a</span><span>AED ${Number(selectedReceipt.subtotal).toFixed(2)}</span></div>
+        <div class="row"><span>VAT / \u0627\u0644\u0636\u0631\u064a\u0628\u0629</span><span>AED ${Number(selectedReceipt.vat).toFixed(2)}</span></div>
+        <div class="hr" style="margin:4px 0;"></div>
+        <div class="row" style="font-weight:700;"><span>TOTAL / \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a</span><span>AED ${Number(selectedReceipt.total).toFixed(2)}</span></div>
+        <div class="hr"></div>
+        ${paymentSection}
+        ${selectedReceipt.notes ? `<div style="margin-top:4px;">Note / \u0645\u0644\u0627\u062d\u0638\u0629: ${selectedReceipt.notes}</div>` : ""}
+        <div class="hr"></div>
+        <div class="footer-center">VAT Included in Above Amount / \u0627\u0644\u0636\u0631\u064a\u0628\u0629 \u0645\u0634\u0645\u0648\u0644\u0629 \u0641\u064a \u0627\u0644\u0645\u0628\u0644\u063a \u0623\u0639\u0644\u0627\u0647</div>
+        <div class="footer-center">Thank you for visiting us / \u0634\u0643\u0631\u0627\u064b \u0644\u0632\u064a\u0627\u0631\u062a\u0643 \u0644\u0646\u0627</div>
+        ${isSkinAndSmile ? `
+        <div class="footer-center" style="margin-top:6px;">Follow us:</div>
+        <div class="footer-center">Instagram: @skinandsmiledentalclinic</div>
+        <div class="footer-center">TikTok: @skinandsmile</div>
+        ` : ""}
+        <div class="hr"></div>
+        ${clinicPhone ? `<div class="row"><span>For appointments - Number</span><span>: ${clinicPhone}</span></div>` : ""}
+        ${clinicWhatsapp ? `<div class="row"><span>WhatsApp</span><span>: ${clinicWhatsapp}</span></div>` : ""}
+        <div class="hr"></div>
+        <div class="double">Thank you for Visiting US!</div>
       </body>
     </html>`;
 
@@ -212,6 +248,12 @@ export default function ReceiptHistoryPage() {
 
   const doctorName = doctors.find((doctor) => doctor.id === selectedReceipt?.doctor_id)?.name || "Unknown doctor";
   const receptionistName = receptionists.find((person) => person.id === selectedReceipt?.receptionist_id)?.name || "Unknown receptionist";
+
+  function formatReceiptNo(receipt: Receipt) {
+    return receipt.receipt_number
+      ? `#${String(receipt.receipt_number).padStart(5, "0")}`
+      : `#${receipt.id.slice(0, 8)}`;
+  }
 
   return (
     <AppFrame
@@ -249,7 +291,7 @@ export default function ReceiptHistoryPage() {
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <p className="text-sm font-semibold text-slate-900">Receipt #{receipt.id.slice(0, 8)}</p>
+                      <p className="text-sm font-semibold text-slate-900">Receipt {formatReceiptNo(receipt)}</p>
                       <p className="mt-1 text-sm text-slate-600">{getPatientName(receipt.patient_id)}</p>
                     </div>
                     <div className="text-right">
@@ -290,7 +332,7 @@ export default function ReceiptHistoryPage() {
                       Printable Thermal Receipt
                     </p>
                     <h2 className="mt-2 text-2xl font-semibold text-slate-900 print:text-black">
-                      Receipt #{selectedReceipt.id.slice(0, 8)}
+                      Receipt {formatReceiptNo(selectedReceipt)}
                     </h2>
                     <p className="mt-1 text-sm text-slate-500">Premium dental clinic format</p>
                   </div>
