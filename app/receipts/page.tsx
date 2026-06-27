@@ -667,7 +667,10 @@ export default function ReceiptsPage() {
       if (patientEmailInput.trim() && !selectedPatientInfo?.email)
         updates.email = patientEmailInput.trim();
       if (Object.keys(updates).length > 0) {
-        await supabase.from("patients").update(updates).eq("id", patientId);
+        const { error: patientUpdateError } = await supabase.from("patients").update(updates).eq("id", patientId);
+        if (patientUpdateError) {
+          console.error("Patient update error", patientUpdateError);
+        }
       }
     }
 
