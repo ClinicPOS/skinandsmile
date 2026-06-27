@@ -9,6 +9,7 @@ const navigation = [
   { href: "/treatment-history", label: "Treatment History" },
   { href: "/receipts", label: "POS" },
   { href: "/reports", label: "Reports" },
+  { href: "/refunds", label: "Refunds" },
 ];
 
 const dailyQuotes = [
