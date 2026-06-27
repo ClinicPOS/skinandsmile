@@ -516,8 +516,8 @@ export default function ReceiptsPage() {
         .insert([
           {
             name: patientName.trim(),
-            phone: patientPhoneInput.trim(),
-            email: patientEmailInput.trim(),
+            phone: patientPhoneInput.trim() || null,
+            email: patientEmailInput.trim() || null,
             date_of_birth: patientDobInput || null,
             sex: patientSexInput || null,
             emirates_id: patientEmiratesIdInput.trim() || null,
