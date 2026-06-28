@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 
@@ -12,6 +12,8 @@ export default function RefundsPage() {
   const [pinError, setPinError] = useState("");
 
   const [receiptSearch, setReceiptSearch] = useState("");
+  const [allPatients, setAllPatients] = useState<any[]>([]);
+  const [patientSuggestions, setPatientSuggestions] = useState<any[]>([]);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [selectedReceipt, setSelectedReceipt] = useState<any | null>(null);
   const [receiptItems, setReceiptItems] = useState<any[]>([]);
@@ -22,6 +24,28 @@ export default function RefundsPage() {
   const [lastRefund, setLastRefund] = useState<any | null>(null);
   const [refundedItems, setRefundedItems] = useState<any[]>([]);
 
+  useEffect(() => {
+    loadPatients();
+  }, []);
+
+  async function loadPatients() {
+    const { data } = await supabase.from("patients").select("id, name, patient_number").order("name");
+    setAllPatients(data || []);
+  }
+
+  function handleSearchChange(value: string) {
+    setReceiptSearch(value);
+    if (value.trim()) {
+      const suggestions = allPatients.filter((p) =>
+        p.name.toLowerCase().includes(value.toLowerCase())
+      ).slice(0, 5);
+      setPatientSuggestions(suggestions);
+    } else {
+      setPatientSuggestions([]);
+      setSearchResults([]);
+    }
+  }
+
   async function handleUnlock() {
     if (pinInput === BOSS_PIN) {
       setIsUnlocked(true);
@@ -31,30 +55,59 @@ export default function RefundsPage() {
     }
   }
 
-  async function searchReceipts() {
-    if (!receiptSearch.trim()) {
+  async function searchReceipts(patientId?: string) {
+    const query = patientId || receiptSearch.trim().toLowerCase();
+    if (!query) {
       setSearchResults([]);
       return;
     }
-    const query = receiptSearch.trim().toLowerCase();
-    const { data } = await supabase.from("receipts").select("*, patients(name), receptionist(name)");
-    if (data) {
-      const filtered = data.filter((r: any) =>
-        String(r.id || "").toLowerCase().includes(query) ||
-        String(r.patients?.name || "").toLowerCase().includes(query)
+
+    const { data: receipts } = await supabase.from("receipts").select("*").order("created_at", { ascending: false });
+
+    if (!receipts) return;
+
+    const patientMap: Record<string, any> = {};
+    for (const p of allPatients) patientMap[p.id] = p;
+
+    const filtered = receipts.filter((r: any) => {
+      const patient = patientMap[r.patient_id];
+      const patientName = patient?.name || "";
+      const receiptNo = patient?.patient_number ? `#${String(patient.patient_number).padStart(5, "0")}` : "";
+      return (
+        patientName.toLowerCase().includes(query) ||
+        receiptNo.toLowerCase().includes(query) ||
+        String(r.id).toLowerCase().includes(query)
       );
-      setSearchResults(filtered.slice(0, 10));
-    }
+    });
+
+    const enriched = filtered.slice(0, 10).map((r: any) => ({
+      ...r,
+      patientName: patientMap[r.patient_id]?.name || "Unknown",
+      patientNumber: patientMap[r.patient_id]?.patient_number,
+    }));
+
+    setSearchResults(enriched);
+    setPatientSuggestions([]);
   }
 
   async function selectReceipt(receipt: any) {
     setSelectedReceipt(receipt);
     setCheckedItems(new Set());
-    const { data: items } = await supabase
-      .from("receipt_items")
-      .select("*, services(name)")
-      .eq("receipt_id", receipt.id);
-    setReceiptItems(items || []);
+
+    const [{ data: items }, { data: services }] = await Promise.all([
+      supabase.from("receipt_items").select("*").eq("receipt_id", receipt.id),
+      supabase.from("services").select("id, name"),
+    ]);
+
+    const serviceMap: Record<string, string> = {};
+    for (const s of services || []) serviceMap[s.id] = s.name;
+
+    const enrichedItems = (items || []).map((item: any) => ({
+      ...item,
+      services: { name: serviceMap[item.service_id] || "Unknown" },
+    }));
+
+    setReceiptItems(enrichedItems);
     setRefundMessage("");
   }
 
@@ -293,16 +346,34 @@ export default function RefundsPage() {
           <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Find Receipt</p>
           <p className="mt-1 text-sm text-slate-600">Search by receipt ID or patient name</p>
           <div className="mt-4 flex gap-2">
-            <input
-              type="text"
-              value={receiptSearch}
-              onChange={(e) => setReceiptSearch(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && searchReceipts()}
-              placeholder="Receipt ID or patient name..."
-              className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
-            />
+            <div className="relative flex-1">
+              <input
+                type="text"
+                value={receiptSearch}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && searchReceipts()}
+                placeholder="Patient name or receipt #..."
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
+              />
+              {patientSuggestions.length > 0 && (
+                <div className="absolute top-full left-0 right-0 z-10 mt-1 rounded-2xl border border-slate-200 bg-white shadow-lg">
+                  {patientSuggestions.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        setReceiptSearch(p.name);
+                        searchReceipts(p.name);
+                      }}
+                      className="w-full px-4 py-2 text-left text-sm hover:bg-teal-50 first:rounded-t-2xl last:rounded-b-2xl"
+                    >
+                      {p.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
-              onClick={searchReceipts}
+              onClick={() => searchReceipts()}
               className="rounded-2xl bg-teal-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-teal-500"
             >
               Search
@@ -323,13 +394,15 @@ export default function RefundsPage() {
                 >
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="font-semibold text-slate-900">{receipt.patients?.name || "Unknown"}</p>
-                      <p className="text-xs text-slate-500">ID: {String(receipt.id).slice(0, 8)}...</p>
+                      <p className="font-semibold text-slate-900">{receipt.patientName}</p>
+                      <p className="text-xs text-slate-500">
+                        {receipt.receipt_number ? `#${String(receipt.receipt_number).padStart(5, "0")}` : `ID: ${String(receipt.id).slice(0, 8)}...`}
+                      </p>
                     </div>
                     <p className="font-semibold text-slate-900">AED {Number(receipt.total).toFixed(2)}</p>
                   </div>
                   <p className="mt-1 text-xs text-slate-500">
-                    {new Date(receipt.created_at).toLocaleString()} · {receipt.receptionist?.name}
+                    {new Date(receipt.created_at).toLocaleString()}
                   </p>
                 </button>
               ))}
