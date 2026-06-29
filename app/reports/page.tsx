@@ -50,6 +50,8 @@ export default function ReportsPage() {
 
   const [dateRange, setDateRange] = useState<DateRange>("today");
   const [isLoading, setIsLoading] = useState(false);
+  const [selectedDay, setSelectedDay] = useState<number | null>(null);
+  const [calendarDate, setCalendarDate] = useState(new Date());
 
   useEffect(() => {
     async function loadMeta() {
@@ -165,6 +167,91 @@ export default function ReportsPage() {
 
   const rangeLabels: Record<DateRange, string> = { today: "Today", week: "This Week", month: "This Month" };
 
+  // ── CALENDAR DATA ──────────────────────────────────────────────────────
+  const calendarStats = useMemo(() => {
+    if (role !== "boss") return null;
+    const year = calendarDate.getFullYear();
+    const month = calendarDate.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const daysInMonth = lastDay.getDate();
+    const startingDayOfWeek = firstDay.getDay();
+
+    const dailyData: Record<number, { revenue: number; patients: Set<string>; count: number }> = {};
+    for (let d = 1; d <= daysInMonth; d++) {
+      dailyData[d] = { revenue: 0, patients: new Set(), count: 0 };
+    }
+
+    for (const receipt of receipts) {
+      const receiptDate = new Date(receipt.created_at || new Date());
+      if (receiptDate.getFullYear() === year && receiptDate.getMonth() === month) {
+        const day = receiptDate.getDate();
+        if (dailyData[day]) {
+          dailyData[day].revenue += Number(receipt.total || 0);
+          if (receipt.patient_id) dailyData[day].patients.add(receipt.patient_id);
+          dailyData[day].count += 1;
+        }
+      }
+    }
+
+    return { year, month, daysInMonth, startingDayOfWeek, dailyData };
+  }, [role, receipts, calendarDate]);
+
+  // ── SELECTED DAY DETAIL VIEW ──────────────────────────────────────────────
+  const selectedDayStats = useMemo(() => {
+    if (!selectedDay || !calendarStats || role !== "boss") return null;
+
+    const selectedDate = new Date(calendarStats.year, calendarStats.month, selectedDay);
+    const nextDate = new Date(selectedDate);
+    nextDate.setDate(nextDate.getDate() + 1);
+
+    const dayReceipts = receipts.filter((r) => {
+      const receiptDate = new Date(r.created_at || new Date());
+      return receiptDate >= selectedDate && receiptDate < nextDate;
+    });
+
+    const totalRevenue = dayReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
+    const totalPatients = new Set(dayReceipts.map((r) => r.patient_id)).size;
+
+    const clinicMap: Record<string, { name: string; revenue: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
+    for (const clinic of clinics) {
+      clinicMap[clinic.id] = { name: clinic.name, revenue: 0, patients: new Set(), paymentMethods: {} };
+    }
+
+    for (const receipt of dayReceipts) {
+      const receptionist = receptionists.find((r) => r.id === receipt.receptionist_id);
+      const clinicId = receptionist?.clinic_id;
+      if (!clinicId || !clinicMap[clinicId]) continue;
+
+      const entry = clinicMap[clinicId];
+      entry.revenue += Number(receipt.total || 0);
+      if (receipt.patient_id) entry.patients.add(receipt.patient_id);
+
+      const cat = getPaymentCategory(receipt.payment_method || "");
+      entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Number(receipt.total || 0);
+    }
+
+    const paymentBreakdown: Record<string, number> = {};
+    for (const r of dayReceipts) {
+      const cat = getPaymentCategory(r.payment_method || "");
+      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
+    }
+
+    const dayReceiptItems = receiptItems.filter((item) => dayReceipts.some((r) => r.id === item.receipt_id));
+    const serviceMap: Record<string, { name: string; count: number; revenue: number }> = {};
+    for (const item of dayReceiptItems) {
+      const name = item.services?.name || services.find((s) => s.id === item.service_id)?.name || "Unknown";
+      if (!serviceMap[item.service_id]) serviceMap[item.service_id] = { name, count: 0, revenue: 0 };
+      serviceMap[item.service_id].count += 1;
+      serviceMap[item.service_id].revenue += Number(item.total || item.price || 0);
+    }
+    const topServices = Object.values(serviceMap)
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 10);
+
+    return { totalRevenue, totalPatients, totalTransactions: dayReceipts.length, clinicMap, paymentBreakdown, topServices, selectedDate };
+  }, [selectedDay, calendarStats, role, receipts, receiptItems, services, clinics, receptionists]);
+
   if (role === null) {
     return (
       <AppFrame title="Reports" description="View financial summaries for your clinic shifts.">
@@ -266,6 +353,161 @@ export default function ReportsPage() {
         {/* ── BOSS VIEW ── */}
         {role === "boss" && bossStats && !isLoading && (
           <div className="space-y-6">
+            {!selectedDay && (
+              <>
+                {/* Calendar */}
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Monthly Overview</h3>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
+                        className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-50"
+                      >
+                        ← Prev
+                      </button>
+                      <span className="px-4 py-1 text-sm font-semibold text-slate-700">
+                        {calendarDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+                      </span>
+                      <button
+                        onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
+                        className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-50"
+                      >
+                        Next →
+                      </button>
+                    </div>
+                  </div>
+
+                  {calendarStats && (
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="grid grid-cols-7 gap-1 mb-2">
+                        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+                          <div key={day} className="text-center text-xs font-semibold text-slate-500 py-2">
+                            {day}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-7 gap-1">
+                        {Array.from({ length: calendarStats.startingDayOfWeek }).map((_, i) => (
+                          <div key={`empty-${i}`} className="aspect-square bg-slate-50 rounded" />
+                        ))}
+                        {Array.from({ length: calendarStats.daysInMonth }).map((_, i) => {
+                          const day = i + 1;
+                          const data = calendarStats.dailyData[day];
+                          return (
+                            <button
+                              key={day}
+                              onClick={() => setSelectedDay(day)}
+                              className="aspect-square rounded border-2 border-slate-200 bg-white p-1 text-left text-xs hover:border-teal-300 hover:bg-teal-50 transition"
+                            >
+                              <div className="font-semibold text-slate-900">{day}</div>
+                              {data.count > 0 && (
+                                <>
+                                  <div className="text-teal-700 font-semibold">AED {data.revenue.toFixed(0)}</div>
+                                  <div className="text-slate-500 text-[10px]">{data.patients.size}P</div>
+                                </>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {selectedDay && selectedDayStats && (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
+                    Daily Breakdown — {selectedDayStats.selectedDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+                  </h3>
+                  <button
+                    onClick={() => setSelectedDay(null)}
+                    className="px-3 py-1 text-sm rounded border border-slate-200 bg-white hover:bg-slate-50 font-semibold text-slate-700"
+                  >
+                    Back to Calendar
+                  </button>
+                </div>
+
+                {/* Summary cards */}
+                <div className="grid gap-4 sm:grid-cols-3 mb-6">
+                  <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Total Revenue</p>
+                    <p className="mt-2 text-3xl font-bold text-teal-800">
+                      AED {selectedDayStats.totalRevenue.toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Patients Seen</p>
+                    <p className="mt-2 text-3xl font-bold text-slate-800">{selectedDayStats.totalPatients}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Transactions</p>
+                    <p className="mt-2 text-3xl font-bold text-slate-800">{selectedDayStats.totalTransactions}</p>
+                  </div>
+                </div>
+
+                {/* Per clinic breakdown */}
+                <div className="mb-6">
+                  <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Per Clinic</h3>
+                  <div className="space-y-3">
+                    {Object.entries(selectedDayStats.clinicMap).map(([clinicId, data]) => (
+                      <div key={clinicId} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                        <div className="flex items-center justify-between">
+                          <p className="font-semibold text-slate-900">{data.name}</p>
+                          <p className="text-lg font-bold text-teal-700">AED {data.revenue.toFixed(2)}</p>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-500">{data.patients.size} patients</p>
+                        {Object.keys(data.paymentMethods).length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {Object.entries(data.paymentMethods)
+                              .sort((a, b) => b[1] - a[1])
+                              .map(([method, amount]) => (
+                                <span key={method} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                                  {method}: AED {(amount as number).toFixed(2)}
+                                </span>
+                              ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Payment method breakdown */}
+                <div className="mb-6">
+                  <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Payment Methods</h3>
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div className="space-y-2">
+                      {Object.entries(selectedDayStats.paymentBreakdown)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([method, amount]) => {
+                          const pct = selectedDayStats.totalRevenue > 0 ? ((amount as number) / selectedDayStats.totalRevenue) * 100 : 0;
+                          return (
+                            <div key={method}>
+                              <div className="flex items-center justify-between text-sm">
+                                <span className="font-medium text-slate-700">{method}</span>
+                                <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
+                              </div>
+                              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                                <div
+                                  className="h-full rounded-full bg-teal-500"
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {(!selectedDay || !selectedDayStats) && (
+              <>
             {/* Summary cards */}
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
@@ -364,6 +606,8 @@ export default function ReportsPage() {
                   </table>
                 </div>
               </div>
+            )}
+              </>
             )}
           </div>
         )}
