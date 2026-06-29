@@ -542,8 +542,7 @@ export default function BackendPage() {
       const filtered = data.filter((r: any) => {
         const patientName = (r.patients?.name || "").toLowerCase();
         const receiptId = String(r.id || "").toLowerCase();
-        // Match if patient name starts with query OR receipt ID includes query
-        return patientName.startsWith(searchQuery) || receiptId.includes(searchQuery);
+        return patientName.includes(searchQuery) || receiptId.includes(searchQuery);
       });
       setSearchResults(filtered.slice(0, 10));
     }

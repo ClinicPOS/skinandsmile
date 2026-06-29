@@ -537,13 +537,6 @@ export default function ReceiptsPage() {
 
     // If patientId is empty but patientName exists, create new patient
     if (!patientId && patientName.trim()) {
-      const { data: maxPatient } = await supabase
-        .from("patients")
-        .select("patient_number")
-        .order("patient_number", { ascending: false })
-        .limit(1);
-      const nextPatientNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
-
       const { data: newPatient, error: createError } = await supabase
         .from("patients")
         .insert([
@@ -555,7 +548,6 @@ export default function ReceiptsPage() {
             sex: patientSexInput || null,
             emirates_id: patientEmiratesIdInput.trim() || null,
             passport_number: patientPassportInput.trim() || null,
-            patient_number: nextPatientNumber,
           },
         ])
         .select()
@@ -709,16 +701,6 @@ export default function ReceiptsPage() {
       }
     }
 
-    // Generate receipt number
-    const { data: maxReceipt } = await supabase
-      .from("receipts")
-      .select("receipt_number")
-      .not("receipt_number", "is", null)
-      .order("receipt_number", { ascending: false })
-      .limit(1);
-    const nextNumber = ((maxReceipt?.[0]?.receipt_number as number) || 0) + 1;
-    const receiptNumber = String(nextNumber).padStart(5, "0");
-
     const { data: receiptData, error: receiptError } = await supabase
       .from("receipts")
       .insert([
@@ -726,7 +708,6 @@ export default function ReceiptsPage() {
           patient_id: transactionPatientId,
           doctor_id: doctorId || null,
           receptionist_id: activeReceptionistId,
-          receipt_number: nextNumber,
           subtotal: subtotal,
           vat: vat,
           total: total,
@@ -736,6 +717,7 @@ export default function ReceiptsPage() {
       ])
       .select()
       .single();
+    const receiptNumber = String(receiptData?.receipt_number ?? "").padStart(5, "0");
 
     if (receiptError || !receiptData) {
       console.error("Receipt insert error", receiptError);

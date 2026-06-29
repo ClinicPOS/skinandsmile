@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 
@@ -30,6 +30,13 @@ export default function RefundsPage() {
       setPinError("Invalid PIN");
     }
   }
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      searchReceipts();
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [receiptSearch]);
 
   async function searchReceipts() {
     if (!receiptSearch.trim()) {
