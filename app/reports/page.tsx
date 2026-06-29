@@ -52,6 +52,7 @@ export default function ReportsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [calendarDate, setCalendarDate] = useState(new Date());
+  const [isCalendarCollapsed, setIsCalendarCollapsed] = useState(false);
 
   useEffect(() => {
     async function loadMeta() {
@@ -358,27 +359,35 @@ export default function ReportsPage() {
                 {/* Calendar */}
                 <div>
                   <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Monthly Overview</h3>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
-                        className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-50"
-                      >
-                        ← Prev
-                      </button>
-                      <span className="px-4 py-1 text-sm font-semibold text-slate-700">
-                        {calendarDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
-                      </span>
-                      <button
-                        onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
-                        className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-50"
-                      >
-                        Next →
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => setIsCalendarCollapsed(!isCalendarCollapsed)}
+                      className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 hover:text-slate-700"
+                    >
+                      <span>{isCalendarCollapsed ? "▶" : "▼"}</span>
+                      <span>Monthly Overview</span>
+                    </button>
+                    {!isCalendarCollapsed && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
+                          className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-50"
+                        >
+                          ← Prev
+                        </button>
+                        <span className="px-4 py-1 text-sm font-semibold text-slate-700">
+                          {calendarDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+                        </span>
+                        <button
+                          onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
+                          className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-50"
+                        >
+                          Next →
+                        </button>
+                      </div>
+                    )}
                   </div>
 
-                  {calendarStats && (
+                  {!isCalendarCollapsed && calendarStats && (
                     <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                       <div className="grid grid-cols-7 gap-1 mb-2">
                         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
