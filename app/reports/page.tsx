@@ -8,12 +8,6 @@ const BOSS_PIN = "0404";
 
 type DateRange = "today" | "week" | "month";
 
-const rangeLabels: Record<DateRange, string> = {
-  today: "Today",
-  week: "This Week",
-  month: "This Month",
-};
-
 function getDateRangeStart(range: DateRange): string {
   const now = new Date();
   if (range === "today") {
@@ -47,17 +41,15 @@ export default function ReportsPage() {
   const [activeReceptionistId, setActiveReceptionistId] = useState("");
   const [activeClinicName, setActiveClinicName] = useState("");
   const [pinError, setPinError] = useState("");
-  const [dateRange, setDateRange] = useState<DateRange>("today");
-  const [isLoading, setIsLoading] = useState(false);
 
   const [receptionists, setReceptionists] = useState<any[]>([]);
   const [clinics, setClinics] = useState<any[]>([]);
   const [receipts, setReceipts] = useState<any[]>([]);
   const [receiptItems, setReceiptItems] = useState<any[]>([]);
   const [services, setServices] = useState<any[]>([]);
-  const [refunds, setRefunds] = useState<any[]>([]);
 
-  const [calendarDate, setCalendarDate] = useState(new Date());
+  const [dateRange, setDateRange] = useState<DateRange>("today");
+  const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     async function loadMeta() {
@@ -75,17 +67,15 @@ export default function ReportsPage() {
     setIsLoading(true);
     const since = getDateRangeStart(range);
 
-    const [receiptsRes, itemsRes, servicesRes, refundsRes] = await Promise.allSettled([
+    const [receiptsRes, itemsRes, servicesRes] = await Promise.allSettled([
       supabase.from("receipts").select("*").gte("created_at", since),
       supabase.from("receipt_items").select("*, services(name)").gte("created_at", since),
       supabase.from("services").select("*"),
-      supabase.from("refunds").select("*, receipts(created_at)"),
     ]);
 
     if (receiptsRes.status === "fulfilled") setReceipts(receiptsRes.value.data || []);
     if (itemsRes.status === "fulfilled") setReceiptItems(itemsRes.value.data || []);
     if (servicesRes.status === "fulfilled") setServices(servicesRes.value.data || []);
-    if (refundsRes.status === "fulfilled") setRefunds(refundsRes.value.data || []);
     setIsLoading(false);
   }
 
@@ -117,46 +107,19 @@ export default function ReportsPage() {
   // ── RECEPTIONIST VIEW DATA ──────────────────────────────────────────────
   const receptionistStats = useMemo(() => {
     if (role !== "receptionist") return null;
-
-    const since = getDateRangeStart(dateRange);
-    const sinceDate = new Date(since);
-
     const mine = receipts.filter((r) => r.receptionist_id === activeReceptionistId);
-    const myRefunds = refunds.filter((r: any) => {
-      if (r.receptionist_id !== activeReceptionistId) return false;
-      const receiptDate = new Date(r.receipts?.created_at || r.created_at);
-      return receiptDate >= sinceDate;
-    });
-
     const cashReceipts = mine.filter((r) =>
       (r.payment_method || "").toLowerCase().startsWith("cash")
     );
-    const grossCashTotal = cashReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
-    const refundedCash = myRefunds
-      .filter((r) => (r.payment_method || "").toLowerCase().startsWith("cash"))
-      .reduce((s, r) => s + Number(r.total_amount || 0), 0);
-    const cashTotal = grossCashTotal - refundedCash;
-    const totalRefunded = myRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
-    return { totalTransactions: mine.length, cashTotal, cashCount: cashReceipts.length, totalRefunded, refundCount: myRefunds.length };
-  }, [role, receipts, refunds, activeReceptionistId, dateRange]);
+    const cashTotal = cashReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
+    return { totalTransactions: mine.length, cashTotal, cashCount: cashReceipts.length };
+  }, [role, receipts, activeReceptionistId]);
 
   // ── BOSS VIEW DATA ──────────────────────────────────────────────────────
   const bossStats = useMemo(() => {
     if (role !== "boss") return null;
 
-    const since = getDateRangeStart(dateRange);
-    const sinceDate = new Date(since);
-
-    // Filter refunds by receipt date, not refund date
-    const refundsInRange = refunds.filter((r: any) => {
-      const receiptDate = new Date(r.receipts?.created_at || r.created_at);
-      return receiptDate >= sinceDate;
-    });
-
-    const totalRefunded = refundsInRange.reduce((s, r) => s + Number(r.total_amount || 0), 0);
-    const grossRevenue = receipts.reduce((s, r) => s + Number(r.total || 0), 0);
-    const totalRevenue = grossRevenue - totalRefunded;
-    const totalRefunds = refundsInRange.length;
+    const totalRevenue = receipts.reduce((s, r) => s + Number(r.total || 0), 0);
     const totalPatients = new Set(receipts.map((r) => r.patient_id)).size;
 
     // Per clinic breakdown
@@ -178,24 +141,11 @@ export default function ReportsPage() {
       entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Number(receipt.total || 0);
     }
 
-    // Subtract refunds from clinic revenues
-    for (const refund of refundsInRange) {
-      const receptionist = receptionists.find((r) => r.id === refund.receptionist_id);
-      const clinicId = receptionist?.clinic_id;
-      if (clinicId && clinicMap[clinicId]) {
-        clinicMap[clinicId].revenue -= Number(refund.total_amount || 0);
-      }
-    }
-
     // Overall payment method breakdown
     const paymentBreakdown: Record<string, number> = {};
     for (const r of receipts) {
       const cat = getPaymentCategory(r.payment_method || "");
       paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
-    }
-    for (const r of refundsInRange) {
-      const cat = getPaymentCategory(r.payment_method || "");
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) - Number(r.total_amount || 0);
     }
 
     // Top services
@@ -210,44 +160,10 @@ export default function ReportsPage() {
       .sort((a, b) => b.revenue - a.revenue)
       .slice(0, 10);
 
-    return { totalRevenue, grossRevenue, totalRefunded, totalRefunds, totalPatients, totalTransactions: receipts.length, clinicMap, paymentBreakdown, topServices };
-  }, [role, receipts, receiptItems, services, clinics, receptionists, refunds, dateRange]);
+    return { totalRevenue, totalPatients, totalTransactions: receipts.length, clinicMap, paymentBreakdown, topServices };
+  }, [role, receipts, receiptItems, services, clinics, receptionists]);
 
-  const calendarStats = useMemo(() => {
-    if (role !== "boss") return null;
-
-    const year = calendarDate.getFullYear();
-    const month = calendarDate.getMonth();
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const dailyData: Record<number, { revenue: number; patients: Set<string>; refunds: number }> = {};
-
-    for (let day = 1; day <= daysInMonth; day++) {
-      dailyData[day] = { revenue: 0, patients: new Set(), refunds: 0 };
-    }
-
-    const since = new Date(year, month, 1);
-    const until = new Date(year, month + 1, 1);
-
-    for (const receipt of receipts) {
-      const receiptDate = new Date(receipt.created_at);
-      if (receiptDate >= since && receiptDate < until) {
-        const day = receiptDate.getDate();
-        dailyData[day].revenue += Number(receipt.total || 0);
-        if (receipt.patient_id) dailyData[day].patients.add(receipt.patient_id);
-      }
-    }
-
-    for (const refund of refunds) {
-      const refundDate = new Date(refund.receipts?.created_at || refund.created_at);
-      if (refundDate >= since && refundDate < until) {
-        const day = refundDate.getDate();
-        dailyData[day].revenue -= Number(refund.total_amount || 0);
-        dailyData[day].refunds += 1;
-      }
-    }
-
-    return { year, month, daysInMonth, dailyData };
-  }, [role, receipts, refunds, calendarDate]);
+  const rangeLabels: Record<DateRange, string> = { today: "Today", week: "This Week", month: "This Month" };
 
   if (role === null) {
     return (
@@ -343,13 +259,6 @@ export default function ReportsPage() {
                 <p className="mt-2 text-xl font-bold text-slate-800">{rangeLabels[dateRange]}</p>
                 <p className="mt-1 text-xs text-slate-400">{activeClinicName}</p>
               </div>
-              <div className="rounded-2xl border border-red-200 bg-red-50 p-5 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-red-600">Refunds Issued</p>
-                <p className="mt-2 text-3xl font-bold text-red-600">
-                  AED {receptionistStats.totalRefunded.toFixed(2)}
-                </p>
-                <p className="mt-1 text-xs text-red-400">{receptionistStats.refundCount} refunds</p>
-              </div>
             </div>
           </div>
         )}
@@ -358,20 +267,12 @@ export default function ReportsPage() {
         {role === "boss" && bossStats && !isLoading && (
           <div className="space-y-6">
             {/* Summary cards */}
-            <div className="grid gap-4 sm:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-3">
               <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Total Revenue</p>
                 <p className="mt-2 text-3xl font-bold text-teal-800">
                   AED {bossStats.totalRevenue.toFixed(2)}
                 </p>
-                <p className="mt-1 text-xs text-teal-600">after refunds</p>
-              </div>
-              <div className="rounded-2xl border border-red-200 bg-red-50 p-5 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-red-600">Refunded</p>
-                <p className="mt-2 text-3xl font-bold text-red-600">
-                  AED {bossStats.totalRefunded.toFixed(2)}
-                </p>
-                <p className="mt-1 text-xs text-red-600">{bossStats.totalRefunds} refunds</p>
               </div>
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Patients Seen</p>
@@ -461,68 +362,6 @@ export default function ReportsPage() {
                       ))}
                     </tbody>
                   </table>
-                </div>
-              </div>
-            )}
-
-            {/* Daily calendar */}
-            {calendarStats && (
-              <div>
-                <div className="mb-4 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Daily Breakdown</h3>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setCalendarDate(new Date(calendarStats.year, calendarStats.month - 1, 1))}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                    >
-                      ← Prev
-                    </button>
-                    <span className="px-3 py-1 text-sm font-semibold text-slate-700">
-                      {new Date(calendarStats.year, calendarStats.month).toLocaleString("default", { month: "long", year: "numeric" })}
-                    </span>
-                    <button
-                      onClick={() => setCalendarDate(new Date(calendarStats.year, calendarStats.month + 1, 1))}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                    >
-                      Next →
-                    </button>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm overflow-x-auto">
-                  <div className="grid grid-cols-7 gap-2 min-w-full">
-                    {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
-                      <div key={day} className="text-center text-xs font-semibold uppercase text-slate-500 pb-2">
-                        {day}
-                      </div>
-                    ))}
-                    {Array.from({ length: new Date(calendarStats.year, calendarStats.month, 1).getDay() }).map((_, i) => (
-                      <div key={`empty-${i}`} />
-                    ))}
-                    {Array.from({ length: calendarStats.daysInMonth }).map((_, i) => {
-                      const day = i + 1;
-                      const stats = calendarStats.dailyData[day];
-                      return (
-                        <div
-                          key={day}
-                          className={`rounded-lg border p-2 text-center text-xs ${
-                            stats.revenue > 0 || stats.refunds > 0
-                              ? "border-teal-200 bg-teal-50"
-                              : "border-slate-200 bg-white"
-                          }`}
-                        >
-                          <p className="font-semibold text-slate-900">{day}</p>
-                          {(stats.revenue > 0 || stats.refunds > 0) && (
-                            <>
-                              <p className="mt-1 font-semibold text-teal-700">AED {stats.revenue.toFixed(0)}</p>
-                              <p className="text-slate-600">{stats.patients.size} pts</p>
-                              {stats.refunds > 0 && <p className="text-red-600">{stats.refunds} refund{stats.refunds > 1 ? "s" : ""}</p>}
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
                 </div>
               </div>
             )}

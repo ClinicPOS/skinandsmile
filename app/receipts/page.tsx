@@ -46,6 +46,27 @@ function matchesServiceCategory(serviceName: string, category: string) {
   return true;
 }
 
+function getAestheticServiceCategory(serviceName: string): string | null {
+  const name = serviceName.toLowerCase();
+
+  // Facial Services
+  if (name.includes("hydrafacial") || name.includes("bb glow") || name.includes("deep facial") || name.includes("clarifying")) {
+    return "Facial Services";
+  }
+
+  // Hyperpigmentation Treatment
+  if (name.includes("acne") || name.includes("mesotherapy") || name.includes("co2 fractional") || name.includes("green peel") || name.includes("prp treatment")) {
+    return "Hyperpigmentation Treatment";
+  }
+
+  // Hair Laser Removal
+  if (name.includes("upper lip") || name.includes("underarm") || name.includes("half legs") || name.includes("half arms") || name.includes("full face") || name.includes("beard") || name.includes("bikini") || name.includes("full legs")) {
+    return "Hair Laser Removal";
+  }
+
+  return null;
+}
+
 const serviceCategories = [
   { key: "all", label: "All" },
   { key: "cleaning", label: "Cleaning" },
@@ -524,7 +545,7 @@ export default function ReceiptsPage() {
         .insert([
           {
             name: patientName.trim(),
-            phone: patientPhoneInput.trim() || null,
+            phone: patientPhoneInput.trim() || "",
             email: patientEmailInput.trim() || null,
             date_of_birth: patientDobInput || null,
             sex: patientSexInput || null,
@@ -543,6 +564,7 @@ export default function ReceiptsPage() {
       }
 
       finalPatientId = newPatient.id;
+      setPatients([...patients, newPatient]);
     }
 
     // Set the transaction patient ID to use throughout the payment/print flow
@@ -687,6 +709,7 @@ export default function ReceiptsPage() {
     const { data: maxReceipt } = await supabase
       .from("receipts")
       .select("receipt_number")
+      .not("receipt_number", "is", null)
       .order("receipt_number", { ascending: false })
       .limit(1);
     const nextNumber = ((maxReceipt?.[0]?.receipt_number as number) || 0) + 1;
@@ -1920,50 +1943,61 @@ export default function ReceiptsPage() {
                 className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
               />
 
-              <div className="flex gap-2 overflow-x-auto pb-1">
-                {serviceCategories.map((category) => {
-                  const isActive = serviceCategory === category.key;
-                  return (
-                    <button
-                      key={category.key}
-                      type="button"
-                      onClick={() => setServiceCategory(category.key)}
-                      className={`whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-semibold transition ${
-                        isActive
-                          ? "bg-cyan-600 text-white"
-                          : "border border-slate-200 bg-white text-slate-600 hover:border-cyan-300"
-                      }`}
-                    >
-                      {category.label}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {recentServices.length > 0 && !serviceSearch.trim() && serviceCategory === "all" ? (
-                <div className="rounded-2xl border border-slate-200 bg-white p-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
-                    Recently used
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {recentServices.map((service) => (
+              {activeClinic?.name !== "Skin & Smile Aesthetic Clinic" ? (
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  {serviceCategories.map((category) => {
+                    const isActive = serviceCategory === category.key;
+                    return (
                       <button
-                        key={`recent-${service.id}`}
+                        key={category.key}
                         type="button"
-                        onClick={() => addService(service)}
-                        className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-cyan-300 hover:bg-cyan-50"
+                        onClick={() => setServiceCategory(category.key)}
+                        className={`whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                          isActive
+                            ? "bg-cyan-600 text-white"
+                            : "border border-slate-200 bg-white text-slate-600 hover:border-cyan-300"
+                        }`}
                       >
-                        {service.name}
+                        {category.label}
                       </button>
-                    ))}
-                  </div>
+                    );
+                  })}
                 </div>
               ) : null}
+
             </div>
 
             {filteredServices.length === 0 ? (
               <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500">
                 No services found. Try a different search or category.
+              </div>
+            ) : activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? (
+              <div className="mt-4 space-y-6">
+                {["Facial Services", "Hyperpigmentation Treatment", "Hair Laser Removal"].map((categoryName) => {
+                  const categoryServices = filteredServices.filter((s) => getAestheticServiceCategory(s.name) === categoryName);
+                  if (categoryServices.length === 0) return null;
+                  return (
+                    <div key={categoryName}>
+                      <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.15em] text-slate-600">{categoryName}</h3>
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
+                        {categoryServices.map((service) => (
+                          <button
+                            key={service.id}
+                            onClick={() => addService(service)}
+                            className="rounded-2xl border border-slate-200 bg-white p-3 text-left shadow-sm transition hover:border-cyan-300 hover:bg-cyan-50 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <p className="text-sm font-semibold text-slate-900">{service.name}</p>
+                              <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
+                                AED {Number(service.price || 0).toFixed(0)}
+                              </span>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
