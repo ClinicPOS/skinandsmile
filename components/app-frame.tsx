@@ -4,12 +4,8 @@ import type { ReactNode } from "react";
 const navigation = [
   { href: "/", label: "Dashboard" },
   { href: "/backend", label: "Backend" },
-  { href: "/search-patients", label: "Search Patients" },
-  { href: "/receipt-history", label: "Receipt History" },
-  { href: "/treatment-history", label: "Treatment History" },
   { href: "/receipts", label: "POS" },
   { href: "/reports", label: "Reports" },
-  { href: "/refunds", label: "Refunds" },
 ];
 
 const dailyQuotes = [

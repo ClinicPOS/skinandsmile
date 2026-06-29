@@ -6,6 +6,7 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { Clinic } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
+import { SearchPatientModal, ReceiptHistoryModal, TreatmentHistoryModal } from "../../components/pos-modals";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara", "Mixed"];
 const POS_REGISTER_SESSION_KEY = "posRegisterSession";
@@ -149,6 +150,9 @@ export default function ReceiptsPage() {
   const [showReceiptPreview, setShowReceiptPreview] = useState(false);
   const [receiptPreviewHtml, setReceiptPreviewHtml] = useState("");
   const [currentReceipt, setCurrentReceipt] = useState<any | null>(null);
+  const [showSearchPatientModal, setShowSearchPatientModal] = useState(false);
+  const [showReceiptHistoryModal, setShowReceiptHistoryModal] = useState(false);
+  const [showTreatmentHistoryModal, setShowTreatmentHistoryModal] = useState(false);
   const receiptPreviewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const router = useRouter();
 
@@ -1451,7 +1455,7 @@ export default function ReceiptsPage() {
     const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo3.png";
     const clinicDisplayName = activeClinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
     const clinicAddress = activeClinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
-    const clinicRoom = activeClinic?.room ? `2nd Floor, Room ${activeClinic.room}` : "";
+    const clinicRoom = activeClinic?.room ? `2nd Floor, Room ${activeClinic.room.replace(/^Room\s+/i, '')}` : "";
     const clinicTrn = activeClinic?.trn || "";
     const clinicPhone = activeClinic?.phone || "";
     const clinicWhatsapp = activeClinic?.whatsapp || "";
@@ -1572,8 +1576,8 @@ export default function ReceiptsPage() {
         <div class="clinic-name">${clinicDisplayName}</div>
 
         <div class="address">
-          ${clinicAddress.split("\n").map((line: string) => `<div>${line}</div>`).join("")}
-          ${clinicRoom ? `<div>${clinicRoom}</div>` : ""}
+          ${clinicAddress.split(/\\n|\n/).map((line: string) => `<div>${line}</div>`).join("")}
+          ${clinicRoom && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
           ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
         </div>
 
@@ -1619,8 +1623,10 @@ export default function ReceiptsPage() {
 
         <div class="hr"></div>
 
-        ${clinicPhone ? `<div class="row"><span>For appointments - Number</span><span>: ${clinicPhone}</span></div>` : ""}
-        ${clinicWhatsapp ? `<div class="row"><span>WhatsApp</span><span>: ${clinicWhatsapp}</span></div>` : ""}
+        <div style="text-align:center;font-size:9px;line-height:1.4;">
+          ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
+          ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
+        </div>
 
         <div class="hr"></div>
 
@@ -1765,7 +1771,28 @@ export default function ReceiptsPage() {
               </div>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-3 mt-4">
+              <button
+                onClick={() => setShowSearchPatientModal(true)}
+                className="rounded-2xl border border-teal-300 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 transition hover:bg-teal-100"
+              >
+                Search Patient
+              </button>
+              <button
+                onClick={() => setShowReceiptHistoryModal(true)}
+                className="rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
+              >
+                Receipt History
+              </button>
+              <button
+                onClick={() => setShowTreatmentHistoryModal(true)}
+                className="rounded-2xl border border-slate-300 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+              >
+                Treatment History
+              </button>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-2 mt-4">
               <div className="space-y-2">
                 <label className="block text-sm font-semibold text-slate-700">Patient Name</label>
                 <div className="relative">
@@ -2360,6 +2387,10 @@ export default function ReceiptsPage() {
         </aside>
       </div>
       )}
+
+      <SearchPatientModal isOpen={showSearchPatientModal} onClose={() => setShowSearchPatientModal(false)} />
+      <ReceiptHistoryModal isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} />
+      <TreatmentHistoryModal isOpen={showTreatmentHistoryModal} onClose={() => setShowTreatmentHistoryModal(false)} />
     </AppFrame>
   );
 }
