@@ -38,7 +38,7 @@ function getPaymentCategory(method: string): string {
 export default function ReportsPage() {
   const [pinInput, setPinInput] = useState("");
   const [role, setRole] = useState<"boss" | "receptionist" | null>(null);
-  const [activeReceptionistId, setActiveReceptionistId] = useState("");
+  const [activeClinicId, setActiveClinicId] = useState("");
   const [activeClinicName, setActiveClinicName] = useState("");
   const [pinError, setPinError] = useState("");
 
@@ -92,8 +92,8 @@ export default function ReportsPage() {
     const match = receptionists.find((r) => r.pin === pinInput);
     if (match) {
       setRole("receptionist");
-      setActiveReceptionistId(match.id);
       const clinic = clinics.find((c) => c.id === match.clinic_id);
+      setActiveClinicId(clinic?.id || "");
       setActiveClinicName(clinic?.name || "");
       setPinError("");
       loadReportData(dateRange);
@@ -110,13 +110,24 @@ export default function ReportsPage() {
   // ── RECEPTIONIST VIEW DATA ──────────────────────────────────────────────
   const receptionistStats = useMemo(() => {
     if (role !== "receptionist") return null;
-    const mine = receipts.filter((r) => r.receptionist_id === activeReceptionistId);
+    const clinicReceptionistIds = new Set(
+      receptionists.filter((r) => r.clinic_id === activeClinicId).map((r) => r.id)
+    );
+    const mine = receipts.filter((r) => clinicReceptionistIds.has(r.receptionist_id));
     const cashReceipts = mine.filter((r) =>
       (r.payment_method || "").toLowerCase().startsWith("cash")
     );
     const cashTotal = cashReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
-    return { totalTransactions: mine.length, cashTotal, cashCount: cashReceipts.length };
-  }, [role, receipts, activeReceptionistId]);
+    const totalRevenue = mine.reduce((s, r) => s + Number(r.total || 0), 0);
+
+    const paymentBreakdown: Record<string, number> = {};
+    for (const r of mine) {
+      const cat = getPaymentCategory(r.payment_method || "");
+      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
+    }
+
+    return { totalTransactions: mine.length, cashTotal, cashCount: cashReceipts.length, totalRevenue, paymentBreakdown };
+  }, [role, receipts, receptionists, activeClinicId]);
 
   // ── BOSS VIEW DATA ──────────────────────────────────────────────────────
   const bossStats = useMemo(() => {
@@ -330,17 +341,19 @@ export default function ReportsPage() {
         {role === "receptionist" && receptionistStats && !isLoading && (
           <div className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-3">
+              <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Total Revenue</p>
+                <p className="mt-2 text-3xl font-bold text-teal-800">
+                  AED {receptionistStats.totalRevenue.toFixed(2)}
+                </p>
+                <p className="mt-1 text-xs text-slate-400">{receptionistStats.totalTransactions} transactions</p>
+              </div>
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Cash Collected</p>
-                <p className="mt-2 text-3xl font-bold text-teal-700">
+                <p className="mt-2 text-3xl font-bold text-slate-800">
                   AED {receptionistStats.cashTotal.toFixed(2)}
                 </p>
                 <p className="mt-1 text-xs text-slate-400">{receptionistStats.cashCount} cash transactions</p>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Total Transactions</p>
-                <p className="mt-2 text-3xl font-bold text-slate-800">{receptionistStats.totalTransactions}</p>
-                <p className="mt-1 text-xs text-slate-400">all payment methods</p>
               </div>
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Period</p>
@@ -348,6 +361,31 @@ export default function ReportsPage() {
                 <p className="mt-1 text-xs text-slate-400">{activeClinicName}</p>
               </div>
             </div>
+            {Object.keys(receptionistStats.paymentBreakdown).length > 0 && (
+              <div>
+                <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Payment Methods</h3>
+                <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <div className="space-y-2">
+                    {Object.entries(receptionistStats.paymentBreakdown)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([method, amount]) => {
+                        const pct = receptionistStats.totalRevenue > 0 ? ((amount as number) / receptionistStats.totalRevenue) * 100 : 0;
+                        return (
+                          <div key={method}>
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="font-medium text-slate-700">{method}</span>
+                              <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
+                            </div>
+                            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                              <div className="h-full rounded-full bg-teal-500" style={{ width: `${pct}%` }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
