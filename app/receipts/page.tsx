@@ -394,12 +394,28 @@ export default function ReceiptsPage() {
       .select("id")
       .single();
 
-    if (registerError || !registerData) {
-      console.warn("Register session insert warning", registerError);
-      alert(
-        "Register opened locally, but shift log was not saved to database. Please create table 'cash_register_sessions' if not configured."
-      );
-    } else {
+    if (registerError) {
+      if (registerError.code === "23505") {
+        // Already has an open session — resume it
+        const { data: existing } = await supabase
+          .from(REGISTER_TABLE)
+          .select("id, opening_cash, opened_at")
+          .eq("receptionist_id", loginReceptionistId)
+          .is("closed_at", null)
+          .single();
+        if (existing) {
+          createdRegisterSessionId = String(existing.id);
+        } else {
+          alert("A register session already exists but could not be retrieved. Please contact support.");
+          return;
+        }
+      } else {
+        console.warn("Register session insert warning", registerError);
+        alert(
+          "Register opened locally, but shift log was not saved to database. Please create table 'cash_register_sessions' if not configured."
+        );
+      }
+    } else if (registerData) {
       createdRegisterSessionId = String(registerData.id);
     }
 
@@ -500,7 +516,7 @@ export default function ReceiptsPage() {
       .from("receipts")
       .select("total")
       .eq("receptionist_id", activeReceptionistId)
-      .eq("payment_method", "Cash")
+      .ilike("payment_method", "Cash%")
       .gte("created_at", registerOpenedAt);
 
     if (error) {
@@ -680,7 +696,7 @@ export default function ReceiptsPage() {
 
     setIsSavingReceipt(true);
 
-    // Save any missing patient fields if receptionist filled them in for an existing patient
+    try {
     if (patientId) {
       const updates: Record<string, string> = {};
       if (patientEmiratesIdInput.trim() && !selectedPatientInfo?.emirates_id)
@@ -717,11 +733,9 @@ export default function ReceiptsPage() {
       ])
       .select()
       .single();
-    const receiptNumber = String(receiptData?.receipt_number ?? "").padStart(5, "0");
 
     if (receiptError || !receiptData) {
       console.error("Receipt insert error", receiptError);
-      setIsSavingReceipt(false);
       alert(`Error saving receipt: ${receiptError?.message || "unknown error"}`);
       return false;
     }
@@ -736,8 +750,6 @@ export default function ReceiptsPage() {
 
     const { data: itemsData, error: itemsError } = await supabase.from("receipt_items").insert(items).select();
 
-    setIsSavingReceipt(false);
-
     if (itemsError || !itemsData) {
       console.error("Receipt items insert error", itemsError);
       alert(`Error saving receipt items: ${itemsError?.message || "unknown error"}`);
@@ -746,6 +758,9 @@ export default function ReceiptsPage() {
 
     setCurrentReceipt(receiptData);
     return receiptData;
+    } finally {
+      setIsSavingReceipt(false);
+    }
   }
 
   function generateInvoiceHtml() {

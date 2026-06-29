@@ -2,9 +2,8 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 const navigation = [
-  { href: "/", label: "Dashboard" },
-  { href: "/backend", label: "Backend" },
   { href: "/receipts", label: "POS" },
+  { href: "/backend", label: "Backend" },
   { href: "/reports", label: "Reports" },
 ];
 
