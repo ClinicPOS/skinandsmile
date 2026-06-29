@@ -531,18 +531,20 @@ export default function BackendPage() {
   }
 
   // ── REFUNDS FUNCTIONS ──────────────────────────────────────────────
-  async function searchReceipts() {
-    if (!receiptSearch.trim()) {
+  async function searchReceipts(query?: string) {
+    const searchQuery = (query ?? receiptSearch).trim().toLowerCase();
+    if (!searchQuery) {
       setSearchResults([]);
       return;
     }
-    const query = receiptSearch.trim().toLowerCase();
     const { data } = await supabase.from("receipts").select("*, patients(name), receptionist(name)");
     if (data) {
-      const filtered = data.filter((r: any) =>
-        String(r.id || "").toLowerCase().includes(query) ||
-        String(r.patients?.name || "").toLowerCase().includes(query)
-      );
+      const filtered = data.filter((r: any) => {
+        const patientName = (r.patients?.name || "").toLowerCase();
+        const receiptId = String(r.id || "").toLowerCase();
+        // Match if patient name starts with query OR receipt ID includes query
+        return patientName.startsWith(searchQuery) || receiptId.includes(searchQuery);
+      });
       setSearchResults(filtered.slice(0, 10));
     }
   }
@@ -1373,22 +1375,31 @@ export default function BackendPage() {
           {/* Search section */}
           <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <p className="text-sm font-semibold text-slate-700">Find Receipt</p>
-            <p className="mt-1 text-xs text-slate-600">Search by receipt ID or patient name</p>
+            <p className="mt-1 text-xs text-slate-600">Search by patient name (or receipt ID)</p>
             <div className="mt-4 flex gap-2">
               <input
                 type="text"
                 value={receiptSearch}
-                onChange={(e) => setReceiptSearch(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && searchReceipts()}
-                placeholder="Receipt ID or patient name..."
+                onChange={(e) => {
+                  setReceiptSearch(e.target.value);
+                  searchReceipts(e.target.value);
+                }}
+                placeholder="Type patient name or receipt ID..."
                 className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm outline-none focus:border-teal-400"
+                autoFocus
               />
-              <button
-                onClick={searchReceipts}
-                className="rounded-2xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-500"
-              >
-                Search
-              </button>
+              {receiptSearch && (
+                <button
+                  onClick={() => {
+                    setReceiptSearch("");
+                    setSearchResults([]);
+                    setSelectedReceipt(null);
+                  }}
+                  className="rounded-2xl bg-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-400"
+                >
+                  Clear
+                </button>
+              )}
             </div>
 
             {searchResults.length > 0 && (
