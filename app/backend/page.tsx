@@ -863,12 +863,12 @@ export default function BackendPage() {
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-5">
-          <h2 className="text-lg font-semibold text-slate-900">Doctors</h2>
+          <h2 className="text-lg font-semibold text-slate-900">Doctors / Aestheticians</h2>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <input
               value={doctorName}
               onChange={(e) => setDoctorName(e.target.value)}
-              placeholder="Doctor name"
+              placeholder="Doctor / Aesthetician name"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-teal-300 focus:ring-4 focus:ring-teal-100"
             />
             <input
@@ -882,7 +882,7 @@ export default function BackendPage() {
             onClick={addDoctor}
             className="mt-3 rounded-2xl bg-teal-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-500"
           >
-            Add Doctor
+            Add Doctor / Aesthetician
           </button>
 
           <div className="mt-4 space-y-2">

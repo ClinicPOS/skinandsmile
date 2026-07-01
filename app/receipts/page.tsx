@@ -1656,7 +1656,7 @@ export default function ReceiptsPage() {
         <div class="row"><span>Date / التاريخ</span><span>: ${dateValue}</span></div>
         <div class="row"><span>Time / الوقت</span><span>: ${timeValue}</span></div>
         <div class="row"><span>Cashier / أمين الصندوق</span><span>: ${cashierName}</span></div>
-        <div class="row"><span>Doctor / الطبيب</span><span>: ${doctorNameForReceipt}</span></div>
+        <div class="row"><span>${activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب"}</span><span>: ${doctorNameForReceipt}</span></div>
         <div class="row"><span>Patient Name / اسم المريض</span><span>: ${patientNameForReceipt}</span></div>
         <div class="row"><span>Patient ID / معرف المريض</span><span>: ${String(patientIdForReceipt)}</span></div>
         <div class="row"><span>Mobile / الهاتف</span><span>: ${patientMobileForReceipt}</span></div>
@@ -1976,13 +1976,16 @@ export default function ReceiptsPage() {
               </div>
 
               <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">Doctor / Therapist <span className="font-normal text-slate-400">(Optional)</span></label>
+                <label className="block text-sm font-semibold text-slate-700">
+                  {activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician" : "Doctor / Therapist"}{" "}
+                  <span className="font-normal text-slate-400">(Optional)</span>
+                </label>
                 <select
                   value={doctorId}
                   onChange={(e) => setDoctorId(e.target.value)}
                   className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
                 >
-                  <option value="">No doctor / therapist</option>
+                  <option value="">{activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "No aesthetician" : "No doctor / therapist"}</option>
                   {clinicDoctors.map((doctor) => (
                     <option key={doctor.id} value={doctor.id}>
                       {doctor.name}
