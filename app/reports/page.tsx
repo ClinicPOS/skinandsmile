@@ -313,19 +313,19 @@ export default function ReportsPage() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => navigateMonth(-1)}
-              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-teal-300"
+              className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-teal-300 sm:px-4 sm:py-2 sm:text-sm"
             >
               ← Prev
             </button>
             <button
               onClick={() => navigateMonth(1)}
-              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-teal-300"
+              className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-teal-300 sm:px-4 sm:py-2 sm:text-sm"
             >
               Next →
             </button>
             <button
               onClick={() => { setRole(null); setPinInput(""); }}
-              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-500 transition hover:bg-slate-50"
+              className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-500 transition hover:bg-slate-50 sm:px-4 sm:py-2 sm:text-sm"
             >
               Lock
             </button>
@@ -395,13 +395,13 @@ export default function ReportsPage() {
           <div className="space-y-6">
             {selectedDay && selectedDayStats ? (
               <div>
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:items-center sm:justify-between">
                   <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
                     {selectedDayStats.selectedDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
                   </h3>
                   <button
                     onClick={() => setSelectedDay(null)}
-                    className="px-3 py-1 text-sm rounded border border-slate-200 bg-white hover:bg-slate-50 font-semibold text-slate-700"
+                    className="self-start rounded border border-slate-200 bg-white px-3 py-1 text-sm font-semibold text-slate-700 hover:bg-slate-50 sm:self-auto"
                   >
                     ← Back to Calendar
                   </button>
@@ -500,8 +500,8 @@ export default function ReportsPage() {
                 {selectedDayStats.topServices.length > 0 && (
                   <div>
                     <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Top Services</h3>
-                    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-                      <table className="w-full text-sm">
+                  <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-x-auto">
+                      <table className="w-full min-w-[400px] text-sm">
                         <thead className="border-b border-slate-100 bg-slate-50">
                           <tr>
                             <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Service</th>
@@ -527,15 +527,15 @@ export default function ReportsPage() {
               <>
                 {/* Calendar */}
                 {calendarStats && (
-                  <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="grid grid-cols-7 gap-1 mb-2">
-                      {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
-                        <div key={day} className="text-center text-xs font-semibold text-slate-500 py-2">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm sm:p-4">
+                    <div className="grid grid-cols-7 gap-0.5 mb-1 sm:gap-1 sm:mb-2">
+                      {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => (
+                        <div key={day} className="text-center text-[10px] font-semibold text-slate-500 py-1 sm:text-xs sm:py-2">
                           {day}
                         </div>
                       ))}
                     </div>
-                    <div className="grid grid-cols-7 gap-1">
+                    <div className="grid grid-cols-7 gap-0.5 sm:gap-1">
                       {Array.from({ length: calendarStats.startingDayOfWeek }).map((_, i) => (
                         <div key={`empty-${i}`} className="aspect-square bg-slate-50 rounded" />
                       ))}
@@ -546,18 +546,22 @@ export default function ReportsPage() {
                           <button
                             key={day}
                             onClick={() => setSelectedDay(day)}
-                            className="aspect-square rounded border-2 border-slate-200 bg-white p-1 text-left text-xs hover:border-teal-300 hover:bg-teal-50 transition"
+                            className="aspect-square rounded border border-slate-200 bg-white p-0.5 text-left text-[10px] hover:border-teal-300 hover:bg-teal-50 transition sm:border-2 sm:p-1 sm:text-xs"
                           >
-                            <div className="font-semibold text-slate-900">{day}</div>
+                            <div className="font-semibold text-slate-900 text-[10px] sm:text-xs">{day}</div>
                             {data.count > 0 && (
                               <>
-                                <div className="text-teal-700 font-semibold">AED {data.revenue.toFixed(0)}</div>
-                                <div className="text-slate-500 text-[10px]">{data.patients.size}P</div>
+                                <div className="text-teal-700 font-semibold text-[8px] leading-tight sm:text-[10px]">
+                                  {data.revenue >= 1000
+                                    ? `${(data.revenue / 1000).toFixed(1)}k`
+                                    : data.revenue.toFixed(0)}
+                                </div>
+                                <div className="text-slate-500 text-[8px] leading-tight sm:text-[10px]">{data.patients.size}P</div>
                                 {data.hasPromo && (
-                                  <div className="mt-0.5 text-[9px] font-bold text-red-500 leading-tight">PROMO</div>
+                                  <div className="mt-0.5 text-[7px] font-bold text-red-500 leading-tight sm:text-[9px]">PROMO</div>
                                 )}
                                 {data.hasRefund && (
-                                  <div className="mt-0.5 text-[9px] font-bold text-purple-600 leading-tight">REFUND</div>
+                                  <div className="mt-0.5 text-[7px] font-bold text-purple-600 leading-tight sm:text-[9px]">RFND</div>
                                 )}
                               </>
                             )}
@@ -642,8 +646,8 @@ export default function ReportsPage() {
                 {bossStats.topServices.length > 0 && (
                   <div>
                     <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Top Services</h3>
-                    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-                      <table className="w-full text-sm">
+                    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-x-auto">
+                      <table className="w-full min-w-[400px] text-sm">
                         <thead className="border-b border-slate-100 bg-slate-50">
                           <tr>
                             <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Service</th>
