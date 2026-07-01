@@ -44,6 +44,7 @@ export default function PatientsPage() {
     const { data: maxPatient } = await supabase
       .from("patients")
       .select("patient_number")
+      .not("patient_number", "is", null)
       .order("patient_number", { ascending: false })
       .limit(1);
     const nextNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
