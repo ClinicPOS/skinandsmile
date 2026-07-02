@@ -56,17 +56,24 @@ export default function ReportsPage() {
     const from = new Date(year, month, 1).toISOString();
     const to = new Date(year, month + 1, 1).toISOString();
 
-    const [receiptsRes, itemsRes, servicesRes, refundsRes] = await Promise.allSettled([
+    const [receiptsRes, itemsRes, servicesRes] = await Promise.allSettled([
       supabase.from("receipts").select("*").gte("created_at", from).lt("created_at", to),
       supabase.from("receipt_items").select("*, services(name)").gte("created_at", from).lt("created_at", to),
       supabase.from("services").select("*"),
-      supabase.from("refunds").select("*").gte("created_at", from).lt("created_at", to),
     ]);
 
-    if (receiptsRes.status === "fulfilled") setReceipts(receiptsRes.value.data || []);
+    const loadedReceipts = receiptsRes.status === "fulfilled" ? (receiptsRes.value.data || []) : [];
+    let loadedRefunds: any[] = [];
+    if (loadedReceipts.length > 0) {
+      const receiptIds = loadedReceipts.map((r: any) => r.id);
+      const refundsRes = await supabase.from("refunds").select("*").in("receipt_id", receiptIds);
+      loadedRefunds = refundsRes.data || [];
+    }
+
+    setReceipts(loadedReceipts);
     if (itemsRes.status === "fulfilled") setReceiptItems(itemsRes.value.data || []);
     if (servicesRes.status === "fulfilled") setServices(servicesRes.value.data || []);
-    if (refundsRes.status === "fulfilled") setRefunds(refundsRes.value.data || []);
+    setRefunds(loadedRefunds);
     setIsLoading(false);
   }
 
@@ -173,9 +180,9 @@ export default function ReportsPage() {
     const daysInMonth = lastDay.getDate();
     const startingDayOfWeek = firstDay.getDay();
 
-    const dailyData: Record<number, { revenue: number; patients: Set<string>; count: number; hasPromo: boolean; hasRefund: boolean; refundTotal: number }> = {};
+    const dailyData: Record<number, { revenue: number; patients: Set<string>; count: number; hasPromo: boolean; hasRefund: boolean; hasLateRefund: boolean; refundTotal: number }> = {};
     for (let d = 1; d <= daysInMonth; d++) {
-      dailyData[d] = { revenue: 0, patients: new Set(), count: 0, hasPromo: false, hasRefund: false, refundTotal: 0 };
+      dailyData[d] = { revenue: 0, patients: new Set(), count: 0, hasPromo: false, hasRefund: false, hasLateRefund: false, refundTotal: 0 };
     }
 
     for (const receipt of receipts) {
@@ -192,12 +199,19 @@ export default function ReportsPage() {
     }
 
     for (const refund of refunds) {
-      const refundDate = new Date(refund.created_at || new Date());
-      if (refundDate.getFullYear() === year && refundDate.getMonth() === month) {
-        const day = refundDate.getDate();
+      const receipt = receipts.find((r) => r.id === refund.receipt_id);
+      if (!receipt) continue;
+      const receiptDate = new Date(receipt.created_at || new Date());
+      if (receiptDate.getFullYear() === year && receiptDate.getMonth() === month) {
+        const day = receiptDate.getDate();
         if (dailyData[day]) {
           dailyData[day].hasRefund = true;
           dailyData[day].refundTotal += Number(refund.total_amount || 0);
+          dailyData[day].revenue -= Number(refund.total_amount || 0);
+          const refundDate = new Date(refund.created_at || new Date());
+          if (refundDate.getDate() !== day || refundDate.getMonth() !== month || refundDate.getFullYear() !== year) {
+            dailyData[day].hasLateRefund = true;
+          }
         }
       }
     }
@@ -257,10 +271,18 @@ export default function ReportsPage() {
       .sort((a, b) => b.revenue - a.revenue)
       .slice(0, 10);
 
-    const dayRefunds = refunds.filter((r) => {
-      const d = new Date(r.created_at || new Date());
-      return d >= selectedDate && d < nextDate;
-    });
+    const dayRefunds = refunds
+      .filter((r) => {
+        const receipt = receipts.find((rec) => rec.id === r.receipt_id);
+        if (!receipt) return false;
+        const receiptDate = new Date(receipt.created_at || new Date());
+        return receiptDate >= selectedDate && receiptDate < nextDate;
+      })
+      .map((r) => {
+        const refundDate = new Date(r.created_at || new Date());
+        const isSameDay = refundDate >= selectedDate && refundDate < nextDate;
+        return { ...r, isSameDay };
+      });
     const totalRefunded = dayRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
 
     return { totalRevenue, totalPatients, totalTransactions: dayReceipts.length, clinicMap, paymentBreakdown, topServices, selectedDate, dayRefunds, totalRefunded };
@@ -409,10 +431,13 @@ export default function ReportsPage() {
 
                 <div className="grid gap-4 sm:grid-cols-3 mb-6">
                   <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
-                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Total Revenue</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Net Revenue</p>
                     <p className="mt-2 text-3xl font-bold text-teal-800">
-                      AED {selectedDayStats.totalRevenue.toFixed(2)}
+                      AED {(selectedDayStats.totalRevenue - selectedDayStats.totalRefunded).toFixed(2)}
                     </p>
+                    {selectedDayStats.totalRefunded > 0 && (
+                      <p className="mt-1 text-xs text-red-500">−AED {selectedDayStats.totalRefunded.toFixed(2)} refunded</p>
+                    )}
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                     <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Patients Seen</p>
@@ -432,7 +457,10 @@ export default function ReportsPage() {
                         <div key={refund.id} className="flex items-center justify-between rounded-xl bg-white border border-purple-100 px-4 py-2.5">
                           <div>
                             <p className="text-sm font-semibold text-slate-800">
-                              {new Date(refund.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}
+                              {new Date(refund.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}{" "}
+                              <span className={`text-xs font-normal ${refund.isSameDay ? "text-slate-900" : "text-red-500"}`}>
+                                ({new Date(refund.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })})
+                              </span>
                             </p>
                             <p className="text-xs text-slate-500 italic">{refund.reason || "No reason given"}</p>
                           </div>
@@ -561,7 +589,7 @@ export default function ReportsPage() {
                                   <div className="mt-0.5 text-[7px] font-bold text-red-500 leading-tight sm:text-[9px]">PROMO</div>
                                 )}
                                 {data.hasRefund && (
-                                  <div className="mt-0.5 text-[7px] font-bold text-purple-600 leading-tight sm:text-[9px]">RFND</div>
+                                  <div className={`mt-0.5 text-[7px] font-bold leading-tight sm:text-[9px] ${data.hasLateRefund ? "text-yellow-500" : "text-purple-600"}`}>RFND</div>
                                 )}
                               </>
                             )}
