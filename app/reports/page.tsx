@@ -261,6 +261,20 @@ export default function ReportsPage() {
       entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Number(receipt.total || 0);
     }
 
+    const dayRefunds = refunds
+      .filter((r) => {
+        const receipt = receipts.find((rec) => rec.id === r.receipt_id);
+        if (!receipt) return false;
+        const receiptDate = new Date(receipt.created_at || new Date());
+        return receiptDate >= selectedDate && receiptDate < nextDate;
+      })
+      .map((r) => {
+        const refundDate = new Date(r.created_at || new Date());
+        const isSameDay = refundDate >= selectedDate && refundDate < nextDate;
+        return { ...r, isSameDay };
+      });
+    const totalRefunded = dayRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
+
     for (const refund of dayRefunds) {
       const receipt = receipts.find((r) => r.id === refund.receipt_id);
       const receptionist = receptionists.find((r) => r.id === receipt?.receptionist_id);
@@ -268,8 +282,6 @@ export default function ReportsPage() {
       if (!clinicId || !clinicMap[clinicId]) continue;
       clinicMap[clinicId].refunded += Number(refund.total_amount || 0);
     }
-
-    const totalRefunded = dayRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
 
     const paymentBreakdown: Record<string, number> = {};
     for (const r of dayReceipts) {
@@ -288,19 +300,6 @@ export default function ReportsPage() {
     const topServices = Object.values(serviceMap)
       .sort((a, b) => b.revenue - a.revenue)
       .slice(0, 10);
-
-    const dayRefunds = refunds
-      .filter((r) => {
-        const receipt = receipts.find((rec) => rec.id === r.receipt_id);
-        if (!receipt) return false;
-        const receiptDate = new Date(receipt.created_at || new Date());
-        return receiptDate >= selectedDate && receiptDate < nextDate;
-      })
-      .map((r) => {
-        const refundDate = new Date(r.created_at || new Date());
-        const isSameDay = refundDate >= selectedDate && refundDate < nextDate;
-        return { ...r, isSameDay };
-      });
 
     return { totalRevenue, totalPatients, totalTransactions: dayReceipts.length, clinicMap, paymentBreakdown, topServices, selectedDate, dayRefunds, totalRefunded };
   }, [selectedDay, calendarStats, role, receipts, refunds, receiptItems, services, clinics, receptionists]);
