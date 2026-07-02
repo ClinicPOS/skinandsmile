@@ -218,8 +218,9 @@ export default function BackendPage() {
           return rec?.clinic_id === selectedClinicId;
         });
 
-    // Build patient → clinics visited map
+    // Build patient → clinics visited map and last visit date
     const patientClinicMap: Record<string, Set<string>> = {};
+    const patientLastVisit: Record<string, string> = {};
     for (const r of allReceipts) {
       const rec = receptionists.find((p) => p.id === r.receptionist_id);
       const clinic = clinics.find((c) => c.id === rec?.clinic_id);
@@ -227,14 +228,26 @@ export default function BackendPage() {
         if (!patientClinicMap[r.patient_id]) patientClinicMap[r.patient_id] = new Set();
         patientClinicMap[r.patient_id].add(clinic.name);
       }
+      if (r.patient_id) {
+        const existing = patientLastVisit[r.patient_id];
+        if (!existing || r.created_at > existing) patientLastVisit[r.patient_id] = r.created_at;
+      }
     }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     // Patients CSV — always all patients
     const patientRows: string[][] = [
-      ["Name", "Phone", "Email", "Date of Birth", "Sex", "Nationality", "Emirates ID", "Passport No.", "Notes", "Clinics Visited"],
+      ["Name", "Phone", "Email", "Date of Birth", "Sex", "Nationality", "Emirates ID", "Passport No.", "Notes", "Clinics Visited", "Last Visit", "Days Since Last Visit"],
     ];
     for (const p of patients) {
       const clinicsVisited = [...(patientClinicMap[p.id] || [])].join(", ");
+      const lastVisitRaw = patientLastVisit[p.id];
+      const lastVisitStr = lastVisitRaw ? new Date(lastVisitRaw).toLocaleDateString("en-GB") : "Never";
+      const daysSince = lastVisitRaw
+        ? Math.floor((today.getTime() - new Date(lastVisitRaw).setHours(0, 0, 0, 0)) / 86400000)
+        : "";
       patientRows.push([
         p.name || "",
         p.phone || "",
@@ -246,6 +259,8 @@ export default function BackendPage() {
         p.passport_number || "",
         p.notes || "",
         clinicsVisited,
+        lastVisitStr,
+        String(daysSince),
       ]);
     }
 
