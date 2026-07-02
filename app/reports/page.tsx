@@ -6,10 +6,27 @@ import { supabase } from "../../lib/supabase";
 
 const BOSS_PIN = "0404";
 
+type DateRange = "today" | "week" | "month";
+
+function getDateRangeStart(range: DateRange): string {
+  const now = new Date();
+  if (range === "today") {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+  }
+  if (range === "week") {
+    const day = now.getDay(); // 0 = Sunday
+    const diff = day === 0 ? 6 : day - 1; // Monday = 0
+    const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
+    return monday.toISOString();
+  }
+  // month
+  return new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+}
+
 function getPaymentCategory(method: string): string {
   const m = (method || "").toLowerCase();
   if (m.startsWith("cash")) return "Cash";
-  if (m.startsWith("split")) return "Split Payment";
+  if (m.startsWith("mixed")) return "Mixed";
   if (m.includes("tabby")) return "Tabby";
   if (m.includes("tamara")) return "Tamara";
   if (m.includes("visa")) return "Visa";
@@ -21,7 +38,7 @@ function getPaymentCategory(method: string): string {
 export default function ReportsPage() {
   const [pinInput, setPinInput] = useState("");
   const [role, setRole] = useState<"boss" | "receptionist" | null>(null);
-  const [activeClinicId, setActiveClinicId] = useState("");
+  const [activeReceptionistId, setActiveReceptionistId] = useState("");
   const [activeClinicName, setActiveClinicName] = useState("");
   const [pinError, setPinError] = useState("");
 
@@ -30,11 +47,12 @@ export default function ReportsPage() {
   const [receipts, setReceipts] = useState<any[]>([]);
   const [receiptItems, setReceiptItems] = useState<any[]>([]);
   const [services, setServices] = useState<any[]>([]);
-  const [refunds, setRefunds] = useState<any[]>([]);
 
+  const [dateRange, setDateRange] = useState<DateRange>("today");
   const [isLoading, setIsLoading] = useState(false);
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [calendarDate, setCalendarDate] = useState(new Date());
+  const [isCalendarCollapsed, setIsCalendarCollapsed] = useState(false);
 
   useEffect(() => {
     async function loadMeta() {
@@ -48,75 +66,57 @@ export default function ReportsPage() {
     loadMeta();
   }, []);
 
-  async function loadReportForMonth(date: Date) {
+  async function loadReportData(range: DateRange) {
     setIsLoading(true);
-    setSelectedDay(null);
-    const year = date.getFullYear();
-    const month = date.getMonth();
-    const from = new Date(year, month, 1).toISOString();
-    const to = new Date(year, month + 1, 1).toISOString();
+    const since = getDateRangeStart(range);
 
-    const [receiptsRes, itemsRes, servicesRes, refundsRes] = await Promise.allSettled([
-      supabase.from("receipts").select("*").gte("created_at", from).lt("created_at", to),
-      supabase.from("receipt_items").select("*, services(name)").gte("created_at", from).lt("created_at", to),
+    const [receiptsRes, itemsRes, servicesRes] = await Promise.allSettled([
+      supabase.from("receipts").select("*").gte("created_at", since),
+      supabase.from("receipt_items").select("*, services(name)").gte("created_at", since),
       supabase.from("services").select("*"),
-      supabase.from("refunds").select("*").gte("created_at", from).lt("created_at", to),
     ]);
 
     if (receiptsRes.status === "fulfilled") setReceipts(receiptsRes.value.data || []);
     if (itemsRes.status === "fulfilled") setReceiptItems(itemsRes.value.data || []);
     if (servicesRes.status === "fulfilled") setServices(servicesRes.value.data || []);
-    if (refundsRes.status === "fulfilled") setRefunds(refundsRes.value.data || []);
     setIsLoading(false);
-  }
-
-  function navigateMonth(delta: number) {
-    const next = new Date(calendarDate.getFullYear(), calendarDate.getMonth() + delta);
-    setCalendarDate(next);
-    if (role) loadReportForMonth(next);
   }
 
   function handleUnlock() {
     if (pinInput === BOSS_PIN) {
       setRole("boss");
       setPinError("");
-      loadReportForMonth(calendarDate);
+      loadReportData(dateRange);
       return;
     }
     const match = receptionists.find((r) => r.pin === pinInput);
     if (match) {
       setRole("receptionist");
+      setActiveReceptionistId(match.id);
       const clinic = clinics.find((c) => c.id === match.clinic_id);
-      setActiveClinicId(clinic?.id || "");
       setActiveClinicName(clinic?.name || "");
       setPinError("");
-      loadReportForMonth(calendarDate);
+      loadReportData(dateRange);
       return;
     }
     setPinError("Invalid PIN. Try again.");
   }
 
+  function handleRangeChange(range: DateRange) {
+    setDateRange(range);
+    loadReportData(range);
+  }
+
   // ── RECEPTIONIST VIEW DATA ──────────────────────────────────────────────
   const receptionistStats = useMemo(() => {
     if (role !== "receptionist") return null;
-    const clinicReceptionistIds = new Set(
-      receptionists.filter((r) => r.clinic_id === activeClinicId).map((r) => r.id)
-    );
-    const mine = receipts.filter((r) => clinicReceptionistIds.has(r.receptionist_id));
+    const mine = receipts.filter((r) => r.receptionist_id === activeReceptionistId);
     const cashReceipts = mine.filter((r) =>
       (r.payment_method || "").toLowerCase().startsWith("cash")
     );
     const cashTotal = cashReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
-    const totalRevenue = mine.reduce((s, r) => s + Number(r.total || 0), 0);
-
-    const paymentBreakdown: Record<string, number> = {};
-    for (const r of mine) {
-      const cat = getPaymentCategory(r.payment_method || "");
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
-    }
-
-    return { totalTransactions: mine.length, cashTotal, cashCount: cashReceipts.length, totalRevenue, paymentBreakdown };
-  }, [role, receipts, receptionists, activeClinicId]);
+    return { totalTransactions: mine.length, cashTotal, cashCount: cashReceipts.length };
+  }, [role, receipts, activeReceptionistId]);
 
   // ── BOSS VIEW DATA ──────────────────────────────────────────────────────
   const bossStats = useMemo(() => {
@@ -125,6 +125,7 @@ export default function ReportsPage() {
     const totalRevenue = receipts.reduce((s, r) => s + Number(r.total || 0), 0);
     const totalPatients = new Set(receipts.map((r) => r.patient_id)).size;
 
+    // Per clinic breakdown
     const clinicMap: Record<string, { name: string; revenue: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
     for (const clinic of clinics) {
       clinicMap[clinic.id] = { name: clinic.name, revenue: 0, patients: new Set(), paymentMethods: {} };
@@ -143,12 +144,14 @@ export default function ReportsPage() {
       entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Number(receipt.total || 0);
     }
 
+    // Overall payment method breakdown
     const paymentBreakdown: Record<string, number> = {};
     for (const r of receipts) {
       const cat = getPaymentCategory(r.payment_method || "");
       paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
     }
 
+    // Top services
     const serviceMap: Record<string, { name: string; count: number; revenue: number }> = {};
     for (const item of receiptItems) {
       const name = item.services?.name || services.find((s) => s.id === item.service_id)?.name || "Unknown";
@@ -163,6 +166,8 @@ export default function ReportsPage() {
     return { totalRevenue, totalPatients, totalTransactions: receipts.length, clinicMap, paymentBreakdown, topServices };
   }, [role, receipts, receiptItems, services, clinics, receptionists]);
 
+  const rangeLabels: Record<DateRange, string> = { today: "Today", week: "This Week", month: "This Month" };
+
   // ── CALENDAR DATA ──────────────────────────────────────────────────────
   const calendarStats = useMemo(() => {
     if (role !== "boss") return null;
@@ -173,9 +178,9 @@ export default function ReportsPage() {
     const daysInMonth = lastDay.getDate();
     const startingDayOfWeek = firstDay.getDay();
 
-    const dailyData: Record<number, { revenue: number; patients: Set<string>; count: number; hasPromo: boolean; hasRefund: boolean; refundTotal: number }> = {};
+    const dailyData: Record<number, { revenue: number; patients: Set<string>; count: number }> = {};
     for (let d = 1; d <= daysInMonth; d++) {
-      dailyData[d] = { revenue: 0, patients: new Set(), count: 0, hasPromo: false, hasRefund: false, refundTotal: 0 };
+      dailyData[d] = { revenue: 0, patients: new Set(), count: 0 };
     }
 
     for (const receipt of receipts) {
@@ -186,26 +191,14 @@ export default function ReportsPage() {
           dailyData[day].revenue += Number(receipt.total || 0);
           if (receipt.patient_id) dailyData[day].patients.add(receipt.patient_id);
           dailyData[day].count += 1;
-          if (Number(receipt.discount_amount) > 0) dailyData[day].hasPromo = true;
-        }
-      }
-    }
-
-    for (const refund of refunds) {
-      const refundDate = new Date(refund.created_at || new Date());
-      if (refundDate.getFullYear() === year && refundDate.getMonth() === month) {
-        const day = refundDate.getDate();
-        if (dailyData[day]) {
-          dailyData[day].hasRefund = true;
-          dailyData[day].refundTotal += Number(refund.total_amount || 0);
         }
       }
     }
 
     return { year, month, daysInMonth, startingDayOfWeek, dailyData };
-  }, [role, receipts, refunds, calendarDate]);
+  }, [role, receipts, calendarDate]);
 
-  // ── SELECTED DAY DETAIL VIEW ──────────────────────────────────────────
+  // ── SELECTED DAY DETAIL VIEW ──────────────────────────────────────────────
   const selectedDayStats = useMemo(() => {
     if (!selectedDay || !calendarStats || role !== "boss") return null;
 
@@ -257,16 +250,8 @@ export default function ReportsPage() {
       .sort((a, b) => b.revenue - a.revenue)
       .slice(0, 10);
 
-    const dayRefunds = refunds.filter((r) => {
-      const d = new Date(r.created_at || new Date());
-      return d >= selectedDate && d < nextDate;
-    });
-    const totalRefunded = dayRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
-
-    return { totalRevenue, totalPatients, totalTransactions: dayReceipts.length, clinicMap, paymentBreakdown, topServices, selectedDate, dayRefunds, totalRefunded };
-  }, [selectedDay, calendarStats, role, receipts, refunds, receiptItems, services, clinics, receptionists]);
-
-  const monthLabel = calendarDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+    return { totalRevenue, totalPatients, totalTransactions: dayReceipts.length, clinicMap, paymentBreakdown, topServices, selectedDate };
+  }, [selectedDay, calendarStats, role, receipts, receiptItems, services, clinics, receptionists]);
 
   if (role === null) {
     return (
@@ -308,24 +293,27 @@ export default function ReportsPage() {
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-teal-700">
               {role === "boss" ? "Manager View — All Clinics" : `Receptionist View — ${activeClinicName}`}
             </p>
-            <h2 className="mt-1 text-xl font-semibold text-slate-900">{monthLabel}</h2>
+            <h2 className="mt-1 text-xl font-semibold text-slate-900">
+              {rangeLabels[dateRange]}
+            </h2>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => navigateMonth(-1)}
-              className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-teal-300 sm:px-4 sm:py-2 sm:text-sm"
-            >
-              ← Prev
-            </button>
-            <button
-              onClick={() => navigateMonth(1)}
-              className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-teal-300 sm:px-4 sm:py-2 sm:text-sm"
-            >
-              Next →
-            </button>
+            {(["today", "week", "month"] as DateRange[]).map((r) => (
+              <button
+                key={r}
+                onClick={() => handleRangeChange(r)}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  dateRange === r
+                    ? "bg-teal-700 text-white"
+                    : "border border-slate-200 bg-white text-slate-600 hover:border-teal-300"
+                }`}
+              >
+                {rangeLabels[r]}
+              </button>
+            ))}
             <button
               onClick={() => { setRole(null); setPinInput(""); }}
-              className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-500 transition hover:bg-slate-50 sm:px-4 sm:py-2 sm:text-sm"
+              className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-500 transition hover:bg-slate-50"
             >
               Lock
             </button>
@@ -342,71 +330,117 @@ export default function ReportsPage() {
         {role === "receptionist" && receptionistStats && !isLoading && (
           <div className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-3">
-              <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Total Revenue</p>
-                <p className="mt-2 text-3xl font-bold text-teal-800">
-                  AED {receptionistStats.totalRevenue.toFixed(2)}
-                </p>
-                <p className="mt-1 text-xs text-slate-400">{receptionistStats.totalTransactions} transactions</p>
-              </div>
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Cash Collected</p>
-                <p className="mt-2 text-3xl font-bold text-slate-800">
+                <p className="mt-2 text-3xl font-bold text-teal-700">
                   AED {receptionistStats.cashTotal.toFixed(2)}
                 </p>
                 <p className="mt-1 text-xs text-slate-400">{receptionistStats.cashCount} cash transactions</p>
               </div>
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Clinic</p>
-                <p className="mt-2 text-xl font-bold text-slate-800">{activeClinicName}</p>
-                <p className="mt-1 text-xs text-slate-400">{monthLabel}</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Total Transactions</p>
+                <p className="mt-2 text-3xl font-bold text-slate-800">{receptionistStats.totalTransactions}</p>
+                <p className="mt-1 text-xs text-slate-400">all payment methods</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Period</p>
+                <p className="mt-2 text-xl font-bold text-slate-800">{rangeLabels[dateRange]}</p>
+                <p className="mt-1 text-xs text-slate-400">{activeClinicName}</p>
               </div>
             </div>
-            {Object.keys(receptionistStats.paymentBreakdown).length > 0 && (
-              <div>
-                <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Payment Methods</h3>
-                <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                  <div className="space-y-2">
-                    {Object.entries(receptionistStats.paymentBreakdown)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([method, amount]) => {
-                        const pct = receptionistStats.totalRevenue > 0 ? ((amount as number) / receptionistStats.totalRevenue) * 100 : 0;
-                        return (
-                          <div key={method}>
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="font-medium text-slate-700">{method}</span>
-                              <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
-                            </div>
-                            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-                              <div className="h-full rounded-full bg-teal-500" style={{ width: `${pct}%` }} />
-                            </div>
-                          </div>
-                        );
-                      })}
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
         {/* ── BOSS VIEW ── */}
         {role === "boss" && bossStats && !isLoading && (
           <div className="space-y-6">
-            {selectedDay && selectedDayStats ? (
+            {!selectedDay && (
+              <>
+                {/* Calendar */}
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <button
+                      onClick={() => setIsCalendarCollapsed(!isCalendarCollapsed)}
+                      className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 hover:text-slate-700"
+                    >
+                      <span>{isCalendarCollapsed ? "▶" : "▼"}</span>
+                      <span>Monthly Overview</span>
+                    </button>
+                    {!isCalendarCollapsed && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
+                          className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-50"
+                        >
+                          ← Prev
+                        </button>
+                        <span className="px-4 py-1 text-sm font-semibold text-slate-700">
+                          {calendarDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+                        </span>
+                        <button
+                          onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
+                          className="px-2 py-1 text-sm rounded border border-slate-200 hover:bg-slate-50"
+                        >
+                          Next →
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {!isCalendarCollapsed && calendarStats && (
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="grid grid-cols-7 gap-1 mb-2">
+                        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+                          <div key={day} className="text-center text-xs font-semibold text-slate-500 py-2">
+                            {day}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-7 gap-1">
+                        {Array.from({ length: calendarStats.startingDayOfWeek }).map((_, i) => (
+                          <div key={`empty-${i}`} className="aspect-square bg-slate-50 rounded" />
+                        ))}
+                        {Array.from({ length: calendarStats.daysInMonth }).map((_, i) => {
+                          const day = i + 1;
+                          const data = calendarStats.dailyData[day];
+                          return (
+                            <button
+                              key={day}
+                              onClick={() => setSelectedDay(day)}
+                              className="aspect-square rounded border-2 border-slate-200 bg-white p-1 text-left text-xs hover:border-teal-300 hover:bg-teal-50 transition"
+                            >
+                              <div className="font-semibold text-slate-900">{day}</div>
+                              {data.count > 0 && (
+                                <>
+                                  <div className="text-teal-700 font-semibold">AED {data.revenue.toFixed(0)}</div>
+                                  <div className="text-slate-500 text-[10px]">{data.patients.size}P</div>
+                                </>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {selectedDay && selectedDayStats && (
               <div>
-                <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center justify-between mb-4">
                   <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
-                    {selectedDayStats.selectedDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+                    Daily Breakdown — {selectedDayStats.selectedDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
                   </h3>
                   <button
                     onClick={() => setSelectedDay(null)}
-                    className="self-start rounded border border-slate-200 bg-white px-3 py-1 text-sm font-semibold text-slate-700 hover:bg-slate-50 sm:self-auto"
+                    className="px-3 py-1 text-sm rounded border border-slate-200 bg-white hover:bg-slate-50 font-semibold text-slate-700"
                   >
-                    ← Back to Calendar
+                    Back to Calendar
                   </button>
                 </div>
 
+                {/* Summary cards */}
                 <div className="grid gap-4 sm:grid-cols-3 mb-6">
                   <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
                     <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Total Revenue</p>
@@ -424,29 +458,7 @@ export default function ReportsPage() {
                   </div>
                 </div>
 
-                {selectedDayStats.dayRefunds.length > 0 && (
-                  <div className="mb-6 rounded-2xl border border-purple-200 bg-purple-50/60 p-4">
-                    <p className="text-xs font-bold uppercase tracking-widest text-purple-700 mb-3">Refunds This Day</p>
-                    <div className="space-y-2">
-                      {selectedDayStats.dayRefunds.map((refund: any) => (
-                        <div key={refund.id} className="flex items-center justify-between rounded-xl bg-white border border-purple-100 px-4 py-2.5">
-                          <div>
-                            <p className="text-sm font-semibold text-slate-800">
-                              {new Date(refund.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}
-                            </p>
-                            <p className="text-xs text-slate-500 italic">{refund.reason || "No reason given"}</p>
-                          </div>
-                          <span className="font-bold text-purple-700">- AED {Number(refund.total_amount).toFixed(2)}</span>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 flex justify-between border-t border-purple-200 pt-2 text-sm font-bold text-purple-800">
-                      <span>Total Refunded</span>
-                      <span>- AED {selectedDayStats.totalRefunded.toFixed(2)}</span>
-                    </div>
-                  </div>
-                )}
-
+                {/* Per clinic breakdown */}
                 <div className="mb-6">
                   <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Per Clinic</h3>
                   <div className="space-y-3">
@@ -473,6 +485,7 @@ export default function ReportsPage() {
                   </div>
                 </div>
 
+                {/* Payment method breakdown */}
                 <div className="mb-6">
                   <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Payment Methods</h3>
                   <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -488,7 +501,10 @@ export default function ReportsPage() {
                                 <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
                               </div>
                               <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-                                <div className="h-full rounded-full bg-teal-500" style={{ width: `${pct}%` }} />
+                                <div
+                                  className="h-full rounded-full bg-teal-500"
+                                  style={{ width: `${pct}%` }}
+                                />
                               </div>
                             </div>
                           );
@@ -496,178 +512,110 @@ export default function ReportsPage() {
                     </div>
                   </div>
                 </div>
-
-                {selectedDayStats.topServices.length > 0 && (
-                  <div>
-                    <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Top Services</h3>
-                  <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-x-auto">
-                      <table className="w-full min-w-[400px] text-sm">
-                        <thead className="border-b border-slate-100 bg-slate-50">
-                          <tr>
-                            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Service</th>
-                            <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Count</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Revenue</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedDayStats.topServices.map((s, i) => (
-                            <tr key={i} className="border-b border-slate-100 last:border-0">
-                              <td className="px-4 py-3 font-medium text-slate-900">{s.name}</td>
-                              <td className="px-4 py-3 text-center text-slate-500">{s.count}</td>
-                              <td className="px-4 py-3 text-right font-semibold text-teal-700">AED {s.revenue.toFixed(2)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
               </div>
-            ) : (
+            )}
+
+            {(!selectedDay || !selectedDayStats) && (
               <>
-                {/* Calendar */}
-                {calendarStats && (
-                  <div className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm sm:p-4">
-                    <div className="grid grid-cols-7 gap-0.5 mb-1 sm:gap-1 sm:mb-2">
-                      {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => (
-                        <div key={day} className="text-center text-[10px] font-semibold text-slate-500 py-1 sm:text-xs sm:py-2">
-                          {day}
-                        </div>
-                      ))}
+            {/* Summary cards */}
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Total Revenue</p>
+                <p className="mt-2 text-3xl font-bold text-teal-800">
+                  AED {bossStats.totalRevenue.toFixed(2)}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Patients Seen</p>
+                <p className="mt-2 text-3xl font-bold text-slate-800">{bossStats.totalPatients}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Transactions</p>
+                <p className="mt-2 text-3xl font-bold text-slate-800">{bossStats.totalTransactions}</p>
+              </div>
+            </div>
+
+            {/* Per clinic breakdown */}
+            <div>
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Per Clinic</h3>
+              <div className="space-y-3">
+                {Object.entries(bossStats.clinicMap).map(([clinicId, data]) => (
+                  <div key={clinicId} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <p className="font-semibold text-slate-900">{data.name}</p>
+                      <p className="text-lg font-bold text-teal-700">AED {data.revenue.toFixed(2)}</p>
                     </div>
-                    <div className="grid grid-cols-7 gap-0.5 sm:gap-1">
-                      {Array.from({ length: calendarStats.startingDayOfWeek }).map((_, i) => (
-                        <div key={`empty-${i}`} className="aspect-square bg-slate-50 rounded" />
-                      ))}
-                      {Array.from({ length: calendarStats.daysInMonth }).map((_, i) => {
-                        const day = i + 1;
-                        const data = calendarStats.dailyData[day];
-                        return (
-                          <button
-                            key={day}
-                            onClick={() => setSelectedDay(day)}
-                            className="aspect-square rounded border border-slate-200 bg-white p-0.5 text-left text-[10px] hover:border-teal-300 hover:bg-teal-50 transition sm:border-2 sm:p-1 sm:text-xs"
-                          >
-                            <div className="font-semibold text-slate-900 text-[10px] sm:text-xs">{day}</div>
-                            {data.count > 0 && (
-                              <>
-                                <div className="text-teal-700 font-semibold text-[8px] leading-tight sm:text-[10px]">
-                                  {data.revenue >= 1000
-                                    ? `${(data.revenue / 1000).toFixed(1)}k`
-                                    : data.revenue.toFixed(0)}
-                                </div>
-                                <div className="text-slate-500 text-[8px] leading-tight sm:text-[10px]">{data.patients.size}P</div>
-                                {data.hasPromo && (
-                                  <div className="mt-0.5 text-[7px] font-bold text-red-500 leading-tight sm:text-[9px]">PROMO</div>
-                                )}
-                                {data.hasRefund && (
-                                  <div className="mt-0.5 text-[7px] font-bold text-purple-600 leading-tight sm:text-[9px]">RFND</div>
-                                )}
-                              </>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* Monthly summary */}
-                <div className="grid gap-4 sm:grid-cols-3">
-                  <div className="rounded-2xl border border-teal-200 bg-teal-50 p-5 shadow-sm">
-                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-600">Total Revenue</p>
-                    <p className="mt-2 text-3xl font-bold text-teal-800">
-                      AED {bossStats.totalRevenue.toFixed(2)}
-                    </p>
-                  </div>
-                  <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Patients Seen</p>
-                    <p className="mt-2 text-3xl font-bold text-slate-800">{bossStats.totalPatients}</p>
-                  </div>
-                  <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Transactions</p>
-                    <p className="mt-2 text-3xl font-bold text-slate-800">{bossStats.totalTransactions}</p>
-                  </div>
-                </div>
-
-                {/* Per clinic breakdown */}
-                <div>
-                  <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Per Clinic</h3>
-                  <div className="space-y-3">
-                    {Object.entries(bossStats.clinicMap).map(([clinicId, data]) => (
-                      <div key={clinicId} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                        <div className="flex items-center justify-between">
-                          <p className="font-semibold text-slate-900">{data.name}</p>
-                          <p className="text-lg font-bold text-teal-700">AED {data.revenue.toFixed(2)}</p>
-                        </div>
-                        <p className="mt-1 text-xs text-slate-500">{data.patients.size} patients</p>
-                        {Object.keys(data.paymentMethods).length > 0 && (
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {Object.entries(data.paymentMethods)
-                              .sort((a, b) => b[1] - a[1])
-                              .map(([method, amount]) => (
-                                <span key={method} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-                                  {method}: AED {(amount as number).toFixed(2)}
-                                </span>
-                              ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Payment method breakdown */}
-                <div>
-                  <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Payment Methods (All Clinics)</h3>
-                  <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="space-y-2">
-                      {Object.entries(bossStats.paymentBreakdown)
-                        .sort((a, b) => b[1] - a[1])
-                        .map(([method, amount]) => {
-                          const pct = bossStats.totalRevenue > 0 ? ((amount as number) / bossStats.totalRevenue) * 100 : 0;
-                          return (
-                            <div key={method}>
-                              <div className="flex items-center justify-between text-sm">
-                                <span className="font-medium text-slate-700">{method}</span>
-                                <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
-                              </div>
-                              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-                                <div className="h-full rounded-full bg-teal-500" style={{ width: `${pct}%` }} />
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Top services */}
-                {bossStats.topServices.length > 0 && (
-                  <div>
-                    <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Top Services</h3>
-                    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-x-auto">
-                      <table className="w-full min-w-[400px] text-sm">
-                        <thead className="border-b border-slate-100 bg-slate-50">
-                          <tr>
-                            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Service</th>
-                            <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Count</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Revenue</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {bossStats.topServices.map((s, i) => (
-                            <tr key={i} className="border-b border-slate-100 last:border-0">
-                              <td className="px-4 py-3 font-medium text-slate-900">{s.name}</td>
-                              <td className="px-4 py-3 text-center text-slate-500">{s.count}</td>
-                              <td className="px-4 py-3 text-right font-semibold text-teal-700">AED {s.revenue.toFixed(2)}</td>
-                            </tr>
+                    <p className="mt-1 text-xs text-slate-500">{data.patients.size} patients</p>
+                    {Object.keys(data.paymentMethods).length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {Object.entries(data.paymentMethods)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([method, amount]) => (
+                            <span key={method} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                              {method}: AED {(amount as number).toFixed(2)}
+                            </span>
                           ))}
-                        </tbody>
-                      </table>
-                    </div>
+                      </div>
+                    )}
                   </div>
-                )}
+                ))}
+              </div>
+            </div>
+
+            {/* Payment method breakdown */}
+            <div>
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Payment Methods (All Clinics)</h3>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="space-y-2">
+                  {Object.entries(bossStats.paymentBreakdown)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([method, amount]) => {
+                      const pct = bossStats.totalRevenue > 0 ? ((amount as number) / bossStats.totalRevenue) * 100 : 0;
+                      return (
+                        <div key={method}>
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="font-medium text-slate-700">{method}</span>
+                            <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
+                          </div>
+                          <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                            <div
+                              className="h-full rounded-full bg-teal-500"
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            </div>
+
+            {/* Top services */}
+            {bossStats.topServices.length > 0 && (
+              <div>
+                <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Top Services</h3>
+                <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="border-b border-slate-100 bg-slate-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Service</th>
+                        <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Count</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Revenue</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bossStats.topServices.map((s, i) => (
+                        <tr key={i} className="border-b border-slate-100 last:border-0">
+                          <td className="px-4 py-3 font-medium text-slate-900">{s.name}</td>
+                          <td className="px-4 py-3 text-center text-slate-500">{s.count}</td>
+                          <td className="px-4 py-3 text-right font-semibold text-teal-700">AED {s.revenue.toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
               </>
             )}
           </div>
