@@ -66,7 +66,7 @@ export default function ReportsPage() {
     let loadedRefunds: any[] = [];
     if (loadedReceipts.length > 0) {
       const receiptIds = loadedReceipts.map((r: any) => r.id);
-      const refundsRes = await supabase.from("refunds").select("*").in("receipt_id", receiptIds);
+      const refundsRes = await supabase.from("refunds").select("*, refunded_by_receptionist:refunded_by(name)").in("receipt_id", receiptIds);
       loadedRefunds = refundsRes.data || [];
     }
 
@@ -463,6 +463,9 @@ export default function ReportsPage() {
                               </span>
                             </p>
                             <p className="text-xs text-slate-500 italic">{refund.reason || "No reason given"}</p>
+                            <p className="text-xs text-slate-400">
+                              Processed by: <span className="font-medium text-slate-600">{refund.refunded_by_receptionist?.name || "Boss"}</span>
+                            </p>
                           </div>
                           <span className="font-bold text-purple-700">- AED {Number(refund.total_amount).toFixed(2)}</span>
                         </div>

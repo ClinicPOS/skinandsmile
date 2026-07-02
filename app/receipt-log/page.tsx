@@ -5,8 +5,14 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 
 const PAGE_SIZE = 10;
+const BOSS_PIN = "0404";
 
 export default function ReceiptLogPage() {
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [loginReceptionistId, setLoginReceptionistId] = useState("");
+  const [loggedInReceptionistId, setLoggedInReceptionistId] = useState<string | null>(null);
+  const [pinInput, setPinInput] = useState("");
+  const [pinError, setPinError] = useState("");
   const [receipts, setReceipts] = useState<any[]>([]);
   const [patients, setPatients] = useState<any[]>([]);
   const [receptionists, setReceptionists] = useState<any[]>([]);
@@ -36,6 +42,23 @@ export default function ReceiptLogPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  function handleUnlock() {
+    if (pinInput === BOSS_PIN) {
+      setIsUnlocked(true);
+      setLoggedInReceptionistId(null);
+      setPinError("");
+      return;
+    }
+    const match = receptionists.find((r) => String(r.pin) === pinInput && r.id === loginReceptionistId);
+    if (match) {
+      setIsUnlocked(true);
+      setLoggedInReceptionistId(match.id);
+      setPinError("");
+      return;
+    }
+    setPinError("Invalid PIN. Try again.");
+  }
 
   async function loadData() {
     setIsLoading(true);
@@ -142,6 +165,7 @@ export default function ReceiptLogPage() {
       .insert([{
         receipt_id: selectedReceipt.id,
         receptionist_id: selectedReceipt.receptionist_id,
+        refunded_by: loggedInReceptionistId,
         reason: refundReason.trim(),
         total_amount: totalRefund,
         payment_method: selectedReceipt.payment_method,
@@ -352,6 +376,51 @@ export default function ReceiptLogPage() {
     if (!w) { alert("Please allow popups."); return; }
     w.document.open(); w.document.write(html); w.document.close();
     w.focus(); setTimeout(() => w.print(), 500);
+  }
+
+  if (!isUnlocked) {
+    return (
+      <AppFrame title="Receipt History" description="View and manage past receipts.">
+        <div className="mx-auto max-w-sm">
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-teal-700">Receipt History</p>
+          <h2 className="mt-2 text-2xl font-semibold text-slate-900">Enter PIN</h2>
+          <p className="mt-1 text-sm text-slate-500">Select your name and enter your PIN to continue.</p>
+          <div className="mt-5 grid gap-4">
+            <div className="space-y-2">
+              <label className="block text-sm font-semibold text-slate-700">Receptionist</label>
+              <select
+                value={loginReceptionistId}
+                onChange={(e) => setLoginReceptionistId(e.target.value)}
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
+              >
+                <option value="">Select Receptionist</option>
+                {receptionists.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="block text-sm font-semibold text-slate-700">PIN</label>
+              <input
+                type="password"
+                value={pinInput}
+                onChange={(e) => { setPinInput(e.target.value); setPinError(""); }}
+                onKeyDown={(e) => e.key === "Enter" && handleUnlock()}
+                placeholder="Enter PIN"
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
+              />
+            </div>
+            {pinError && <p className="text-sm text-red-500">{pinError}</p>}
+            <button
+              onClick={handleUnlock}
+              className="w-full rounded-2xl bg-teal-700 px-5 py-3 text-sm font-semibold text-white transition hover:bg-teal-600"
+            >
+              Continue
+            </button>
+          </div>
+        </div>
+      </AppFrame>
+    );
   }
 
   return (
