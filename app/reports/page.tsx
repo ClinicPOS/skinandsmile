@@ -269,7 +269,9 @@ export default function ReportsPage() {
       clinicMap[clinicId].refunded += Number(refund.total_amount || 0);
     }
 
-    const totalRefunded = dayRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);: Record<string, number> = {};
+    const totalRefunded = dayRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
+
+    const paymentBreakdown: Record<string, number> = {};
     for (const r of dayReceipts) {
       const cat = getPaymentCategory(r.payment_method || "");
       paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
