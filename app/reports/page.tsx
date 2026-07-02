@@ -132,9 +132,9 @@ export default function ReportsPage() {
     const totalRevenue = receipts.reduce((s, r) => s + Number(r.total || 0), 0);
     const totalPatients = new Set(receipts.map((r) => r.patient_id)).size;
 
-    const clinicMap: Record<string, { name: string; revenue: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
+    const clinicMap: Record<string, { name: string; revenue: number; refunded: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
     for (const clinic of clinics) {
-      clinicMap[clinic.id] = { name: clinic.name, revenue: 0, patients: new Set(), paymentMethods: {} };
+      clinicMap[clinic.id] = { name: clinic.name, revenue: 0, refunded: 0, patients: new Set(), paymentMethods: {} };
     }
 
     for (const receipt of receipts) {
@@ -148,6 +148,14 @@ export default function ReportsPage() {
 
       const cat = getPaymentCategory(receipt.payment_method || "");
       entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Number(receipt.total || 0);
+    }
+
+    for (const refund of refunds) {
+      const receipt = receipts.find((r) => r.id === refund.receipt_id);
+      const receptionist = receptionists.find((r) => r.id === receipt?.receptionist_id);
+      const clinicId = receptionist?.clinic_id;
+      if (!clinicId || !clinicMap[clinicId]) continue;
+      clinicMap[clinicId].refunded += Number(refund.total_amount || 0);
     }
 
     const paymentBreakdown: Record<string, number> = {};
@@ -235,9 +243,9 @@ export default function ReportsPage() {
     const totalRevenue = dayReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
     const totalPatients = new Set(dayReceipts.map((r) => r.patient_id)).size;
 
-    const clinicMap: Record<string, { name: string; revenue: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
+    const clinicMap: Record<string, { name: string; revenue: number; refunded: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
     for (const clinic of clinics) {
-      clinicMap[clinic.id] = { name: clinic.name, revenue: 0, patients: new Set(), paymentMethods: {} };
+      clinicMap[clinic.id] = { name: clinic.name, revenue: 0, refunded: 0, patients: new Set(), paymentMethods: {} };
     }
 
     for (const receipt of dayReceipts) {
@@ -251,6 +259,14 @@ export default function ReportsPage() {
 
       const cat = getPaymentCategory(receipt.payment_method || "");
       entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Number(receipt.total || 0);
+    }
+
+    for (const refund of dayRefunds) {
+      const receipt = receipts.find((r) => r.id === refund.receipt_id);
+      const receptionist = receptionists.find((r) => r.id === receipt?.receptionist_id);
+      const clinicId = receptionist?.clinic_id;
+      if (!clinicId || !clinicMap[clinicId]) continue;
+      clinicMap[clinicId].refunded += Number(refund.total_amount || 0);
     }
 
     const paymentBreakdown: Record<string, number> = {};
@@ -488,6 +504,18 @@ export default function ReportsPage() {
                           <p className="text-lg font-bold text-teal-700">AED {data.revenue.toFixed(2)}</p>
                         </div>
                         <p className="mt-1 text-xs text-slate-500">{data.patients.size} patients</p>
+                        {data.refunded > 0 && (
+                          <div className="mt-2 flex items-center justify-between border-t border-slate-100 pt-2">
+                            <span className="text-xs text-red-500">− Refunded</span>
+                            <span className="text-xs font-semibold text-red-500">− AED {data.refunded.toFixed(2)}</span>
+                          </div>
+                        )}
+                        {data.refunded > 0 && (
+                          <div className="flex items-center justify-between border-t border-slate-200 pt-2 mt-1">
+                            <span className="text-xs font-bold text-slate-700">Net Total</span>
+                            <span className="text-sm font-bold text-slate-900">AED {(data.revenue - data.refunded).toFixed(2)}</span>
+                          </div>
+                        )}
                         {Object.keys(data.paymentMethods).length > 0 && (
                           <div className="mt-3 flex flex-wrap gap-2">
                             {Object.entries(data.paymentMethods)
@@ -632,6 +660,18 @@ export default function ReportsPage() {
                           <p className="text-lg font-bold text-teal-700">AED {data.revenue.toFixed(2)}</p>
                         </div>
                         <p className="mt-1 text-xs text-slate-500">{data.patients.size} patients</p>
+                        {data.refunded > 0 && (
+                          <div className="mt-2 flex items-center justify-between border-t border-slate-100 pt-2">
+                            <span className="text-xs text-red-500">− Refunded</span>
+                            <span className="text-xs font-semibold text-red-500">− AED {data.refunded.toFixed(2)}</span>
+                          </div>
+                        )}
+                        {data.refunded > 0 && (
+                          <div className="flex items-center justify-between border-t border-slate-200 pt-2 mt-1">
+                            <span className="text-xs font-bold text-slate-700">Net Total</span>
+                            <span className="text-sm font-bold text-slate-900">AED {(data.revenue - data.refunded).toFixed(2)}</span>
+                          </div>
+                        )}
                         {Object.keys(data.paymentMethods).length > 0 && (
                           <div className="mt-3 flex flex-wrap gap-2">
                             {Object.entries(data.paymentMethods)
