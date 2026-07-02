@@ -348,7 +348,7 @@ export default function ReportsPage() {
             </p>
             <h2 className="mt-1 text-xl font-semibold text-slate-900">{monthLabel}</h2>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => navigateMonth(-1)}
               className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-teal-300 sm:px-4 sm:py-2 sm:text-sm"

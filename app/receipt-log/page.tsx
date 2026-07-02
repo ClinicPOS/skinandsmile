@@ -654,7 +654,7 @@ export default function ReceiptLogPage() {
 
       {showRefundModal && selectedReceipt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
+          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl overflow-y-auto max-h-[90vh]">
             <h3 className="text-lg font-semibold text-slate-900">Process Refund</h3>
             <p className="mt-1 text-sm text-slate-500">
               {selectedReceipt.receipt_number
