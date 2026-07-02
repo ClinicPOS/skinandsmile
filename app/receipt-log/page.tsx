@@ -54,6 +54,7 @@ export default function ReceiptLogPage() {
     if (match) {
       setIsUnlocked(true);
       setLoggedInReceptionistId(match.id);
+      if (match.clinic_id) setSelectedClinicId(match.clinic_id);
       setPinError("");
       return;
     }
@@ -432,16 +433,18 @@ export default function ReceiptLogPage() {
         </div>
 
         <div className="flex flex-col gap-3 sm:flex-row">
-          <select
-            value={selectedClinicId}
-            onChange={(e) => setSelectedClinicId(e.target.value)}
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-          >
-            <option value="all">All Clinics</option>
-            {clinics.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
+          {loggedInReceptionistId === null && (
+            <select
+              value={selectedClinicId}
+              onChange={(e) => setSelectedClinicId(e.target.value)}
+              className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
+            >
+              <option value="all">All Clinics</option>
+              {clinics.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          )}
           <input
             type="text"
             value={search}
