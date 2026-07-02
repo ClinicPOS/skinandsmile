@@ -20,6 +20,8 @@ export default function BackendPage() {
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [selectedClinicId, setSelectedClinicId] = useState<string>("all");
   const [isRegisterTableReady, setIsRegisterTableReady] = useState(true);
+  const [activeSessions, setActiveSessions] = useState<{ token: string; ip: string; user_agent: string; created_at: string }[]>([]);
+  const [loginLogs, setLoginLogs] = useState<{ id: string; ip: string; user_agent: string; success: boolean; created_at: string }[]>([]);
 
   const [patientName, setPatientName] = useState("");
   const [patientPhone, setPatientPhone] = useState("");
@@ -131,6 +133,11 @@ export default function BackendPage() {
     }
   }, [isUnlocked]);
 
+  async function revokeSession(token: string) {
+    await supabase.from("active_sessions").delete().eq("token", token);
+    setActiveSessions((prev) => prev.filter((s) => s.token !== token));
+  }
+
   async function loadAll() {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
@@ -142,6 +149,8 @@ export default function BackendPage() {
       receptionistsResult,
       cashSessionsResult,
       clinicsResult,
+      sessionsResult,
+      logsResult,
     ] = await Promise.all([
       supabase.from("patients").select("*"),
       supabase.from("doctors").select("*"),
@@ -153,6 +162,8 @@ export default function BackendPage() {
         .gte("opened_at", startOfDay.toISOString())
         .order("opened_at", { ascending: false }),
       supabase.from("clinics").select("*").order("name"),
+      supabase.from("active_sessions").select("*").order("created_at", { ascending: false }),
+      supabase.from("login_logs").select("*").order("created_at", { ascending: false }).limit(20),
     ]);
 
     setPatients((patientsResult.data || []) as Patient[]);
@@ -160,6 +171,8 @@ export default function BackendPage() {
     setServices((servicesResult.data || []) as Service[]);
     setReceptionists((receptionistsResult.data || []) as Receptionist[]);
     setClinics((clinicsResult.data || []) as Clinic[]);
+    setActiveSessions((sessionsResult.data || []) as typeof activeSessions);
+    setLoginLogs((logsResult.data || []) as typeof loginLogs);
 
     if (cashSessionsResult.error) {
       setCashRegisterSessions([]);
@@ -1251,6 +1264,84 @@ export default function BackendPage() {
           </div>
         )}
 
+      </div>
+
+      {/* Login Sessions */}
+      <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-5">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Active Sessions</h2>
+            <p className="mt-1 text-sm text-slate-500">People currently logged into the app. Remove anyone you don&apos;t recognise.</p>
+          </div>
+          <button onClick={loadAll} className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50">Refresh</button>
+        </div>
+        {activeSessions.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">No active sessions.</div>
+        ) : (
+          <div className="overflow-x-auto rounded-2xl border border-slate-200">
+            <table className="min-w-full divide-y divide-slate-200 text-sm">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-700">IP Address</th>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-700">Browser / Device</th>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-700">Logged In</th>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-700"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 bg-white">
+                {activeSessions.map((s) => (
+                  <tr key={s.token}>
+                    <td className="px-4 py-3 text-slate-800">{s.ip}</td>
+                    <td className="px-4 py-3 text-slate-600 max-w-xs truncate">{s.user_agent}</td>
+                    <td className="px-4 py-3 text-slate-600">{new Date(s.created_at).toLocaleString()}</td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => { if (confirm("Remove this session? That person will be logged out.")) revokeSession(s.token); }}
+                        className="rounded-lg bg-red-50 px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-100 transition"
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="mt-6">
+          <h3 className="mb-3 text-sm font-semibold text-slate-700">Recent Login Attempts</h3>
+          {loginLogs.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">No login attempts recorded.</div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-slate-200">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left font-semibold text-slate-700">IP Address</th>
+                    <th className="px-4 py-3 text-left font-semibold text-slate-700">Browser / Device</th>
+                    <th className="px-4 py-3 text-left font-semibold text-slate-700">Time</th>
+                    <th className="px-4 py-3 text-left font-semibold text-slate-700">Result</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 bg-white">
+                  {loginLogs.map((log) => (
+                    <tr key={log.id}>
+                      <td className="px-4 py-3 text-slate-800">{log.ip}</td>
+                      <td className="px-4 py-3 text-slate-600 max-w-xs truncate">{log.user_agent}</td>
+                      <td className="px-4 py-3 text-slate-600">{new Date(log.created_at).toLocaleString()}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${log.success ? "bg-teal-100 text-teal-700" : "bg-red-100 text-red-700"}`}>
+                          {log.success ? "Success" : "Failed"}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
     </AppFrame>
   );
