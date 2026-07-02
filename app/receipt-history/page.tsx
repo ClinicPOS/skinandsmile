@@ -21,6 +21,7 @@ type Receipt = {
 type LookupItem = {
   id: string;
   name: string;
+  clinic_id?: string;
 };
 
 type Patient = {
@@ -68,7 +69,7 @@ export default function ReceiptHistoryPage() {
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
       supabase.from("patients").select("id, name, phone, patient_number").order("name", { ascending: true }),
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
-      supabase.from("receptionist").select("id, name").order("name", { ascending: true }),
+      supabase.from("receptionist").select("id, name, clinic_id").order("name", { ascending: true }),
       supabase.from("services").select("id, name").order("name", { ascending: true }),
       supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total"),
       supabase.from("clinics").select("*"),
@@ -115,7 +116,8 @@ export default function ReceiptHistoryPage() {
   function printSelectedReceipt() {
     if (!selectedReceipt) return;
 
-    const clinic = clinics[0];
+    const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
+    const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
     const logoPath = clinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo3.png";
     const clinicDisplayName = clinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
     const clinicAddress = clinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
