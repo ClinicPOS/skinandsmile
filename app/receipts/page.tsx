@@ -8,7 +8,7 @@ import { Clinic } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal, TreatmentHistoryModal } from "../../components/pos-modals";
 
-const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara", "Mixed"];
+const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara", "Split Payment"];
 const POS_REGISTER_SESSION_KEY = "posRegisterSession";
 const POS_RECENT_SERVICES_KEY = "posRecentServices";
 const REGISTER_TABLE = "cash_register_sessions";
@@ -133,6 +133,8 @@ export default function ReceiptsPage() {
   const [mixedCashInput, setMixedCashInput] = useState("");
   const [mixedOtherMethod, setMixedOtherMethod] = useState("Card");
   const [mixedOtherAmountInput, setMixedOtherAmountInput] = useState("");
+  const [discountInput, setDiscountInput] = useState("");
+  const [discountType, setDiscountType] = useState<"AED" | "%">("AED");
   const [showPrintModal, setShowPrintModal] = useState(false);
   const [isSavingReceipt, setIsSavingReceipt] = useState(false);
   const [isPosUnlocked, setIsPosUnlocked] = useState(false);
@@ -147,13 +149,12 @@ export default function ReceiptsPage() {
   const [cashSalesTotal, setCashSalesTotal] = useState(0);
   const [expectedCashAmount, setExpectedCashAmount] = useState(0);
   const [isLoadingCashSummary, setIsLoadingCashSummary] = useState(false);
-  const [showReceiptPreview, setShowReceiptPreview] = useState(false);
-  const [receiptPreviewHtml, setReceiptPreviewHtml] = useState("");
   const [currentReceipt, setCurrentReceipt] = useState<any | null>(null);
   const [showSearchPatientModal, setShowSearchPatientModal] = useState(false);
   const [showReceiptHistoryModal, setShowReceiptHistoryModal] = useState(false);
   const [showTreatmentHistoryModal, setShowTreatmentHistoryModal] = useState(false);
-  const receiptPreviewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const isProceedingRef = useRef(false);
+  const [isProceeding, setIsProceeding] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -246,9 +247,34 @@ export default function ReceiptsPage() {
     });
   }
 
+  function updateCartItemPrice(index: number, newPriceStr: string) {
+    const parsed = parseFloat(newPriceStr);
+    if (!Number.isFinite(parsed) || parsed < 0) return;
+    setSelectedServices((current) => {
+      const updated = [...current];
+      const item = { ...updated[index] };
+      const original = item.originalPrice ?? Number(item.price);
+      if (parsed !== original) {
+        item.originalPrice = original;
+      } else {
+        delete item.originalPrice;
+      }
+      item.price = parsed;
+      updated[index] = item;
+      return updated;
+    });
+  }
+
   const subtotal = selectedServices.reduce((sum, service) => sum + Number(service.price), 0);
-  const vat = 0;
-  const total = subtotal;
+  const discountAmount = (() => {
+    const v = parseFloat(discountInput) || 0;
+    if (v <= 0) return 0;
+    if (discountType === "%") return Math.min(subtotal, (subtotal * v) / 100);
+    return Math.min(subtotal, v);
+  })();
+  const preVatTotal = subtotal - discountAmount;
+  const vat = activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? Math.round(preVatTotal * 0.05 * 100) / 100 : 0;
+  const total = preVatTotal + vat;
 
   const clinicServices = useMemo(() => {
     if (!activeClinic) return [];
@@ -394,12 +420,28 @@ export default function ReceiptsPage() {
       .select("id")
       .single();
 
-    if (registerError || !registerData) {
-      console.warn("Register session insert warning", registerError);
-      alert(
-        "Register opened locally, but shift log was not saved to database. Please create table 'cash_register_sessions' if not configured."
-      );
-    } else {
+    if (registerError) {
+      if (registerError.code === "23505") {
+        // Already has an open session — resume it
+        const { data: existing } = await supabase
+          .from(REGISTER_TABLE)
+          .select("id, opening_cash, opened_at")
+          .eq("receptionist_id", loginReceptionistId)
+          .is("closed_at", null)
+          .single();
+        if (existing) {
+          createdRegisterSessionId = String(existing.id);
+        } else {
+          alert("A register session already exists but could not be retrieved. Please contact support.");
+          return;
+        }
+      } else {
+        console.warn("Register session insert warning", registerError);
+        alert(
+          "Register opened locally, but shift log was not saved to database. Please create table 'cash_register_sessions' if not configured."
+        );
+      }
+    } else if (registerData) {
       createdRegisterSessionId = String(registerData.id);
     }
 
@@ -484,6 +526,8 @@ export default function ReceiptsPage() {
     setSelectedPaymentMethod("");
     setNotes("");
     setSelectedServices([]);
+    setDiscountInput("");
+    setDiscountType("AED");
     setFilteredPatients([]);
     setShowPatientSuggestions(false);
     setShowPaymentModal(false);
@@ -500,7 +544,7 @@ export default function ReceiptsPage() {
       .from("receipts")
       .select("total")
       .eq("receptionist_id", activeReceptionistId)
-      .eq("payment_method", "Cash")
+      .ilike("payment_method", "Cash%")
       .gte("created_at", registerOpenedAt);
 
     if (error) {
@@ -523,6 +567,10 @@ export default function ReceiptsPage() {
   }
 
   async function proceedToPayment() {
+    if (isProceedingRef.current) return;
+    isProceedingRef.current = true;
+    setIsProceeding(true);
+    try {
     if (!isPosUnlocked) {
       alert("Open the register first to use POS.");
       return;
@@ -537,33 +585,47 @@ export default function ReceiptsPage() {
 
     // If patientId is empty but patientName exists, create new patient
     if (!patientId && patientName.trim()) {
-      const { data: maxPatient } = await supabase
-        .from("patients")
-        .select("patient_number")
-        .order("patient_number", { ascending: false })
-        .limit(1);
-      const nextPatientNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
+      let newPatient = null;
+      let lastError: any = null;
 
-      const { data: newPatient, error: createError } = await supabase
-        .from("patients")
-        .insert([
-          {
-            name: patientName.trim(),
-            phone: patientPhoneInput.trim() || "",
-            email: patientEmailInput.trim() || null,
-            date_of_birth: patientDobInput || null,
-            sex: patientSexInput || null,
-            emirates_id: patientEmiratesIdInput.trim() || null,
-            passport_number: patientPassportInput.trim() || null,
-            patient_number: nextPatientNumber,
-          },
-        ])
-        .select()
-        .single();
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const { data: maxPatient } = await supabase
+          .from("patients")
+          .select("patient_number")
+          .not("patient_number", "is", null)
+          .order("patient_number", { ascending: false })
+          .limit(1);
+        const nextPatientNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
 
-      if (createError || !newPatient) {
-        console.error("Create patient error", createError);
-        alert(`Error creating new patient: ${createError?.message || "unknown error"}`);
+        const { data, error } = await supabase
+          .from("patients")
+          .insert([
+            {
+              name: patientName.trim(),
+              phone: patientPhoneInput.trim() || "",
+              email: patientEmailInput.trim() || null,
+              date_of_birth: patientDobInput || null,
+              sex: patientSexInput || null,
+              emirates_id: patientEmiratesIdInput.trim() || null,
+              passport_number: patientPassportInput.trim() || null,
+              patient_number: nextPatientNumber,
+            },
+          ])
+          .select()
+          .single();
+
+        if (!error) {
+          newPatient = data;
+          break;
+        }
+
+        lastError = error;
+        if ((error as any).code !== "23505") break; // non-duplicate error, don't retry
+      }
+
+      if (!newPatient) {
+        console.error("Create patient error", lastError);
+        alert(`Error creating new patient: ${lastError?.message || "unknown error"}`);
         return;
       }
 
@@ -574,6 +636,10 @@ export default function ReceiptsPage() {
     // Set the transaction patient ID to use throughout the payment/print flow
     setTransactionPatientId(finalPatientId);
     setShowPaymentModal(true);
+    } finally {
+      isProceedingRef.current = false;
+      setIsProceeding(false);
+    }
   }
 
   function selectPaymentMethod(method: string) {
@@ -612,10 +678,10 @@ export default function ReceiptsPage() {
       return `Cash (Received AED ${cash.toFixed(2)}, Change AED ${change.toFixed(2)})`;
     }
 
-    if (selectedPaymentMethod === "Mixed") {
+    if (selectedPaymentMethod === "Split Payment") {
       const cash = getMixedCashAmount();
       const other = getMixedOtherAmount();
-      return `Mixed (Cash AED ${cash.toFixed(2)} + ${mixedOtherMethod} AED ${other.toFixed(2)})`;
+      return `Split Payment (Cash AED ${cash.toFixed(2)} + ${mixedOtherMethod} AED ${other.toFixed(2)})`;
     }
 
     return selectedPaymentMethod;
@@ -630,9 +696,9 @@ export default function ReceiptsPage() {
       `;
     }
 
-    if (selectedPaymentMethod === "Mixed") {
+    if (selectedPaymentMethod === "Split Payment") {
       return `
-        <div class="meta-row"><span class="label">Payment / الدفع</span><span>Mixed</span></div>
+        <div class="meta-row"><span class="label">Payment / الدفع</span><span>Split Payment</span></div>
         <div class="meta-row"><span class="label">Cash / نقداً</span><span>AED ${getMixedCashAmount().toFixed(2)}</span></div>
         <div class="meta-row"><span class="label">${mixedOtherMethod} / ${mixedOtherMethod}</span><span>AED ${getMixedOtherAmount().toFixed(2)}</span></div>
       `;
@@ -655,16 +721,16 @@ export default function ReceiptsPage() {
       }
     }
 
-    if (selectedPaymentMethod === "Mixed") {
+    if (selectedPaymentMethod === "Split Payment") {
       const cash = getMixedCashAmount();
       const other = getMixedOtherAmount();
       const mixedTotal = cash + other;
       if (cash <= 0 || other <= 0) {
-        alert("Please enter both cash and second payment amounts for mixed payment.");
+        alert("Please enter both cash and second payment amounts for split payment.");
         return;
       }
       if (Math.abs(mixedTotal - total) > 0.01) {
-        alert(`Mixed amounts must equal total AED ${total.toFixed(2)}.`);
+        alert(`Split payment amounts must equal total AED ${total.toFixed(2)}.`);
         return;
       }
     }
@@ -688,7 +754,7 @@ export default function ReceiptsPage() {
 
     setIsSavingReceipt(true);
 
-    // Save any missing patient fields if receptionist filled them in for an existing patient
+    try {
     if (patientId) {
       const updates: Record<string, string> = {};
       if (patientEmiratesIdInput.trim() && !selectedPatientInfo?.emirates_id)
@@ -709,16 +775,6 @@ export default function ReceiptsPage() {
       }
     }
 
-    // Generate receipt number
-    const { data: maxReceipt } = await supabase
-      .from("receipts")
-      .select("receipt_number")
-      .not("receipt_number", "is", null)
-      .order("receipt_number", { ascending: false })
-      .limit(1);
-    const nextNumber = ((maxReceipt?.[0]?.receipt_number as number) || 0) + 1;
-    const receiptNumber = String(nextNumber).padStart(5, "0");
-
     const { data: receiptData, error: receiptError } = await supabase
       .from("receipts")
       .insert([
@@ -726,10 +782,14 @@ export default function ReceiptsPage() {
           patient_id: transactionPatientId,
           doctor_id: doctorId || null,
           receptionist_id: activeReceptionistId,
-          receipt_number: nextNumber,
           subtotal: subtotal,
           vat: vat,
           total: total,
+          discount_amount: (() => {
+            const itemDiscount = selectedServices.reduce((sum, s) => s.originalPrice != null ? sum + Math.max(0, Number(s.originalPrice) - Number(s.price)) : sum, 0);
+            const total = itemDiscount + discountAmount;
+            return total > 0 ? total : null;
+          })(),
           notes: notes,
           payment_method: getPaymentSummaryForSave(),
         },
@@ -739,7 +799,6 @@ export default function ReceiptsPage() {
 
     if (receiptError || !receiptData) {
       console.error("Receipt insert error", receiptError);
-      setIsSavingReceipt(false);
       alert(`Error saving receipt: ${receiptError?.message || "unknown error"}`);
       return false;
     }
@@ -754,8 +813,6 @@ export default function ReceiptsPage() {
 
     const { data: itemsData, error: itemsError } = await supabase.from("receipt_items").insert(items).select();
 
-    setIsSavingReceipt(false);
-
     if (itemsError || !itemsData) {
       console.error("Receipt items insert error", itemsError);
       alert(`Error saving receipt items: ${itemsError?.message || "unknown error"}`);
@@ -764,6 +821,9 @@ export default function ReceiptsPage() {
 
     setCurrentReceipt(receiptData);
     return receiptData;
+    } finally {
+      setIsSavingReceipt(false);
+    }
   }
 
   function generateInvoiceHtml() {
@@ -1480,7 +1540,16 @@ export default function ReceiptsPage() {
 
     const itemsHtml = selectedServices
       .map(
-        (service) => `
+        (service) => service.originalPrice != null
+          ? `
+          <div class="row item-row">
+            <span class="item-name">${service.name} <span style="color:#ef4444;font-size:10px;">PROMO</span></span>
+            <span class="amount" style="text-align:right;">
+              <span style="text-decoration:line-through;color:#94a3b8;font-size:10px;">AED ${Number(service.originalPrice).toFixed(2)}</span><br/>
+              AED ${Number(service.price).toFixed(2)}
+            </span>
+          </div>`
+          : `
           <div class="row item-row">
             <span class="item-name">${service.name}</span>
             <span class="amount">AED ${Number(service.price).toFixed(2)}</span>
@@ -1501,9 +1570,9 @@ export default function ReceiptsPage() {
       `;
     }
 
-    if (selectedPaymentMethod === "Mixed") {
+    if (selectedPaymentMethod === "Split Payment") {
       paymentSection = `
-        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: MIX</span></div>
+        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: SPLIT PAYMENT</span></div>
         <div class="row"><span>Cash / نقداً</span><span>: AED ${getMixedCashAmount().toFixed(2)}</span></div>
         <div class="row"><span>${mixedOtherMethod}</span><span>: AED ${getMixedOtherAmount().toFixed(2)}</span></div>
       `;
@@ -1587,7 +1656,7 @@ export default function ReceiptsPage() {
         <div class="row"><span>Date / التاريخ</span><span>: ${dateValue}</span></div>
         <div class="row"><span>Time / الوقت</span><span>: ${timeValue}</span></div>
         <div class="row"><span>Cashier / أمين الصندوق</span><span>: ${cashierName}</span></div>
-        <div class="row"><span>Doctor / الطبيب</span><span>: ${doctorNameForReceipt}</span></div>
+        <div class="row"><span>${activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب"}</span><span>: ${doctorNameForReceipt}</span></div>
         <div class="row"><span>Patient Name / اسم المريض</span><span>: ${patientNameForReceipt}</span></div>
         <div class="row"><span>Patient ID / معرف المريض</span><span>: ${String(patientIdForReceipt)}</span></div>
         <div class="row"><span>Mobile / الهاتف</span><span>: ${patientMobileForReceipt}</span></div>
@@ -1601,7 +1670,8 @@ export default function ReceiptsPage() {
         <div class="hr"></div>
 
         <div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>
-        <div class="row"><span>VAT / الضريبة</span><span>AED ${vat.toFixed(2)}</span></div>
+        ${discountAmount > 0 ? `<div class="row" style="color:#ef4444;"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
+        <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
         <div class="hr" style="margin:4px 0;"></div>
         <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${total.toFixed(2)}</span></div>
 
@@ -1661,14 +1731,6 @@ export default function ReceiptsPage() {
     } catch (error) {
       alert("Error opening print dialog. Please check browser settings.");
     }
-  }
-
-  function previewReceipt() {
-    const receiptHtml = buildThermalReceiptHtml("Receipt Preview");
-
-    setReceiptPreviewHtml(receiptHtml);
-    setShowReceiptPreview(true);
-    setShowPrintModal(false);
   }
 
   return (
@@ -1914,13 +1976,16 @@ export default function ReceiptsPage() {
               </div>
 
               <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">Doctor / Therapist <span className="font-normal text-slate-400">(Optional)</span></label>
+                <label className="block text-sm font-semibold text-slate-700">
+                  {activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician" : "Doctor / Therapist"}{" "}
+                  <span className="font-normal text-slate-400">(Optional)</span>
+                </label>
                 <select
                   value={doctorId}
                   onChange={(e) => setDoctorId(e.target.value)}
                   className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
                 >
-                  <option value="">No doctor / therapist</option>
+                  <option value="">{activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "No aesthetician" : "No doctor / therapist"}</option>
                   {clinicDoctors.map((doctor) => (
                     <option key={doctor.id} value={doctor.id}>
                       {doctor.name}
@@ -2035,10 +2100,22 @@ export default function ReceiptsPage() {
                     className="rounded-2xl border border-slate-200 bg-white p-3 text-left shadow-sm transition hover:border-cyan-300 hover:bg-cyan-50 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <p className="text-sm font-semibold text-slate-900">{service.name}</p>
-                      <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
-                        AED {Number(service.price || 0).toFixed(0)}
-                      </span>
+                      <div>
+                        <p className="text-sm font-semibold text-slate-900">{service.name}</p>
+                        {service.promo_price != null && (
+                          <span className="text-xs font-semibold text-rose-500">PROMO</span>
+                        )}
+                      </div>
+                      {service.promo_price != null ? (
+                        <div className="text-right">
+                          <span className="block text-xs text-slate-400 line-through">AED {Number(service.price || 0).toFixed(0)}</span>
+                          <span className="rounded-xl bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700">AED {Number(service.promo_price).toFixed(0)}</span>
+                        </div>
+                      ) : (
+                        <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
+                          AED {Number(service.price || 0).toFixed(0)}
+                        </span>
+                      )}
                     </div>
                   </button>
                 ))}
@@ -2048,35 +2125,53 @@ export default function ReceiptsPage() {
         </div>
 
         <aside className="space-y-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-          <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+          <div className="rounded-3xl border border-teal-300 bg-gradient-to-br from-teal-100 to-cyan-100 p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs uppercase tracking-[0.3em] text-cyan-600">Cart</p>
-                <h2 className="mt-2 text-xl font-semibold text-slate-900">Selected services</h2>
+                <p className="text-xs uppercase tracking-[0.3em] text-teal-600">Cart</p>
+                <h2 className="mt-2 text-xl font-semibold text-teal-900">Selected services</h2>
               </div>
-              <span className="rounded-full bg-cyan-100 px-3 py-1 text-sm font-semibold text-cyan-700">
+              <span className="rounded-full bg-teal-500 px-3 py-1 text-sm font-semibold text-white">
                 {selectedServices.length} items
               </span>
             </div>
 
             <div className="mt-5 space-y-3">
               {selectedServices.length === 0 ? (
-                <div className="rounded-3xl border border-dashed border-slate-300 bg-white px-4 py-8 text-center text-sm text-slate-500">
+                <div className="rounded-3xl border border-dashed border-teal-400 bg-white/50 px-4 py-8 text-center text-sm text-teal-600">
                   Add services to build the receipt.
                 </div>
               ) : (
                 selectedServices.map((service, index) => (
                   <div
                     key={`${service.id}-${index}`}
-                    className="flex items-center justify-between rounded-3xl border border-slate-200 bg-white p-4"
+                    className="flex items-center justify-between rounded-2xl border border-teal-200 bg-white p-4 shadow-sm"
                   >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold text-slate-900">{service.name}</p>
-                      <p className="mt-1 text-xs text-slate-500">AED {service.price}</p>
+                    <div className="flex min-w-0 flex-1 items-start gap-3">
+                      <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-teal-500 text-xs font-bold text-white">
+                        {index + 1}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-bold text-teal-900">{service.name}</p>
+                        <div className="mt-1 flex items-center gap-1.5">
+                          {service.originalPrice != null && (
+                            <span className="text-xs text-slate-400 line-through">AED {Number(service.originalPrice).toFixed(2)}</span>
+                          )}
+                          <span className="text-xs font-medium text-teal-600">AED</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={Number(service.price)}
+                            onChange={(e) => updateCartItemPrice(index, e.target.value)}
+                            className="w-20 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-900 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                          />
+                        </div>
+                      </div>
                     </div>
                     <button
                       onClick={() => removeService(index)}
-                      className="rounded-full bg-teal-50 px-3 py-1.5 text-xs font-semibold text-teal-600 transition hover:bg-teal-100"
+                      className="rounded-full bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-500 transition hover:bg-red-100 hover:text-red-600"
                     >
                       Remove
                     </button>
@@ -2092,8 +2187,14 @@ export default function ReceiptsPage() {
                 <span>Subtotal</span>
                 <span>AED {subtotal.toFixed(2)}</span>
               </div>
+              {discountAmount > 0 && (
+                <div className="flex items-center justify-between text-rose-400">
+                  <span>Discount {discountType === "%" ? `(${discountInput}%)` : ""}</span>
+                  <span>- AED {discountAmount.toFixed(2)}</span>
+                </div>
+              )}
               <div className="flex items-center justify-between">
-                <span>VAT (5%)</span>
+                <span>VAT</span>
                 <span>AED {vat.toFixed(2)}</span>
               </div>
               <div className="border-t border-white/10 pt-4 text-base font-semibold text-white">
@@ -2107,9 +2208,10 @@ export default function ReceiptsPage() {
             <div className="mt-6 grid gap-3 sm:grid-cols-1">
               <button
                 onClick={proceedToPayment}
-                className="inline-flex items-center justify-center rounded-3xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-400"
+                disabled={isProceeding}
+                className="inline-flex items-center justify-center rounded-3xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-400 disabled:opacity-50"
               >
-                Proceed to Payment
+                {isProceeding ? "Processing..." : "Proceed to Payment"}
               </button>
             </div>
 
@@ -2117,6 +2219,7 @@ export default function ReceiptsPage() {
               <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50">
                 <div className="rounded-3xl bg-white p-6 shadow-2xl max-w-md w-full mx-4">
                   <h3 className="text-lg font-semibold text-slate-900 mb-4">Select Payment Method</h3>
+
                   <div className="grid gap-3">
                     {paymentOptions.map((method) => (
                       <button
@@ -2149,7 +2252,7 @@ export default function ReceiptsPage() {
                     </div>
                   )}
 
-                  {selectedPaymentMethod === "Mixed" && (
+                  {selectedPaymentMethod === "Split Payment" && (
                     <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
                       <div>
                         <label className="block text-xs font-semibold text-slate-600">Cash Amount (AED)</label>
@@ -2170,7 +2273,7 @@ export default function ReceiptsPage() {
                           className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
                         >
                           {paymentOptions
-                            .filter((method) => method !== "Cash" && method !== "Mixed")
+                            .filter((method) => method !== "Cash" && method !== "Split Payment")
                             .map((method) => (
                               <option key={method} value={method}>
                                 {method}
@@ -2212,9 +2315,9 @@ export default function ReceiptsPage() {
             {showPrintModal && (
               <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50">
                 <div className="rounded-3xl bg-white p-6 shadow-2xl max-w-md w-full mx-4">
-                  <h3 className="text-lg font-semibold text-slate-900 mb-4">Ready to finish</h3>
+                  <h3 className="text-lg font-semibold text-slate-900 mb-4">Ready to print</h3>
                   <p className="mb-6 text-sm text-slate-600">
-                    Print the receipt or finish to save the transaction.
+                    Print the receipt to complete and save the transaction.
                   </p>
                   <div className="grid gap-3">
                     <button
@@ -2237,6 +2340,8 @@ export default function ReceiptsPage() {
                         setSelectedPaymentMethod("");
                         setNotes("");
                         setSelectedServices([]);
+                        setDiscountInput("");
+                        setDiscountType("AED");
                         setFilteredPatients([]);
                         setShowPatientSuggestions(false);
                         router.refresh();
@@ -2245,42 +2350,6 @@ export default function ReceiptsPage() {
                       disabled={isSavingReceipt}
                     >
                       {isSavingReceipt ? "Saving..." : "Print Receipt"}
-                    </button>
-                    <button
-                      onClick={previewReceipt}
-                      className="inline-flex items-center justify-center rounded-2xl border border-cyan-200 bg-white px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-50"
-                    >
-                      Preview Receipt
-                    </button>
-                    <button
-                      onClick={async () => {
-                        const saved = await confirmPaymentAndSave();
-                        if (!saved) {
-                          return;
-                        }
-                        setShowPrintModal(false);
-                        setPatientId("");
-                        setPatientName("");
-                        setPatientPhoneInput("");
-                        setPatientEmailInput("");
-                        setPatientDobInput("");
-                        setPatientSexInput("");
-                        setPatientEmiratesIdInput("");
-                        setPatientPassportInput("");
-                        setSelectedPatientInfo(null);
-                        setTransactionPatientId("");
-                        setDoctorId("");
-                        setSelectedPaymentMethod("");
-                        setNotes("");
-                        setSelectedServices([]);
-                        setFilteredPatients([]);
-                        setShowPatientSuggestions(false);
-                        router.refresh();
-                      }}
-                      className="inline-flex items-center justify-center rounded-2xl bg-teal-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-teal-400"
-                      disabled={isSavingReceipt}
-                    >
-                      {isSavingReceipt ? "Saving..." : "Finish"}
                     </button>
                     <button
                       onClick={() => {
@@ -2292,39 +2361,6 @@ export default function ReceiptsPage() {
                       Cancel
                     </button>
                   </div>
-                </div>
-              </div>
-            )}
-
-            {showReceiptPreview && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-6">
-                <div className="flex h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
-                  <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
-                    <div>
-                      <h3 className="text-lg font-semibold text-slate-900">Receipt Preview</h3>
-                      <p className="text-sm text-slate-500">Check the generated receipt before printing.</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => receiptPreviewFrameRef.current?.contentWindow?.print()}
-                        className="rounded-2xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-500"
-                      >
-                        Print
-                      </button>
-                      <button
-                        onClick={() => setShowReceiptPreview(false)}
-                        className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                      >
-                        Close
-                      </button>
-                    </div>
-                  </div>
-                  <iframe
-                    ref={receiptPreviewFrameRef}
-                    title="Receipt preview"
-                    srcDoc={receiptPreviewHtml}
-                    className="h-full w-full bg-slate-100"
-                  />
                 </div>
               </div>
             )}
