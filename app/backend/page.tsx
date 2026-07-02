@@ -192,6 +192,92 @@ export default function BackendPage() {
     return receptionists.find((person) => person.id === id)?.name || "Unknown";
   }
 
+  function downloadCSV(filename: string, rows: string[][]) {
+    const content = rows
+      .map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob(["\ufeff" + content], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportData() {
+    const { data: receipts } = await supabase
+      .from("receipts")
+      .select("id, receipt_number, created_at, patient_id, receptionist_id, payment_method, subtotal, discount_amount, total");
+
+    const allReceipts = receipts || [];
+    const filteredReceipts = selectedClinicId === "all"
+      ? allReceipts
+      : allReceipts.filter((r) => {
+          const rec = receptionists.find((p) => p.id === r.receptionist_id);
+          return rec?.clinic_id === selectedClinicId;
+        });
+
+    // Build patient → clinics visited map
+    const patientClinicMap: Record<string, Set<string>> = {};
+    for (const r of allReceipts) {
+      const rec = receptionists.find((p) => p.id === r.receptionist_id);
+      const clinic = clinics.find((c) => c.id === rec?.clinic_id);
+      if (clinic && r.patient_id) {
+        if (!patientClinicMap[r.patient_id]) patientClinicMap[r.patient_id] = new Set();
+        patientClinicMap[r.patient_id].add(clinic.name);
+      }
+    }
+
+    // Patients CSV — always all patients
+    const patientRows: string[][] = [
+      ["Name", "Phone", "Email", "Date of Birth", "Sex", "Nationality", "Emirates ID", "Passport No.", "Notes", "Clinics Visited"],
+    ];
+    for (const p of patients) {
+      const clinicsVisited = [...(patientClinicMap[p.id] || [])].join(", ");
+      patientRows.push([
+        p.name || "",
+        p.phone || "",
+        p.email || "",
+        p.date_of_birth || "",
+        p.sex || "",
+        p.nationality || "",
+        p.emirates_id || "",
+        p.passport_number || "",
+        p.notes || "",
+        clinicsVisited,
+      ]);
+    }
+
+    // Receipts CSV — filtered by selected clinic
+    const receiptRows: string[][] = [
+      ["Receipt #", "Date", "Time", "Patient", "Clinic", "Receptionist", "Payment Method", "Subtotal (AED)", "Discount (AED)", "Total (AED)"],
+    ];
+    for (const r of filteredReceipts) {
+      const patient = patients.find((p) => p.id === r.patient_id);
+      const rec = receptionists.find((p) => p.id === r.receptionist_id);
+      const clinic = clinics.find((c) => c.id === rec?.clinic_id);
+      const date = new Date(r.created_at);
+      receiptRows.push([
+        r.receipt_number ? String(r.receipt_number).padStart(5, "0") : "",
+        date.toLocaleDateString("en-GB"),
+        date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true }),
+        patient?.name || "",
+        clinic?.name || "",
+        rec?.name || "",
+        r.payment_method || "",
+        Number(r.subtotal || 0).toFixed(2),
+        Number(r.discount_amount || 0).toFixed(2),
+        Number(r.total || 0).toFixed(2),
+      ]);
+    }
+
+    const dateStr = new Date().toISOString().split("T")[0];
+    const clinicLabel = selectedClinicId === "all" ? "all-clinics" : (clinics.find((c) => c.id === selectedClinicId)?.name || "clinic").replace(/\s+/g, "-").toLowerCase();
+    downloadCSV(`patients_${dateStr}.csv`, patientRows);
+    setTimeout(() => downloadCSV(`receipts_${clinicLabel}_${dateStr}.csv`, receiptRows), 400);
+  }
+
   function unlockBackend() {
     if (pinInput === BACKEND_PIN) {
       setIsUnlocked(true);
@@ -615,6 +701,12 @@ export default function BackendPage() {
             {clinics.find(c => c.id === selectedClinicId)?.room}
           </span>
         )}
+        <button
+          onClick={exportData}
+          className="ml-auto rounded-2xl border border-teal-300 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 transition hover:bg-teal-100"
+        >
+          ↓ Export Data
+        </button>
       </div>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         {recordSummary.map((item) => (
