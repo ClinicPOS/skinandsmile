@@ -228,14 +228,14 @@ export default function ReceiptLogPage() {
 <html><head><meta charset="utf-8"/><title>Refund Receipt</title>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: Arial, Helvetica, sans-serif; width: 72mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.25; color: #000; background: #fff; }
+  body { font-family: Arial, Helvetica, sans-serif; width: 72mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.25; color: #000; background: #fff; -webkit-text-size-adjust: 100%; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
   .hr { border-top: 1px dashed #000; margin: 5px 0; }
   .double { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 3px 0; margin: 5px 0; text-align: center; font-weight: 700; }
   .clinic-name { text-align: center; font-size: 14px; font-weight: 700; }
   .row { display: flex; justify-content: space-between; gap: 6px; margin: 1px 0; }
   .item-name { flex: 1; min-width: 0; }
   .amount { text-align: right; white-space: nowrap; font-weight: 700; }
-  @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; filter: grayscale(100%); } * { color: #000 !important; border-color: #000 !important; } }
+  @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; } * { color: #000 !important; border-color: #000 !important; } img { filter: contrast(180%) brightness(110%); } }
 </style></head>
 <body>
   <div class="double">REFUND RECEIPT</div>

@@ -1934,7 +1934,6 @@ export default function ReceiptsPage() {
         margin: 0;
         width: 210mm;
         height: 297mm;
-        filter: grayscale(100%);
       }
       .invoice-container,
       .invoice-container * {
@@ -1945,7 +1944,7 @@ export default function ReceiptsPage() {
         box-shadow: none !important;
       }
       .invoice-container img {
-        filter: grayscale(100%) contrast(130%);
+        filter: contrast(180%) brightness(110%);
       }
     }
   </style>
@@ -2231,6 +2230,9 @@ export default function ReceiptsPage() {
             color: #000;
             background: #fff;
             overflow-x: hidden;
+            -webkit-text-size-adjust: 100%;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
           }
           .center { text-align: center; }
           .hr { border-top: 1px dashed #000; margin: 5px 0; }

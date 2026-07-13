@@ -173,6 +173,9 @@ export default function RefundsPage() {
             line-height: 1.25;
             color: #000;
             background: #fff;
+            -webkit-text-size-adjust: 100%;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
           }
           .center { text-align: center; }
           .hr { border-top: 1px dashed #000; margin: 5px 0; }
@@ -197,8 +200,9 @@ export default function RefundsPage() {
           .footer-center { text-align: center; margin-top: 4px; }
           @media print {
             @page { size: 80mm auto; margin: 0; }
-            body { width: 72mm; filter: grayscale(100%); }
+            body { width: 72mm; }
             * { color: #000 !important; border-color: #000 !important; }
+            img { filter: contrast(180%) brightness(110%); }
           }
         </style>
       </head>
