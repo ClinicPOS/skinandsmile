@@ -1955,7 +1955,7 @@ export default function ReceiptsPage() {
     <div class="header">
       <div class="header-top">
         <div class="logo-section">
-          <img src="/images/logo2.png" alt="Skin and Smile Logo" onerror="this.style.display='none'">
+          <img src="/images/logo.png" alt="Skin and Smile Logo" onerror="this.style.display='none'">
           <div class="clinic-name">Skin and Smile</div>
           <div class="clinic-sub">Dental Clinic</div>
         </div>
@@ -2147,7 +2147,7 @@ export default function ReceiptsPage() {
   }
 
   function buildThermalReceiptHtml(title: string, savedReceipt?: any) {
-    const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo3.png";
+    const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo.png";
     const clinicDisplayName = activeClinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
     const clinicAddress = activeClinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
     const clinicRoom = activeClinic?.room ? `2nd Floor, Room ${activeClinic.room.replace(/^Room\s+/i, '')}` : "";
