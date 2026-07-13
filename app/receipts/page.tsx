@@ -2247,6 +2247,7 @@ export default function ReceiptsPage() {
             -webkit-text-size-adjust: 100%;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
+            font-weight: 500;
           }
           .center { text-align: center; }
           .hr { border-top: 1px dashed #000; margin: 5px 0; }
@@ -2283,15 +2284,15 @@ export default function ReceiptsPage() {
           .footer-center { text-align: center; margin-top: 4px; }
           @media print {
             @page { size: 80mm auto; margin: 0; }
-            body { width: 72mm; filter: contrast(200%) brightness(1.1); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-            * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-            .logo { -webkit-print-color-adjust: exact; print-color-adjust: exact; width: 100%; max-width: 60mm; height: auto; image-rendering: high-quality; }
+            body { width: 72mm; }
+            * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; }
+            .logo { width: 100%; max-width: 60mm; height: auto; }
           }
         </style>
       </head>
       <body>
         <div class="logo-wrap" id="logo-wrap">
-          <img src="${logoPath}" alt="Clinic logo" class="logo" />
+          <img src="${logoPath}" alt="Clinic logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'" />
         </div>
 
         <div class="double">TAX INVOICE</div>
