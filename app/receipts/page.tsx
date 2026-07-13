@@ -1527,6 +1527,8 @@ export default function ReceiptsPage() {
         margin: 0;
         padding: 0;
         width: 100%;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
       }
       .invoice-container {
         width: 210mm;
@@ -1928,12 +1930,16 @@ export default function ReceiptsPage() {
       body, html {
         margin: 0;
         padding: 0;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
       }
       .invoice-container {
         box-shadow: none;
         margin: 0;
         width: 210mm;
         height: 297mm;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
       }
       .invoice-container,
       .invoice-container * {
@@ -1942,9 +1948,17 @@ export default function ReceiptsPage() {
         background-color: #fff !important;
         text-shadow: none !important;
         box-shadow: none !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+        font-weight: 600;
       }
       .invoice-container img {
-        filter: contrast(180%) brightness(110%);
+        filter: contrast(200%) brightness(120%);
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+        image-rendering: high-quality;
+        -webkit-backface-visibility: hidden;
+        backface-visibility: hidden;
       }
     }
   </style>
@@ -1955,7 +1969,7 @@ export default function ReceiptsPage() {
     <div class="header">
       <div class="header-top">
         <div class="logo-section">
-          <img src="/images/logo.png" alt="Skin and Smile Logo" onerror="this.style.display='none'">
+          <img src="/images/logo.png" alt="Skin and Smile Logo">
           <div class="clinic-name">Skin and Smile</div>
           <div class="clinic-sub">Dental Clinic</div>
         </div>
@@ -2269,14 +2283,15 @@ export default function ReceiptsPage() {
           .footer-center { text-align: center; margin-top: 4px; }
           @media print {
             @page { size: 80mm auto; margin: 0; }
-            body { width: 72mm; filter: grayscale(100%); }
-            * { color: #000 !important; border-color: #000 !important; }
+            body { width: 72mm; filter: contrast(200%) brightness(1.1); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .logo { -webkit-print-color-adjust: exact; print-color-adjust: exact; width: 100%; max-width: 60mm; height: auto; image-rendering: high-quality; }
           }
         </style>
       </head>
       <body>
         <div class="logo-wrap" id="logo-wrap">
-          <img src="${logoPath}" alt="Clinic logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'" />
+          <img src="${logoPath}" alt="Clinic logo" class="logo" />
         </div>
 
         <div class="double">TAX INVOICE</div>
