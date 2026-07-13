@@ -230,12 +230,12 @@ export default function ReceiptLogPage() {
   * { box-sizing: border-box; }
   body { font-family: Arial, Helvetica, sans-serif; width: 72mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.25; color: #000; background: #fff; }
   .hr { border-top: 1px dashed #000; margin: 5px 0; }
-  .double { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 3px 0; margin: 5px 0; text-align: center; font-weight: 700; color: #c41e3a; }
+  .double { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 3px 0; margin: 5px 0; text-align: center; font-weight: 700; }
   .clinic-name { text-align: center; font-size: 14px; font-weight: 700; }
   .row { display: flex; justify-content: space-between; gap: 6px; margin: 1px 0; }
   .item-name { flex: 1; min-width: 0; }
-  .amount { text-align: right; white-space: nowrap; color: #c41e3a; font-weight: 700; }
-  @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; } }
+  .amount { text-align: right; white-space: nowrap; font-weight: 700; }
+  @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; filter: grayscale(100%); } * { color: #000 !important; border-color: #000 !important; } }
 </style></head>
 <body>
   <div class="double">REFUND RECEIPT</div>
@@ -246,11 +246,11 @@ export default function ReceiptLogPage() {
   <div class="row"><span>Original Receipt</span><span>: ${invoiceNo}</span></div>
   <div class="row"><span>Patient</span><span>: ${patient?.name || "-"}</span></div>
   <div class="hr"></div>
-  <div style="text-align:center;font-weight:700;color:#c41e3a;margin:3px 0;">Services Refunded</div>
+  <div style="text-align:center;font-weight:700;margin:3px 0;">Services Refunded</div>
   <div class="hr" style="margin-top:2px;"></div>
-  ${itemsHtml || `<div class="row"><span>Full Receipt Refund</span><span style="color:#c41e3a;">-AED ${totalRefund.toFixed(2)}</span></div>`}
+  ${itemsHtml || `<div class="row"><span>Full Receipt Refund</span><span>-AED ${totalRefund.toFixed(2)}</span></div>`}
   <div class="hr"></div>
-  <div class="row" style="font-weight:700;color:#c41e3a;font-size:12px;"><span>REFUND TOTAL</span><span>-AED ${totalRefund.toFixed(2)}</span></div>
+  <div class="row" style="font-weight:700;font-size:12px;"><span>REFUND TOTAL</span><span>-AED ${totalRefund.toFixed(2)}</span></div>
   <div class="hr"></div>
   <div class="row"><span>Reason</span><span style="text-align:right;font-size:9px;">: ${lastRefund.reason || "-"}</span></div>
   <div class="row"><span>Payment Method</span><span>: ${lastRefund.payment_method || "-"}</span></div>
@@ -346,7 +346,7 @@ export default function ReceiptLogPage() {
   ${itemsHtml || '<div style="text-align:center">No items</div>'}
   <div class="hr"></div>
   <div class="row"><span>Subtotal</span><span>AED ${subtotal.toFixed(2)}</span></div>
-  ${discountAmount > 0 ? `<div class="row" style="color:#ef4444;"><span>Discount</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
+  ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
   <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
   <div class="hr" style="margin:4px 0;"></div>
   <div class="row" style="font-weight:700;"><span>TOTAL</span><span>AED ${total.toFixed(2)}</span></div>

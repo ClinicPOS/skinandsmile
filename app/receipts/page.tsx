@@ -1920,7 +1920,7 @@ export default function ReceiptsPage() {
     }
 
     .footer-icon {
-      color: #d4af37;
+      color: #000;
       margin-right: 2mm;
     }
 
@@ -1934,6 +1934,18 @@ export default function ReceiptsPage() {
         margin: 0;
         width: 210mm;
         height: 297mm;
+        filter: grayscale(100%);
+      }
+      .invoice-container,
+      .invoice-container * {
+        color: #000 !important;
+        border-color: #000 !important;
+        background-color: #fff !important;
+        text-shadow: none !important;
+        box-shadow: none !important;
+      }
+      .invoice-container img {
+        filter: grayscale(100%) contrast(130%);
       }
     }
   </style>
@@ -2136,7 +2148,7 @@ export default function ReceiptsPage() {
   }
 
   function buildThermalReceiptHtml(title: string, savedReceipt?: any) {
-    const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo3.png";
+    const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo3.png";
     const clinicDisplayName = activeClinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
     const clinicAddress = activeClinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
     const clinicRoom = activeClinic?.room ? `2nd Floor, Room ${activeClinic.room.replace(/^Room\s+/i, '')}` : "";
@@ -2167,9 +2179,9 @@ export default function ReceiptsPage() {
         (service) => service.originalPrice != null
           ? `
           <div class="row item-row">
-            <span class="item-name">${service.name} <span style="color:#ef4444;font-size:10px;">PROMO</span></span>
+            <span class="item-name">${service.name} <span style="font-size:10px;">(Promo)</span></span>
             <span class="amount" style="text-align:right;">
-              <span style="text-decoration:line-through;color:#94a3b8;font-size:10px;">AED ${Number(service.originalPrice).toFixed(2)}</span><br/>
+              <span style="text-decoration:line-through;font-size:10px;">AED ${Number(service.originalPrice).toFixed(2)}</span><br/>
               AED ${Number(service.price).toFixed(2)}
             </span>
           </div>`
@@ -2255,7 +2267,8 @@ export default function ReceiptsPage() {
           .footer-center { text-align: center; margin-top: 4px; }
           @media print {
             @page { size: 80mm auto; margin: 0; }
-            body { width: 72mm; }
+            body { width: 72mm; filter: grayscale(100%); }
+            * { color: #000 !important; border-color: #000 !important; }
           }
         </style>
       </head>
@@ -2294,7 +2307,7 @@ export default function ReceiptsPage() {
         <div class="hr"></div>
 
         <div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>
-        ${discountAmount > 0 ? `<div class="row" style="color:#ef4444;"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
+        ${discountAmount > 0 ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
         <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
         <div class="hr" style="margin:4px 0;"></div>
         <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${total.toFixed(2)}</span></div>

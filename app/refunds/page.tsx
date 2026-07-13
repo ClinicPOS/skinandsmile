@@ -183,7 +183,6 @@ export default function RefundsPage() {
             margin: 5px 0;
             text-align: center;
             font-weight: 700;
-            color: #c41e3a;
           }
           .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
           .row {
@@ -194,16 +193,17 @@ export default function RefundsPage() {
           }
           .item-row { margin: 2px 0; }
           .item-name { flex: 1; min-width: 0; }
-          .amount { text-align: right; white-space: nowrap; color: #c41e3a; font-weight: 700; }
+          .amount { text-align: right; white-space: nowrap; font-weight: 700; }
           .footer-center { text-align: center; margin-top: 4px; }
           @media print {
             @page { size: 80mm auto; margin: 0; }
-            body { width: 72mm; }
+            body { width: 72mm; filter: grayscale(100%); }
+            * { color: #000 !important; border-color: #000 !important; }
           }
         </style>
       </head>
       <body>
-        <div class="double" style="color: #c41e3a;">REFUND RECEIPT</div>
+        <div class="double">REFUND RECEIPT</div>
 
         <div class="clinic-name">REFUND AUTHORIZATION</div>
 
@@ -215,13 +215,13 @@ export default function RefundsPage() {
 
         <div class="hr"></div>
 
-        <div style="text-align: center; font-weight: 700; margin: 3px 0; color: #c41e3a;">Services Refunded</div>
+        <div style="text-align: center; font-weight: 700; margin: 3px 0;">Services Refunded</div>
         <div class="hr" style="margin-top: 2px;"></div>
         ${itemsHtml}
 
         <div class="hr"></div>
 
-        <div class="row" style="font-weight: 700; color: #c41e3a; font-size: 12px;"><span>REFUND TOTAL</span><span>-AED ${totalRefund.toFixed(2)}</span></div>
+        <div class="row" style="font-weight: 700; font-size: 12px;"><span>REFUND TOTAL</span><span>-AED ${totalRefund.toFixed(2)}</span></div>
 
         <div class="hr"></div>
 
