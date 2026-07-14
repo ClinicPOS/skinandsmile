@@ -126,7 +126,6 @@ export default function ReceiptHistoryPage() {
     const clinicPhone = clinic?.phone || "";
     const clinicWhatsapp = clinic?.whatsapp || "";
     const isSkinAndSmile = !clinic || clinic.logo !== "altamuze";
-      const clinicRoom = clinic?.room ? `2nd Floor, Room ${clinic.room}` : "";
     const createdAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
     const invoiceNo = selectedReceipt.receipt_number
       ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
