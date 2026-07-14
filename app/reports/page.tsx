@@ -130,12 +130,14 @@ export default function ReportsPage() {
   const [serviceDetailLoading, setServiceDetailLoading] = useState(false);
   const [serviceDetailError, setServiceDetailError] = useState("");
 
-  const parseApiError = useCallback(async (response: Response, fallbackMessage: string) => {
-    const payload = await response.json().catch(() => null) as {
-      error?: string;
-      details?: string;
-      hint?: string;
-    } | null;
+  type ApiErrorPayload = {
+    error?: string;
+    details?: string;
+    hint?: string;
+  };
+
+  const parseApiError = useCallback(async <T,>(response: Response, fallbackMessage: string): Promise<T> => {
+    const payload = await response.json().catch(() => null) as (T & ApiErrorPayload) | null;
 
     if (!response.ok) {
       const messageParts = [payload?.error, payload?.details, payload?.hint].filter(Boolean);
@@ -146,7 +148,7 @@ export default function ReportsPage() {
       throw new Error("Top Services returned an invalid response. Please sign in again.");
     }
 
-    return payload;
+    return payload as T;
   }, []);
 
   useEffect(() => {
@@ -456,6 +458,7 @@ export default function ReportsPage() {
     if (!topServicesRequest) {
       return;
     }
+    const request = topServicesRequest;
 
     const controller = new AbortController();
 
@@ -464,12 +467,12 @@ export default function ReportsPage() {
       setTopServicesError("");
 
       const params = new URLSearchParams({
-        from: topServicesRequest.from,
-        to: topServicesRequest.to,
+        from: request.from,
+        to: request.to,
       });
 
-      if (topServicesRequest.clinicId) {
-        params.set("clinicId", topServicesRequest.clinicId);
+      if (request.clinicId) {
+        params.set("clinicId", request.clinicId);
       }
 
       try {
@@ -478,7 +481,10 @@ export default function ReportsPage() {
           cache: "no-store",
         });
 
-        const payload = await parseApiError(response, "Failed to load top services analytics.");
+        const payload = await parseApiError<{ summary?: TopServicesSummaryPayload }>(
+          response,
+          "Failed to load top services analytics."
+        );
         setTopServicesSummary(payload.summary || EMPTY_TOP_SERVICES_SUMMARY);
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -501,6 +507,8 @@ export default function ReportsPage() {
     if (!showServicePanel || !selectedServiceId || !topServicesRequest) {
       return;
     }
+    const request = topServicesRequest;
+    const serviceId = selectedServiceId;
 
     const controller = new AbortController();
 
@@ -509,13 +517,13 @@ export default function ReportsPage() {
       setServiceDetailError("");
 
       const params = new URLSearchParams({
-        from: topServicesRequest.from,
-        to: topServicesRequest.to,
-        serviceId: selectedServiceId,
+        from: request.from,
+        to: request.to,
+        serviceId,
       });
 
-      if (topServicesRequest.clinicId) {
-        params.set("clinicId", topServicesRequest.clinicId);
+      if (request.clinicId) {
+        params.set("clinicId", request.clinicId);
       }
 
       try {
@@ -524,7 +532,10 @@ export default function ReportsPage() {
           cache: "no-store",
         });
 
-        const payload = await parseApiError(response, "Failed to load service detail.");
+        const payload = await parseApiError<{ detail?: TopServiceDetail | null }>(
+          response,
+          "Failed to load service detail."
+        );
         setSelectedServiceDetail(payload.detail || null);
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -574,7 +585,9 @@ export default function ReportsPage() {
       }
 
       const dayRevenue = dayReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
-      const dayPatients = new Set(dayReceipts.map((r) => r.patient_id).filter(Boolean));
+      const dayPatients = new Set(
+        dayReceipts.map((r) => r.patient_id).filter((patientId): patientId is string => Boolean(patientId))
+      );
 
       const dayRefunds = refunds.filter((ref) => {
         const receipt = receipts.find((r) => r.id === ref.receipt_id);
