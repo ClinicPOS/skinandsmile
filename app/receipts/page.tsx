@@ -63,6 +63,7 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
     card: 0,
     tabby: 0,
     tamara: 0,
+    insurance: 0,
     bankTransfer: 0,
     addOn: 0,
     mop: "",
@@ -82,6 +83,8 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
       breakdown.tabby = Number.isFinite(otherValue) ? otherValue : 0;
     } else if (otherMethod.includes("tamara")) {
       breakdown.tamara = Number.isFinite(otherValue) ? otherValue : 0;
+    } else if (otherMethod.includes("insurance")) {
+      breakdown.insurance = Number.isFinite(otherValue) ? otherValue : 0;
     } else if (otherMethod.includes("bank")) {
       breakdown.bankTransfer = Number.isFinite(otherValue) ? otherValue : 0;
     } else {
@@ -109,6 +112,12 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
     return breakdown;
   }
 
+  if (paymentMethod.includes("insurance")) {
+    breakdown.insurance = totalAmount;
+    breakdown.mop = "INSURANCE";
+    return breakdown;
+  }
+
   if (paymentMethod.includes("cash")) {
     breakdown.cash = totalAmount;
     breakdown.mop = "CASH";
@@ -118,6 +127,29 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
   breakdown.card = totalAmount;
   breakdown.mop = "CARD";
   return breakdown;
+}
+
+function extractTransactionReference(paymentMethodRaw: string, channel: "card" | "tabby" | "tamara") {
+  const raw = String(paymentMethodRaw || "");
+  const lower = raw.toLowerCase();
+  if (!lower.includes(channel)) return "";
+
+  const referencePatterns = [
+    /(ref(?:erence)?|rrn|auth|approval|txn|transaction)\s*[:#-]?\s*([a-z0-9-]{4,})/i,
+    /\b([a-z0-9]{6,})\b/i,
+  ];
+
+  for (const pattern of referencePatterns) {
+    const match = raw.match(pattern);
+    if (match?.[2]) {
+      return String(match[2]).toUpperCase();
+    }
+    if (match?.[1] && match[1].length >= 6) {
+      return String(match[1]).toUpperCase();
+    }
+  }
+
+  return "";
 }
 
 function matchesServiceCategory(serviceName: string, category: string) {
@@ -236,6 +268,8 @@ export default function ReceiptsPage() {
   });
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("");
+  const [tabbyReferenceInput, setTabbyReferenceInput] = useState("");
+  const [tamaraReferenceInput, setTamaraReferenceInput] = useState("");
   const [cashReceivedInput, setCashReceivedInput] = useState("");
   const [mixedCashInput, setMixedCashInput] = useState("");
   const [mixedOtherMethod, setMixedOtherMethod] = useState("Card");
@@ -631,6 +665,8 @@ export default function ReceiptsPage() {
     setTransactionPatientId("");
     setDoctorId("");
     setSelectedPaymentMethod("");
+    setTabbyReferenceInput("");
+    setTamaraReferenceInput("");
     setNotes("");
     setSelectedServices([]);
     setDiscountInput("");
@@ -701,13 +737,9 @@ export default function ReceiptsPage() {
       return;
     }
 
-    const receptionistNameMap = new Map<string, string>(
-      receptionistRows.map((person) => [String(person.id), String(person.name || "")])
-    );
-
     const { data: receiptsData, error: receiptsError } = await supabase
       .from("receipts")
-      .select("id, created_at, patient_id, receptionist_id, payment_method, subtotal, discount_amount, total")
+      .select("id, receipt_number, created_at, patient_id, doctor_id, receptionist_id, payment_method, subtotal, discount_amount, total")
       .in("receptionist_id", receptionistIds)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -722,6 +754,7 @@ export default function ReceiptsPage() {
     const receipts = receiptsData || [];
     const receiptIds = receipts.map((r) => r.id).filter(Boolean);
     const patientIds = [...new Set(receipts.map((r) => r.patient_id).filter(Boolean))];
+    const doctorIds = [...new Set(receipts.map((r) => r.doctor_id).filter(Boolean))];
     const patientMap = new Map<string, { 
       name: string;
       phone: string;
@@ -729,6 +762,7 @@ export default function ReceiptsPage() {
       date_of_birth: string;
       patient_number: string;
     }>();
+    const doctorMap = new Map<string, string>();
 
     if (patientIds.length > 0) {
       const { data: patientsData, error: patientsError } = await supabase
@@ -753,12 +787,26 @@ export default function ReceiptsPage() {
       });
     }
 
+    if (doctorIds.length > 0) {
+      const { data: doctorsData, error: doctorsError } = await supabase
+        .from("doctors")
+        .select("id, name")
+        .in("id", doctorIds);
+
+      if (doctorsError) {
+        console.error("Failed loading doctors for report", doctorsError);
+      } else {
+        (doctorsData || []).forEach((doctor) => {
+          doctorMap.set(String(doctor.id), String(doctor.name || ""));
+        });
+      }
+    }
+
     const treatmentMap = new Map<string, string[]>();
-    const promoPriceMap = new Map<string, string[]>();
     if (receiptIds.length > 0) {
       const { data: receiptItemsData, error: receiptItemsError } = await supabase
         .from("receipt_items")
-        .select("receipt_id, service_id, price")
+        .select("receipt_id, service_id")
         .in("receipt_id", receiptIds);
 
       if (receiptItemsError) {
@@ -770,7 +818,7 @@ export default function ReceiptsPage() {
         if (serviceIds.length > 0) {
           const { data: servicesData, error: servicesError } = await supabase
             .from("services")
-            .select("id, name, price")
+            .select("id, name")
             .in("id", serviceIds);
 
           if (servicesError) {
@@ -782,28 +830,9 @@ export default function ReceiptsPage() {
           }
         }
 
-        const servicePriceMap = new Map<string, number>();
-        if (serviceIds.length > 0) {
-          const { data: servicesData, error: servicesError } = await supabase
-            .from("services")
-            .select("id, price")
-            .in("id", serviceIds);
-
-          if (servicesError) {
-            console.error("Failed loading service prices for report", servicesError);
-          } else {
-            (servicesData || []).forEach((service) => {
-              servicePriceMap.set(String(service.id), Number(service.price || 0));
-            });
-          }
-        }
-
         (receiptItemsData || []).forEach((item) => {
           const receiptId = String(item.receipt_id || "");
           const serviceName = serviceNameMap.get(String(item.service_id || "")) || "";
-          const serviceBasePrice = servicePriceMap.get(String(item.service_id || "")) || 0;
-          const soldPrice = Number(item.price || 0);
-          const isPromo = serviceBasePrice > 0 && soldPrice > 0 && soldPrice < serviceBasePrice;
           if (!receiptId || !serviceName) {
             return;
           }
@@ -813,380 +842,341 @@ export default function ReceiptsPage() {
           }
 
           treatmentMap.get(receiptId)?.push(serviceName);
+        });
+      }
+    }
+    const refundMap = new Map<string, number>();
+    if (receiptIds.length > 0) {
+      const { data: refundsData, error: refundsError } = await supabase
+        .from("refunds")
+        .select("receipt_id, total_amount")
+        .in("receipt_id", receiptIds);
 
-          if (isPromo) {
-            if (!promoPriceMap.has(receiptId)) {
-              promoPriceMap.set(receiptId, []);
-            }
-            promoPriceMap.get(receiptId)?.push(soldPrice.toFixed(2));
-          }
+      if (refundsError) {
+        console.error("Failed loading refunds for report", refundsError);
+      } else {
+        (refundsData || []).forEach((refund) => {
+          const receiptId = String(refund.receipt_id || "");
+          const current = refundMap.get(receiptId) || 0;
+          refundMap.set(receiptId, current + Number(refund.total_amount || 0));
         });
       }
     }
 
-    const sheetRows: (string | number)[][] = [];
-    const ensureRow = (rowNumber: number) => {
-      while (sheetRows.length < rowNumber) {
-        sheetRows.push([]);
-      }
-    };
-    const setCell = (rowNumber: number, colNumber: number, value: string | number) => {
-      ensureRow(rowNumber);
-      while (sheetRows[rowNumber - 1].length < colNumber) {
-        sheetRows[rowNumber - 1].push("");
-      }
-      sheetRows[rowNumber - 1][colNumber - 1] = value;
-    };
-
-    const titleDate = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Dubai",
-      day: "2-digit",
-      month: "long",
-      year: "numeric",
-      weekday: "long",
-    })
-      .format(now)
-      .toUpperCase();
-
-    setCell(2, 2, `DAILY INCOME ${titleDate.replace(",", " -")}`);
-
-    const headerRow = 3;
-    const dataStartRow = 4;
-    const headers = [
-      "#",
-      "NAME",
-      "PATIENT FILE #",
-      "NATIONALITY",
-      "MOBILE #",
-      "BIRTHDAY",
-      "TREATMENT DONE",
-      "PROMO PRICE",
-      "TOTAL",
-      "CASH",
-      "CARD",
-      "TABBY",
-      "TAMARA",
-      "ADD ON",
-      "MOP",
-      "MEDICAL",
-      "MED",
+    const detailHeaders = [
+      "Time",
+      "Receipt Number",
+      "Patient Name",
+      "Nationality",
+      "Patient ID Number",
+      "Birthdate",
+      "Dentist",
+      "Treatments Performed",
+      "Gross Total",
+      "Promo / Discount",
+      "Net Total",
+      "Cash",
+      "Card",
+      "Card Transaction Reference",
+      "Tabby",
+      "Tabby Transaction Reference",
+      "Tamara",
+      "Tamara Transaction Reference",
+      "Insurance",
+      "Refund Amount",
+      "Payment Method",
     ];
 
-    headers.forEach((text, index) => {
-      setCell(headerRow, 1 + index, text);
-    });
+    const detailRows: Array<(string | number)[]> = [];
 
-    let totalSum = 0;
+    let grossRevenue = 0;
+    let totalDiscounts = 0;
+    let netRevenue = 0;
+    let totalRefunds = 0;
+
     let cashTotal = 0;
     let cardTotal = 0;
     let tabbyTotal = 0;
     let tamaraTotal = 0;
+    let insuranceTotal = 0;
     let bankTransferTotal = 0;
-    let addOnTotal = 0;
 
-    receipts.forEach((receipt, index) => {
-      const row = dataStartRow + index;
+    receipts.forEach((receipt) => {
+      const receiptId = String(receipt.id || "");
+      const createdAt = new Date(receipt.created_at || now);
       const patientInfo = patientMap.get(String(receipt.patient_id || ""));
-      const patientName = patientInfo?.name || "";
-      const totalValue = Number(receipt.total || 0);
-      const breakdown = getPaymentBreakdown(String(receipt.payment_method || ""), totalValue);
-      const treatmentText = (treatmentMap.get(String(receipt.id || "")) || []).join(", ");
+      const doctorName = doctorMap.get(String(receipt.doctor_id || "")) || "";
+      const paymentMethodRaw = String(receipt.payment_method || "");
+      const discountAmount = Number(receipt.discount_amount || 0);
+      const netTotal = Number(receipt.total || 0);
+      const grossTotal = Number(receipt.subtotal || 0) + discountAmount;
+      const refundAmount = Number(refundMap.get(receiptId) || 0);
+      const breakdown = getPaymentBreakdown(paymentMethodRaw, netTotal);
 
-      totalSum += totalValue;
+      grossRevenue += grossTotal;
+      totalDiscounts += discountAmount;
+      netRevenue += netTotal;
+      totalRefunds += refundAmount;
+
       cashTotal += breakdown.cash;
       cardTotal += breakdown.card;
       tabbyTotal += breakdown.tabby;
       tamaraTotal += breakdown.tamara;
+      insuranceTotal += breakdown.insurance;
       bankTransferTotal += breakdown.bankTransfer;
-      addOnTotal += breakdown.addOn;
 
-      setCell(row, 1, index + 1);
-      setCell(row, 2, patientName);
-      setCell(row, 3, patientInfo?.patient_number || "");
-      setCell(row, 4, patientInfo?.nationality || "");
-      setCell(row, 5, patientInfo?.phone || "");
-      setCell(row, 6, patientInfo?.date_of_birth || "");
-      setCell(row, 7, treatmentText || "CONSULTATION");
-      const promoPrices = promoPriceMap.get(String(receipt.id || "")) || [];
+      const treatments = (treatmentMap.get(receiptId) || []).join("\n") || "CONSULTATION";
 
-      setCell(row, 8, promoPrices.length > 0 ? promoPrices.join(", ") : "");
-      setCell(row, 9, totalValue.toFixed(2));
-      setCell(row, 10, breakdown.cash ? breakdown.cash.toFixed(2) : "");
-      setCell(row, 11, breakdown.card ? breakdown.card.toFixed(2) : "");
-      setCell(row, 12, breakdown.tabby ? breakdown.tabby.toFixed(2) : "");
-      setCell(row, 13, breakdown.tamara ? breakdown.tamara.toFixed(2) : "");
-      setCell(row, 14, breakdown.addOn ? breakdown.addOn.toFixed(2) : "");
-      setCell(row, 15, breakdown.mop);
-      setCell(row, 16, "");
-      setCell(row, 17, "");
+      detailRows.push([
+        createdAt.toLocaleTimeString("en-US", {
+          timeZone: "Asia/Dubai",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        }),
+        receipt.receipt_number ? String(receipt.receipt_number).padStart(5, "0") : String(receiptId).slice(0, 8),
+        patientInfo?.name || "",
+        patientInfo?.nationality || "",
+        patientInfo?.patient_number || "",
+        patientInfo?.date_of_birth || "",
+        doctorName,
+        treatments,
+        grossTotal,
+        discountAmount,
+        netTotal,
+        breakdown.cash,
+        breakdown.card,
+        extractTransactionReference(paymentMethodRaw, "card"),
+        breakdown.tabby,
+        extractTransactionReference(paymentMethodRaw, "tabby"),
+        breakdown.tamara,
+        extractTransactionReference(paymentMethodRaw, "tamara"),
+        breakdown.insurance,
+        refundAmount,
+        paymentMethodRaw,
+      ]);
     });
 
-    const summaryStartRow = Math.max(10, dataStartRow + Math.max(receipts.length, 1) + 2);
-    const bankDeposit = cardTotal + tabbyTotal + tamaraTotal + bankTransferTotal;
-    const summaryRows: Array<[string, number]> = [
-      ["TOTAL", totalSum],
-      ["CASH", cashTotal],
-      ["CREDIT CARD", cardTotal],
-      ["BANK TRANSFER", bankTransferTotal],
-      ["TABBY PAY", tabbyTotal],
-      ["TAMARA PAY", tamaraTotal],
-      ["ADD ON", addOnTotal],
-      ["BANK DEPOSIT", bankDeposit],
-    ];
-
-    summaryRows.forEach((item, index) => {
-      const row = summaryStartRow + index;
-      setCell(row, 7, item[0]);
-      setCell(row, 8, item[1] ? item[1].toFixed(2) : "");
-    });
-
-    const totalsHeaderRow = summaryStartRow + summaryRows.length + 3;
-    const totalsValueRow = totalsHeaderRow + 1;
-    const totalsSecondRow = totalsValueRow + 1;
-    setCell(totalsHeaderRow, 1, "TOTAL NO.");
-    setCell(totalsHeaderRow, 1, "TOTAL NO.");
-    setCell(totalsHeaderRow, 1, "TOTAL NO.");
-    setCell(totalsHeaderRow, 1, "TOTAL NO.");
-    setCell(totalsHeaderRow, 2, "OF PATIENT");
-    setCell(totalsHeaderRow, 3, "CASH");
-    setCell(totalsHeaderRow, 4, "CARD");
-    setCell(totalsHeaderRow, 5, "TABBY");
-    setCell(totalsHeaderRow, 6, "TAMARA");
-    setCell(totalsHeaderRow, 7, "DEDUCT FROM INCOME");
-    setCell(totalsHeaderRow, 8, "TOTAL");
-
-    setCell(totalsValueRow, 1, [...new Set(receipts.map((r) => r.patient_id).filter(Boolean))].length);
-    setCell(totalsValueRow, 2, activeClinic.name);
-    setCell(totalsValueRow, 3, cashTotal ? cashTotal.toFixed(2) : "");
-    setCell(totalsValueRow, 4, cardTotal ? cardTotal.toFixed(2) : "");
-    setCell(totalsValueRow, 5, tabbyTotal ? tabbyTotal.toFixed(2) : "");
-    setCell(totalsValueRow, 6, tamaraTotal ? tamaraTotal.toFixed(2) : "");
-    setCell(totalsValueRow, 7, bankDeposit ? bankDeposit.toFixed(2) : "");
-    setCell(totalsValueRow, 8, totalSum ? totalSum.toFixed(2) : "");
-    setCell(totalsSecondRow, 1, receipts.length);
-    setCell(totalsSecondRow, 2, "TOTAL");
-
-    const creditHeaderRow = totalsSecondRow + 3;
-    const creditLabelRow = creditHeaderRow + 1;
-    const creditRowsStart = creditLabelRow + 1;
-    setCell(creditHeaderRow, 2, "CREDIT CARD REPORT");
-    setCell(creditHeaderRow, 3, "TRANSACTION 1");
-    setCell(creditHeaderRow, 4, "TRANSACTION 2");
-
-    const creditLabels = [
-      "PATIENT FILE #",
-      "DATE",
-      "TIME",
-      "TERMINAL ID",
-      "BATCH NO",
-      "APP/VERSION",
-      "TYPE OF CARD",
-      "TOTAL AMOUNT",
-    ];
-
-    creditLabels.forEach((label, index) => {
-      setCell(creditLabelRow + index, 2, label);
-    });
-
-    const cardTransactions = receipts.filter((receipt) => String(receipt.payment_method || "").toLowerCase().includes("card"));
-    cardTransactions.slice(0, 2).forEach((receipt, index) => {
-      const row = creditRowsStart + index;
-      const patientInfo = patientMap.get(String(receipt.patient_id || ""));
-      const createdAt = new Date(receipt.created_at);
-      const paymentMethod = String(receipt.payment_method || "");
-      const cardType = paymentMethod.toUpperCase().includes("VISA")
-        ? "VISA"
-        : paymentMethod.toUpperCase().includes("MASTER")
-          ? "MASTERCARD"
-          : "CARD";
-      setCell(row, 3, patientInfo?.patient_number || "");
-      setCell(row, 4, createdAt.toLocaleDateString("en-GB", { timeZone: "Asia/Dubai" }));
-      setCell(row, 5, createdAt.toLocaleTimeString("en-US", {
-        timeZone: "Asia/Dubai",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      }));
-      setCell(row, 6, "");
-      setCell(row, 7, "");
-      setCell(row, 8, "");
-      setCell(row, 9, cardType);
-      setCell(row, 10, Number(receipt.total || 0).toFixed(2));
-    });
+    const totalCollected = cashTotal + cardTotal + tabbyTotal + tamaraTotal + insuranceTotal + bankTransferTotal;
+    const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
 
     const workbook = XLSX.utils.book_new();
-    const worksheet = XLSX.utils.aoa_to_sheet(sheetRows);
-    worksheet["!cols"] = [
-      { wch: 5 },
-      { wch: 13 },
-      { wch: 13 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 38 },
-      { wch: 12 },
-      { wch: 12 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 10 },
-    ];
-    worksheet["!merges"] = [
-      { s: { r: 1, c: 1 }, e: { r: 1, c: 14 } },
-      { s: { r: totalsHeaderRow - 1, c: 0 }, e: { r: totalsValueRow - 1, c: 0 } },
-      { s: { r: creditHeaderRow - 1, c: 1 }, e: { r: creditHeaderRow - 1, c: 1 } },
-    ];
-
     const thinBorder = {
-      top: { style: "thin", color: { rgb: "000000" } },
-      bottom: { style: "thin", color: { rgb: "000000" } },
-      left: { style: "thin", color: { rgb: "000000" } },
-      right: { style: "thin", color: { rgb: "000000" } },
+      top: { style: "thin", color: { rgb: "D9D9D9" } },
+      bottom: { style: "thin", color: { rgb: "D9D9D9" } },
+      left: { style: "thin", color: { rgb: "D9D9D9" } },
+      right: { style: "thin", color: { rgb: "D9D9D9" } },
     };
 
-    const getCellRef = (row: number, col: number) => XLSX.utils.encode_cell({ r: row - 1, c: col - 1 });
-    const styleCell = (row: number, col: number, style: Record<string, unknown>) => {
-      const ref = getCellRef(row, col);
-      const cell = (worksheet as any)[ref];
-      if (!cell) {
-        return;
+    const reportDateText = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Dubai",
+      day: "2-digit",
+      month: "long",
+      year: "numeric",
+    }).format(now);
+    const weekdayText = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Dubai",
+      weekday: "long",
+    }).format(now);
+    const generatedAtText = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Dubai",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }).format(now);
+
+    const summaryRows: (string | number)[][] = [
+      ["End-of-Day Reconciliation Report", ""],
+      ["", ""],
+      ["Report Information", ""],
+      ["Clinic Name", activeClinic.name],
+      ["Report Date", reportDateText],
+      ["Day of Week", weekdayText],
+      ["Generated Date & Time", generatedAtText],
+      ["", ""],
+      ["Daily Summary", "Value"],
+      ["Total Transactions", receipts.length],
+      ["Unique Patients", uniquePatients],
+      ["Gross Revenue", grossRevenue],
+      ["Total Discounts (Promo)", totalDiscounts],
+      ["Net Revenue", netRevenue],
+      ["Total Refunds", totalRefunds],
+      ["", ""],
+      ["Payment Summary", "Amount (AED)"],
+      ["Cash", cashTotal],
+      ["Card", cardTotal],
+      ["Tabby", tabbyTotal],
+      ["Tamara", tamaraTotal],
+      ["Insurance", insuranceTotal],
+      ["Bank Transfer", bankTransferTotal],
+      ["Total Collected", totalCollected],
+    ];
+
+    const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
+    summarySheet["!cols"] = [{ wch: 36 }, { wch: 24 }];
+    summarySheet["!merges"] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
+      { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } },
+      { s: { r: 8, c: 0 }, e: { r: 8, c: 1 } },
+      { s: { r: 16, c: 0 }, e: { r: 16, c: 1 } },
+    ];
+
+    const styleSummaryCell = (row: number, col: number, style: Record<string, unknown>) => {
+      const ref = XLSX.utils.encode_cell({ r: row - 1, c: col - 1 });
+      const cell = (summarySheet as any)[ref];
+      if (!cell) return;
+      cell.s = { ...(cell.s || {}), ...style };
+    };
+
+    for (let row = 1; row <= summaryRows.length; row++) {
+      for (let col = 1; col <= 2; col++) {
+        styleSummaryCell(row, col, {
+          border: thinBorder,
+          font: { name: "Calibri", sz: 11, color: { rgb: "1F2937" } },
+          alignment: { vertical: "center", horizontal: col === 1 ? "left" : "right" },
+        });
       }
-      cell.s = {
-        ...(cell.s || {}),
-        ...style,
-      };
-    };
+    }
 
-    const styleRange = (
-      rowStart: number,
-      rowEnd: number,
-      colStart: number,
-      colEnd: number,
-      style: Record<string, unknown>
-    ) => {
-      for (let row = rowStart; row <= rowEnd; row++) {
-        for (let col = colStart; col <= colEnd; col++) {
-          styleCell(row, col, style);
-        }
-      }
-    };
-
-    // Title bar styling
-    styleRange(2, 2, 2, 15, {
-      fill: { fgColor: { rgb: "FFF200" } },
-      font: { name: "Calibri", sz: 20, bold: true, color: { rgb: "000000" } },
-      alignment: { horizontal: "center", vertical: "center" },
-      border: thinBorder,
+    [3, 9, 17].forEach((row) => {
+      styleSummaryCell(row, 1, {
+        fill: { fgColor: { rgb: "1F4E78" } },
+        font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
+        alignment: { horizontal: "left", vertical: "center" },
+      });
+      styleSummaryCell(row, 2, {
+        fill: { fgColor: { rgb: "1F4E78" } },
+        font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
+      });
     });
 
-    // Main table header styling with per-column colors seen in template
-    const headerColors: Record<number, string> = {
-      1: "F4B183",
-      2: "F4B183",
-      3: "F4B183",
-      4: "F4B183",
-      5: "F4B183",
-      6: "F4B183",
-      7: "F4B183",
-      8: "FFF2CC",
-      9: "FF0000",
-      10: "FFD966",
-      11: "FFF2CC",
-      12: "92D050",
-      13: "FF66FF",
-      14: "D9D9D9",
-      15: "00B0F0",
-      16: "FF99CC",
-      17: "92D050",
+    styleSummaryCell(1, 1, {
+      fill: { fgColor: { rgb: "0B132B" } },
+      font: { name: "Calibri", sz: 16, bold: true, color: { rgb: "FFFFFF" } },
+      alignment: { horizontal: "center", vertical: "center" },
+    });
+    styleSummaryCell(1, 2, {
+      fill: { fgColor: { rgb: "0B132B" } },
+    });
+
+    for (let row = 12; row <= 15; row++) {
+      styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
+    }
+    for (let row = 18; row <= 24; row++) {
+      styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
+    }
+
+    styleSummaryCell(24, 1, {
+      fill: { fgColor: { rgb: "FFF2CC" } },
+      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
+    });
+    styleSummaryCell(24, 2, {
+      fill: { fgColor: { rgb: "FFF2CC" } },
+      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
+    });
+
+    // Formula for Total Collected in summary payment section.
+    (summarySheet as any)["B24"] = { t: "n", f: "SUM(B18:B23)", s: (summarySheet as any)["B24"]?.s };
+
+    const detailsData: (string | number)[][] = [detailHeaders, ...detailRows, new Array(detailHeaders.length).fill("") as string[]];
+    const detailsSheet = XLSX.utils.aoa_to_sheet(detailsData);
+    const detailsDataStart = 2;
+    const detailsDataEnd = detailRows.length > 0 ? detailRows.length + 1 : 1;
+    const formulaEnd = Math.max(detailsDataStart, detailsDataEnd);
+    const totalsRow = detailRows.length + 2;
+
+    const writeCell = (address: string, value: string | number | { t: string; f: string }) => {
+      if (typeof value === "object" && "f" in value) {
+        (detailsSheet as any)[address] = { ...(detailsSheet as any)[address], ...value };
+        return;
+      }
+      (detailsSheet as any)[address] = { ...(detailsSheet as any)[address], v: value };
     };
 
-    for (let col = 1; col <= 16; col++) {
-      styleCell(headerRow, col, {
-        fill: { fgColor: { rgb: headerColors[col] || "FFF200" } },
-        font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "000000" } },
+    writeCell(`A${totalsRow}`, "TOTALS");
+
+    ["I", "J", "K", "L", "M", "O", "Q", "S", "T"].forEach((col) => {
+      writeCell(`${col}${totalsRow}`, { t: "n", f: `SUM(${col}${detailsDataStart}:${col}${formulaEnd})` });
+    });
+
+    detailsSheet["!autofilter"] = { ref: `A1:U${totalsRow}` };
+    detailsSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+
+    const autoWidths = detailHeaders.map((header, index) => {
+      let maxLength = String(header).length;
+      detailRows.forEach((row) => {
+        const value = row[index] == null ? "" : String(row[index]);
+        const longestLine = value
+          .split("\n")
+          .reduce((max, part) => (part.length > max ? part.length : max), 0);
+        if (longestLine > maxLength) {
+          maxLength = longestLine;
+        }
+      });
+
+      const padding = index === 7 || index === 20 ? 6 : 3;
+      return { wch: Math.min(48, Math.max(10, maxLength + padding)) };
+    });
+
+    autoWidths[7] = { wch: 42 };
+    autoWidths[13] = { wch: 26 };
+    autoWidths[15] = { wch: 30 };
+    autoWidths[17] = { wch: 30 };
+    autoWidths[20] = { wch: 34 };
+    detailsSheet["!cols"] = autoWidths;
+
+    const styleDetailsCell = (row: number, col: number, style: Record<string, unknown>) => {
+      const ref = XLSX.utils.encode_cell({ r: row - 1, c: col - 1 });
+      const cell = (detailsSheet as any)[ref];
+      if (!cell) return;
+      cell.s = { ...(cell.s || {}), ...style };
+    };
+
+    for (let col = 1; col <= detailHeaders.length; col++) {
+      styleDetailsCell(1, col, {
+        fill: { fgColor: { rgb: "1F4E78" } },
+        font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FFFFFF" } },
         alignment: { horizontal: "center", vertical: "center", wrapText: true },
         border: thinBorder,
       });
     }
 
-    const dataEndRow = dataStartRow + Math.max(receipts.length, 1) - 1;
-    styleRange(dataStartRow, dataEndRow, 1, 16, {
-      font: { name: "Calibri", sz: 10, color: { rgb: "000000" } },
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      border: thinBorder,
-    });
-    styleRange(dataStartRow, dataEndRow, 2, 2, {
-      alignment: { horizontal: "left", vertical: "center", wrapText: true },
-    });
-    styleRange(dataStartRow, dataEndRow, 7, 7, {
-      alignment: { horizontal: "left", vertical: "center", wrapText: true },
-    });
+    const currencyCols = new Set([9, 10, 11, 12, 13, 15, 17, 19, 20]);
+    for (let row = 2; row <= totalsRow; row++) {
+      const isTotalsRow = row === totalsRow;
+      const isEvenDataRow = row % 2 === 0;
+      for (let col = 1; col <= detailHeaders.length; col++) {
+        const baseStyle: Record<string, unknown> = {
+          border: thinBorder,
+          font: { name: "Calibri", sz: 10, color: { rgb: "111827" }, bold: isTotalsRow },
+          alignment: {
+            vertical: "top",
+            horizontal: currencyCols.has(col) ? "right" : col === 8 || col === 21 ? "left" : "center",
+            wrapText: col === 8 || col === 21,
+          },
+          fill: isTotalsRow
+            ? { fgColor: { rgb: "FFF2CC" } }
+            : isEvenDataRow
+              ? { fgColor: { rgb: "F8FAFC" } }
+              : { fgColor: { rgb: "FFFFFF" } },
+        };
 
-    // Summary block color coding
-    const summaryColors = ["F4B183", "FFD966", "FFE699", "9BC2E6", "00B0F0", "FF66FF", "FFF200", "92D050"];
-    summaryRows.forEach((_, index) => {
-      const row = summaryStartRow + index;
-      styleCell(row, 7, {
-        fill: { fgColor: { rgb: summaryColors[index] || "D9D9D9" } },
-        font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "000000" } },
-        alignment: { horizontal: "left", vertical: "center" },
-        border: thinBorder,
-      });
-      styleCell(row, 8, {
-        font: { name: "Calibri", sz: 11, bold: index === 0, color: { rgb: "000000" } },
-        alignment: { horizontal: "center", vertical: "center" },
-        border: thinBorder,
-        numFmt: "0.00",
-      });
-    });
+        if (currencyCols.has(col)) {
+          baseStyle.numFmt = "#,##0.00";
+        }
 
-    // Deduction section styling
-    styleRange(totalsHeaderRow, totalsHeaderRow + 1, 1, 8, {
-      fill: { fgColor: { rgb: "FFC000" } },
-      font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "000000" } },
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      border: thinBorder,
-    });
-    styleRange(totalsValueRow, totalsSecondRow, 1, 8, {
-      border: thinBorder,
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      font: { name: "Calibri", sz: 11, color: { rgb: "000000" } },
-    });
-    styleCell(totalsHeaderRow, 1, {
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-    });
+        styleDetailsCell(row, col, baseStyle);
+      }
+    }
 
-    styleRange(creditHeaderRow, creditHeaderRow, 2, 4, {
-      fill: { fgColor: { rgb: "4472C4" } },
-      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FFFFFF" } },
-      alignment: { horizontal: "center", vertical: "center" },
-      border: thinBorder,
-    });
-    styleRange(creditLabelRow, creditLabelRow + creditLabels.length - 1, 2, 4, {
-      border: thinBorder,
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      font: { name: "Calibri", sz: 10, color: { rgb: "000000" } },
-    });
-    styleRange(creditRowsStart, creditRowsStart + 1, 3, 10, {
-      border: thinBorder,
-      alignment: { horizontal: "center", vertical: "center", wrapText: true },
-      font: { name: "Calibri", sz: 10, color: { rgb: "000000" } },
-    });
-
-    styleRange(creditHeaderRow, creditHeaderRow, 3, 4, {
-      fill: { fgColor: { rgb: "4472C4" } },
-      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FFFFFF" } },
-      alignment: { horizontal: "center", vertical: "center" },
-      border: thinBorder,
-    });
-
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Daily Income");
+    XLSX.utils.book_append_sheet(workbook, summarySheet, "Daily Summary");
+    XLSX.utils.book_append_sheet(workbook, detailsSheet, "Transaction Details");
 
     const fileDate = formatDubaiFileDate(now);
-    const fileName = `DAILY INCOME REPORT ${fileDate.day} ${fileDate.month} ${fileDate.year} - ${fileDate.weekday}.xlsx`;
+    const fileName = `EOD RECONCILIATION ${activeClinic.name.toUpperCase()} ${fileDate.day} ${fileDate.month} ${fileDate.year}.xlsx`;
     XLSX.writeFile(workbook, fileName);
   }
 
@@ -1268,6 +1258,12 @@ export default function ReceiptsPage() {
 
   function selectPaymentMethod(method: string) {
     setSelectedPaymentMethod(method);
+    if (method !== "Tabby") {
+      setTabbyReferenceInput("");
+    }
+    if (method !== "Tamara") {
+      setTamaraReferenceInput("");
+    }
   }
 
   function getNumericInput(value: string) {
@@ -1305,7 +1301,21 @@ export default function ReceiptsPage() {
     if (selectedPaymentMethod === "Split Payment") {
       const cash = getMixedCashAmount();
       const other = getMixedOtherAmount();
-      return `Split Payment (Cash AED ${cash.toFixed(2)} + ${mixedOtherMethod} AED ${other.toFixed(2)})`;
+      const splitReference = mixedOtherMethod === "Tabby"
+        ? tabbyReferenceInput.trim()
+        : mixedOtherMethod === "Tamara"
+          ? tamaraReferenceInput.trim()
+          : "";
+      const referenceLabel = splitReference ? `, Ref: ${splitReference}` : "";
+      return `Split Payment (Cash AED ${cash.toFixed(2)} + ${mixedOtherMethod} AED ${other.toFixed(2)}${referenceLabel})`;
+    }
+
+    if (selectedPaymentMethod === "Tabby") {
+      return `Tabby (Ref: ${tabbyReferenceInput.trim()})`;
+    }
+
+    if (selectedPaymentMethod === "Tamara") {
+      return `Tamara (Ref: ${tamaraReferenceInput.trim()})`;
     }
 
     return selectedPaymentMethod;
@@ -1357,6 +1367,26 @@ export default function ReceiptsPage() {
         alert(`Split payment amounts must equal total AED ${total.toFixed(2)}.`);
         return;
       }
+
+      if (mixedOtherMethod === "Tabby" && !tabbyReferenceInput.trim()) {
+        alert("Please enter Tabby reference number for split payment.");
+        return;
+      }
+
+      if (mixedOtherMethod === "Tamara" && !tamaraReferenceInput.trim()) {
+        alert("Please enter Tamara reference number for split payment.");
+        return;
+      }
+    }
+
+    if (selectedPaymentMethod === "Tabby" && !tabbyReferenceInput.trim()) {
+      alert("Please enter Tabby reference number before continuing.");
+      return;
+    }
+
+    if (selectedPaymentMethod === "Tamara" && !tamaraReferenceInput.trim()) {
+      alert("Please enter Tamara reference number before continuing.");
+      return;
     }
 
     setShowPaymentModal(false);
@@ -1559,12 +1589,12 @@ export default function ReceiptsPage() {
       display: flex;
       flex-direction: column;
       align-items: center;
-      width: 50mm;
+      width: 58mm;
     }
 
     .logo-section img {
-      width: 45mm;
-      height: 45mm;
+      width: 52mm;
+      height: 52mm;
       object-fit: contain;
       margin-bottom: 3mm;
     }
@@ -1953,10 +1983,10 @@ export default function ReceiptsPage() {
         font-weight: 600;
       }
       .invoice-container img {
-        filter: contrast(200%) brightness(120%);
         -webkit-print-color-adjust: exact;
         print-color-adjust: exact;
-        image-rendering: high-quality;
+        image-rendering: -webkit-optimize-contrast;
+        image-rendering: crisp-edges;
         -webkit-backface-visibility: hidden;
         backface-visibility: hidden;
       }
@@ -1969,7 +1999,7 @@ export default function ReceiptsPage() {
     <div class="header">
       <div class="header-top">
         <div class="logo-section">
-          <img src="/images/logo.png" alt="Skin and Smile Logo">
+          <img src="/images/logo6.jpg" alt="Skin and Smile Logo">
           <div class="clinic-name">Skin and Smile</div>
           <div class="clinic-sub">Dental Clinic</div>
         </div>
@@ -2161,7 +2191,7 @@ export default function ReceiptsPage() {
   }
 
   function buildThermalReceiptHtml(title: string, savedReceipt?: any) {
-    const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo.png";
+    const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo6.jpg";
     const clinicDisplayName = activeClinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
     const clinicAddress = activeClinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
     const clinicRoom = activeClinic?.room ? `2nd Floor, Room ${activeClinic.room.replace(/^Room\s+/i, '')}` : "";
@@ -2220,10 +2250,33 @@ export default function ReceiptsPage() {
     }
 
     if (selectedPaymentMethod === "Split Payment") {
+      const splitReference = mixedOtherMethod === "Tabby"
+        ? tabbyReferenceInput.trim()
+        : mixedOtherMethod === "Tamara"
+          ? tamaraReferenceInput.trim()
+          : "";
+
       paymentSection = `
         <div class="row"><span>Payment Method / طريقة الدفع</span><span>: SPLIT PAYMENT</span></div>
         <div class="row"><span>Cash / نقداً</span><span>: AED ${getMixedCashAmount().toFixed(2)}</span></div>
         <div class="row"><span>${mixedOtherMethod}</span><span>: AED ${getMixedOtherAmount().toFixed(2)}</span></div>
+        ${splitReference ? `<div class="row"><span>${mixedOtherMethod} Reference</span><span>: ${splitReference}</span></div>` : ""}
+      `;
+    }
+
+    if (selectedPaymentMethod === "Tabby") {
+      paymentSection = `
+        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: TABBY</span></div>
+        <div class="row"><span>Tabby Reference</span><span>: ${tabbyReferenceInput.trim() || "-"}</span></div>
+        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${total.toFixed(2)}</span></div>
+      `;
+    }
+
+    if (selectedPaymentMethod === "Tamara") {
+      paymentSection = `
+        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: TAMARA</span></div>
+        <div class="row"><span>Tamara Reference</span><span>: ${tamaraReferenceInput.trim() || "-"}</span></div>
+        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${total.toFixed(2)}</span></div>
       `;
     }
 
@@ -2260,7 +2313,7 @@ export default function ReceiptsPage() {
             font-weight: 700;
           }
           .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-          .logo { max-width: 35mm; max-height: 20mm; object-fit: contain; }
+          .logo { max-width: 48mm; max-height: 26mm; object-fit: contain; }
           .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
           .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
           .row {
@@ -2286,7 +2339,7 @@ export default function ReceiptsPage() {
             @page { size: 80mm auto; margin: 0; }
             body { width: 72mm; }
             * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; }
-            .logo { width: 100%; max-width: 60mm; height: auto; }
+            .logo { width: 100%; max-width: 66mm; height: auto; }
           }
         </style>
       </head>
@@ -2301,7 +2354,7 @@ export default function ReceiptsPage() {
 
         <div class="address">
           ${clinicAddress.split(/\\n|\n/).map((line: string) => `<div>${line}</div>`).join("")}
-          ${clinicRoom && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
+          ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
           ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
         </div>
 
@@ -2932,7 +2985,16 @@ export default function ReceiptsPage() {
                         <label className="block text-xs font-semibold text-slate-600">Second Method</label>
                         <select
                           value={mixedOtherMethod}
-                          onChange={(e) => setMixedOtherMethod(e.target.value)}
+                          onChange={(e) => {
+                            const nextMethod = e.target.value;
+                            setMixedOtherMethod(nextMethod);
+                            if (nextMethod !== "Tabby") {
+                              setTabbyReferenceInput("");
+                            }
+                            if (nextMethod !== "Tamara") {
+                              setTamaraReferenceInput("");
+                            }
+                          }}
                           className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
                         >
                           {paymentOptions
@@ -2955,7 +3017,53 @@ export default function ReceiptsPage() {
                           className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
                         />
                       </div>
+                      {(mixedOtherMethod === "Tabby" || mixedOtherMethod === "Tamara") && (
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600">
+                            {mixedOtherMethod} Reference Number
+                          </label>
+                          <input
+                            type="text"
+                            value={mixedOtherMethod === "Tabby" ? tabbyReferenceInput : tamaraReferenceInput}
+                            onChange={(e) => {
+                              if (mixedOtherMethod === "Tabby") {
+                                setTabbyReferenceInput(e.target.value);
+                              } else {
+                                setTamaraReferenceInput(e.target.value);
+                              }
+                            }}
+                            placeholder={`Enter ${mixedOtherMethod} reference`}
+                            className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                          />
+                        </div>
+                      )}
                       <p className="text-xs text-slate-600">Entered total: AED {(getMixedCashAmount() + getMixedOtherAmount()).toFixed(2)} / AED {total.toFixed(2)}</p>
+                    </div>
+                  )}
+
+                  {selectedPaymentMethod === "Tabby" && (
+                    <div className="mt-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <label className="block text-xs font-semibold text-slate-600">Tabby Reference Number</label>
+                      <input
+                        type="text"
+                        value={tabbyReferenceInput}
+                        onChange={(e) => setTabbyReferenceInput(e.target.value)}
+                        placeholder="Enter Tabby reference"
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                      />
+                    </div>
+                  )}
+
+                  {selectedPaymentMethod === "Tamara" && (
+                    <div className="mt-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <label className="block text-xs font-semibold text-slate-600">Tamara Reference Number</label>
+                      <input
+                        type="text"
+                        value={tamaraReferenceInput}
+                        onChange={(e) => setTamaraReferenceInput(e.target.value)}
+                        placeholder="Enter Tamara reference"
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                      />
                     </div>
                   )}
 
@@ -3001,6 +3109,8 @@ export default function ReceiptsPage() {
                         setTransactionPatientId("");
                         setDoctorId("");
                         setSelectedPaymentMethod("");
+                        setTabbyReferenceInput("");
+                        setTamaraReferenceInput("");
                         setNotes("");
                         setSelectedServices([]);
                         setDiscountInput("");

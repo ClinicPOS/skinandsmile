@@ -1189,6 +1189,7 @@ export default function BackendPage() {
             >
               <option value="">Select shift</option>
               <option value="Morning">Morning</option>
+              <option value="Mid Shift">Mid Shift</option>
               <option value="Evening">Evening</option>
             </select>
             <input
@@ -1224,6 +1225,7 @@ export default function BackendPage() {
                     >
                       <option value="">Select shift</option>
                       <option value="Morning">Morning</option>
+                      <option value="Mid Shift">Mid Shift</option>
                       <option value="Evening">Evening</option>
                     </select>
                     <select

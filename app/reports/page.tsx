@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
+import type { Clinic, Patient, Receptionist, Service } from "../../lib/types";
 
 const BOSS_PIN = "0404";
 
@@ -19,6 +20,81 @@ function getPaymentCategory(method: string): string {
   return method || "Other";
 }
 
+type TopServiceSummary = {
+  id: string;
+  name: string;
+  count: number;
+  revenue: number;
+  patientCount: number;
+  doctorCount: number;
+  revenueShare: number;
+  isTopPerformer: boolean;
+};
+
+type TopServicesSummaryPayload = {
+  services: TopServiceSummary[];
+  totalRevenue: number;
+  uniqueServices: number;
+  mostPerformed: TopServiceSummary | null;
+  highestRevenue: TopServiceSummary | null;
+};
+
+type TopServiceDetail = {
+  id: string;
+  name: string;
+  revenue: number;
+  count: number;
+  averagePrice: number;
+  patientCount: number;
+  revenueShare: number;
+  patients: Array<{ id: string; name: string }>;
+  doctors: Array<{ id: string; name: string }>;
+  revenueTrend: Array<{ date: string; label: string; revenue: number; count: number }>;
+};
+
+type Receipt = {
+  id: string;
+  receptionist_id: string;
+  patient_id: string | null;
+  total: number;
+  payment_method: string | null;
+  notes?: string | null;
+  created_at: string;
+};
+
+type ReceiptItem = {
+  id: string;
+  receipt_id: string;
+  service_id: string;
+  doctor_id: string | null;
+  price: number | null;
+  total: number | null;
+  created_at: string;
+  services?: {
+    name?: string | null;
+  } | null;
+};
+
+type Refund = {
+  id: string;
+  receipt_id: string;
+  total_amount: number;
+  reason?: string | null;
+  refunded_by?: string | null;
+  refunded_by_receptionist?: {
+    name?: string | null;
+  } | null;
+  created_at: string;
+};
+
+const EMPTY_TOP_SERVICES_SUMMARY: TopServicesSummaryPayload = {
+  services: [],
+  totalRevenue: 0,
+  uniqueServices: 0,
+  mostPerformed: null,
+  highestRevenue: null,
+};
+
 export default function ReportsPage() {
   const [pinInput, setPinInput] = useState("");
   const [role, setRole] = useState<"boss" | "receptionist" | null>(null);
@@ -26,16 +102,15 @@ export default function ReportsPage() {
   const [activeClinicName, setActiveClinicName] = useState("");
   const [pinError, setPinError] = useState("");
 
-  const [receptionists, setReceptionists] = useState<any[]>([]);
-  const [clinics, setClinics] = useState<any[]>([]);
-  const [patients, setPatients] = useState<any[]>([]);
-  const [receipts, setReceipts] = useState<any[]>([]);
-  const [receiptItems, setReceiptItems] = useState<any[]>([]);
-  const [services, setServices] = useState<any[]>([]);
-  const [refunds, setRefunds] = useState<any[]>([]);
+  const [receptionists, setReceptionists] = useState<Receptionist[]>([]);
+  const [clinics, setClinics] = useState<Clinic[]>([]);
+  const [patients, setPatients] = useState<Patient[]>([]);
+  const [receipts, setReceipts] = useState<Receipt[]>([]);
+  const [receiptItems, setReceiptItems] = useState<ReceiptItem[]>([]);
+  const [services, setServices] = useState<Service[]>([]);
+  const [refunds, setRefunds] = useState<Refund[]>([]);
 
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [calendarDate, setCalendarDate] = useState(new Date());
   const [selectedClinic, setSelectedClinic] = useState<string | null>(null); // null = All Clinics
@@ -48,6 +123,31 @@ export default function ReportsPage() {
   // Service details panel state
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null);
   const [showServicePanel, setShowServicePanel] = useState(false);
+  const [topServicesSummary, setTopServicesSummary] = useState<TopServicesSummaryPayload>(EMPTY_TOP_SERVICES_SUMMARY);
+  const [topServicesLoading, setTopServicesLoading] = useState(false);
+  const [topServicesError, setTopServicesError] = useState("");
+  const [selectedServiceDetail, setSelectedServiceDetail] = useState<TopServiceDetail | null>(null);
+  const [serviceDetailLoading, setServiceDetailLoading] = useState(false);
+  const [serviceDetailError, setServiceDetailError] = useState("");
+
+  const parseApiError = useCallback(async (response: Response, fallbackMessage: string) => {
+    const payload = await response.json().catch(() => null) as {
+      error?: string;
+      details?: string;
+      hint?: string;
+    } | null;
+
+    if (!response.ok) {
+      const messageParts = [payload?.error, payload?.details, payload?.hint].filter(Boolean);
+      throw new Error(messageParts.join(" ") || fallbackMessage);
+    }
+
+    if (!payload) {
+      throw new Error("Top Services returned an invalid response. Please sign in again.");
+    }
+
+    return payload;
+  }, []);
 
   useEffect(() => {
     async function loadMeta() {
@@ -65,7 +165,6 @@ export default function ReportsPage() {
 
   async function loadReportForMonth(date: Date) {
     setIsLoading(true);
-    setSelectedDay(null);
     const year = date.getFullYear();
     const month = date.getMonth();
     const from = new Date(year, month, 1).toISOString();
@@ -77,17 +176,17 @@ export default function ReportsPage() {
       supabase.from("services").select("*"),
     ]);
 
-    const loadedReceipts = receiptsRes.status === "fulfilled" ? (receiptsRes.value.data || []) : [];
-    let loadedRefunds: any[] = [];
+    const loadedReceipts: Receipt[] = receiptsRes.status === "fulfilled" ? ((receiptsRes.value.data || []) as Receipt[]) : [];
+    let loadedRefunds: Refund[] = [];
     if (loadedReceipts.length > 0) {
-      const receiptIds = loadedReceipts.map((r: any) => r.id);
+      const receiptIds = loadedReceipts.map((r) => r.id);
       const refundsRes = await supabase.from("refunds").select("*, refunded_by_receptionist:refunded_by(name)").in("receipt_id", receiptIds);
-      loadedRefunds = refundsRes.data || [];
+      loadedRefunds = (refundsRes.data || []) as Refund[];
     }
 
     setReceipts(loadedReceipts);
-    if (itemsRes.status === "fulfilled") setReceiptItems(itemsRes.value.data || []);
-    if (servicesRes.status === "fulfilled") setServices(servicesRes.value.data || []);
+    if (itemsRes.status === "fulfilled") setReceiptItems((itemsRes.value.data || []) as ReceiptItem[]);
+    if (servicesRes.status === "fulfilled") setServices((servicesRes.value.data || []) as Service[]);
     setRefunds(loadedRefunds);
     setIsLoading(false);
   }
@@ -100,17 +199,17 @@ export default function ReportsPage() {
       supabase.from("services").select("*"),
     ]);
 
-    const loadedReceipts = receiptsRes.status === "fulfilled" ? (receiptsRes.value.data || []) : [];
-    let loadedRefunds: any[] = [];
+    const loadedReceipts: Receipt[] = receiptsRes.status === "fulfilled" ? ((receiptsRes.value.data || []) as Receipt[]) : [];
+    let loadedRefunds: Refund[] = [];
     if (loadedReceipts.length > 0) {
-      const receiptIds = loadedReceipts.map((r: any) => r.id);
+      const receiptIds = loadedReceipts.map((r) => r.id);
       const refundsRes = await supabase.from("refunds").select("*, refunded_by_receptionist:refunded_by(name)").in("receipt_id", receiptIds);
-      loadedRefunds = refundsRes.data || [];
+      loadedRefunds = (refundsRes.data || []) as Refund[];
     }
 
     setReceipts(loadedReceipts);
-    if (itemsRes.status === "fulfilled") setReceiptItems(itemsRes.value.data || []);
-    if (servicesRes.status === "fulfilled") setServices(servicesRes.value.data || []);
+    if (itemsRes.status === "fulfilled") setReceiptItems((itemsRes.value.data || []) as ReceiptItem[]);
+    if (servicesRes.status === "fulfilled") setServices((servicesRes.value.data || []) as Service[]);
     setRefunds(loadedRefunds);
     setIsLoading(false);
   }
@@ -145,15 +244,15 @@ export default function ReportsPage() {
     loadReportForMonth(d);
   }
 
-  const getTodayRange = () => {
+  const getTodayRange = useCallback(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
     return { from: today, to: tomorrow };
-  };
+  }, []);
 
-  const getFilterRange = () => {
+  const getFilterRange = useCallback(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -210,15 +309,15 @@ export default function ReportsPage() {
     }
 
     return getTodayRange();
-  };
+  }, [endDate, filterType, getTodayRange, selectedDate, startDate]);
 
-  const getFilteredReceipts = (receiptsToFilter: any[]) => {
+  const getFilteredReceipts = useCallback((receiptsToFilter: Receipt[]) => {
     const { from, to } = getFilterRange();
     return receiptsToFilter.filter((r) => {
       const receiptDate = new Date(r.created_at || new Date());
       return receiptDate >= from && receiptDate < to;
     });
-  };
+  }, [getFilterRange]);
 
   const receptionistStats = useMemo(() => {
     if (role !== "receptionist") return null;
@@ -245,7 +344,7 @@ export default function ReportsPage() {
     const netRevenue = totalRevenue - totalRefunded;
 
     return { totalTransactions: mine.length, cashTotal, cashCount: cashReceipts.length, totalRevenue: netRevenue, paymentBreakdown, totalRefunded, grossRevenue: totalRevenue };
-  }, [role, receipts, refunds, receptionists, activeClinicId, filterType, startDate, endDate, selectedDate]);
+  }, [role, receipts, refunds, receptionists, activeClinicId, getFilteredReceipts]);
 
   const bossStats = useMemo(() => {
     if (role !== "boss") return null;
@@ -318,89 +417,7 @@ export default function ReportsPage() {
       .slice(0, 10);
 
     return { totalRevenue: netRevenue, totalPatients, totalTransactions: filteredReceipts.length, clinicMap, paymentBreakdown, topServices, totalRefunded, grossRevenue: totalRevenue };
-  }, [role, receipts, refunds, receiptItems, services, clinics, receptionists, filterType, startDate, endDate, selectedDate, selectedClinic]);
-
-  // Detailed service analytics (filters properly by clinic and date)
-  const detailedServiceAnalytics = useMemo(() => {
-    if (role !== "boss") return { services: [], totalRevenue: 0, mostPerformed: null, highestRevenue: null };
-
-    let filteredReceipts = getFilteredReceipts(receipts);
-    
-    // Filter by selected clinic if not "All Clinics"
-    if (selectedClinic) {
-      filteredReceipts = filteredReceipts.filter((r) => {
-        const receptionist = receptionists.find((rec) => rec.id === r.receptionist_id);
-        return receptionist?.clinic_id === selectedClinic;
-      });
-    }
-
-    const filteredReceiptIds = new Set(filteredReceipts.map((r) => r.id));
-    const relevantItems = receiptItems.filter((item) => filteredReceiptIds.has(item.receipt_id));
-
-    const serviceMap: Record<string, { 
-      id: string;
-      name: string; 
-      count: number; 
-      revenue: number;
-      patients: Set<string>;
-      totalPrice: number;
-      doctors: Set<string>;
-    }> = {};
-
-    for (const item of relevantItems) {
-      const serviceId = item.service_id;
-      const serviceName = item.services?.name || services.find((s) => s.id === serviceId)?.name || "Unknown";
-      
-      if (!serviceMap[serviceId]) {
-        serviceMap[serviceId] = { 
-          id: serviceId,
-          name: serviceName, 
-          count: 0, 
-          revenue: 0,
-          patients: new Set(),
-          totalPrice: 0,
-          doctors: new Set(),
-        };
-      }
-
-      const receipt = receipts.find((r) => r.id === item.receipt_id);
-      const itemRevenue = Number(item.total || item.price || 0);
-      
-      serviceMap[serviceId].count += 1;
-      serviceMap[serviceId].revenue += itemRevenue;
-      serviceMap[serviceId].totalPrice += itemRevenue;
-      
-      if (receipt?.patient_id) {
-        serviceMap[serviceId].patients.add(receipt.patient_id);
-      }
-      if (item.doctor_id) {
-        serviceMap[serviceId].doctors.add(item.doctor_id);
-      }
-    }
-
-    const servicesList = Object.values(serviceMap)
-      .map((service) => ({
-        ...service,
-        patients: Array.from(service.patients),
-        doctors: Array.from(service.doctors),
-        averagePrice: service.count > 0 ? service.revenue / service.count : 0,
-      }))
-      .sort((a, b) => b.revenue - a.revenue);
-
-    const totalRevenue = servicesList.reduce((sum, s) => sum + s.revenue, 0);
-    const mostPerformed = servicesList.length > 0 
-      ? servicesList.reduce((max, s) => (s.count > (max?.count || 0) ? s : max), servicesList[0]) 
-      : null;
-    const highestRevenue = servicesList.length > 0 ? servicesList[0] : null;
-
-    return { 
-      services: servicesList, 
-      totalRevenue, 
-      mostPerformed, 
-      highestRevenue,
-      uniqueServices: servicesList.length 
-    };
-  }, [role, receipts, receiptItems, services, receptionists, filterType, startDate, endDate, selectedDate, selectedClinic]);
+  }, [role, receipts, refunds, receiptItems, services, clinics, receptionists, selectedClinic, getFilteredReceipts]);
 
   const clinicLabel = useMemo(() => {
     if (!selectedClinic) return "All Clinics";
@@ -422,6 +439,108 @@ export default function ReportsPage() {
     }
     return "Today";
   }, [filterType, startDate, endDate, selectedDate]);
+
+  const topServicesRequest = useMemo(() => {
+    if (role !== "boss") return null;
+
+    const { from, to } = getFilterRange();
+    return {
+      clinicId: selectedClinic,
+      from: from.toISOString(),
+      to: to.toISOString(),
+    };
+  }, [role, selectedClinic, getFilterRange]);
+
+  useEffect(() => {
+    if (!topServicesRequest) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    async function loadTopServicesSummary() {
+      setTopServicesLoading(true);
+      setTopServicesError("");
+
+      const params = new URLSearchParams({
+        from: topServicesRequest.from,
+        to: topServicesRequest.to,
+      });
+
+      if (topServicesRequest.clinicId) {
+        params.set("clinicId", topServicesRequest.clinicId);
+      }
+
+      try {
+        const response = await fetch(`/api/reports/top-services?${params.toString()}`, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+
+        const payload = await parseApiError(response, "Failed to load top services analytics.");
+        setTopServicesSummary(payload.summary || EMPTY_TOP_SERVICES_SUMMARY);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error(error);
+        setTopServicesSummary(EMPTY_TOP_SERVICES_SUMMARY);
+        setTopServicesError(error instanceof Error ? error.message : "Unable to load Top Services right now.");
+      } finally {
+        if (!controller.signal.aborted) {
+          setTopServicesLoading(false);
+        }
+      }
+    }
+
+    loadTopServicesSummary();
+
+    return () => controller.abort();
+  }, [parseApiError, topServicesRequest]);
+
+  useEffect(() => {
+    if (!showServicePanel || !selectedServiceId || !topServicesRequest) {
+      return;
+    }
+
+    const controller = new AbortController();
+
+    async function loadServiceDetail() {
+      setServiceDetailLoading(true);
+      setServiceDetailError("");
+
+      const params = new URLSearchParams({
+        from: topServicesRequest.from,
+        to: topServicesRequest.to,
+        serviceId: selectedServiceId,
+      });
+
+      if (topServicesRequest.clinicId) {
+        params.set("clinicId", topServicesRequest.clinicId);
+      }
+
+      try {
+        const response = await fetch(`/api/reports/top-services?${params.toString()}`, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+
+        const payload = await parseApiError(response, "Failed to load service detail.");
+        setSelectedServiceDetail(payload.detail || null);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error(error);
+        setSelectedServiceDetail(null);
+        setServiceDetailError(error instanceof Error ? error.message : "Unable to load this service detail right now.");
+      } finally {
+        if (!controller.signal.aborted) {
+          setServiceDetailLoading(false);
+        }
+      }
+    }
+
+    loadServiceDetail();
+
+    return () => controller.abort();
+  }, [parseApiError, showServicePanel, selectedServiceId, topServicesRequest]);
 
   const calendarStats = useMemo(() => {
     if (role !== "boss") return null;
@@ -480,82 +599,6 @@ export default function ReportsPage() {
 
     return { daysInMonth, startingDayOfWeek, dailyData };
   }, [role, receipts, refunds, receptionists, calendarDate, selectedClinic]);
-
-  const selectedDayStats = useMemo(() => {
-    if (role !== "boss" || !selectedDate || !calendarStats) return null;
-
-    const year = selectedDate.getFullYear();
-    const month = selectedDate.getMonth();
-    const day = selectedDate.getDate();
-    const dayStart = new Date(year, month, day);
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(year, month, day);
-    dayEnd.setHours(23, 59, 59, 999);
-
-    let dayReceipts = receipts.filter((r) => {
-      const rDate = new Date(r.created_at || new Date());
-      return rDate >= dayStart && rDate <= dayEnd;
-    });
-    
-    // Filter by selected clinic if not "All Clinics"
-    if (selectedClinic) {
-      dayReceipts = dayReceipts.filter((r) => {
-        const receptionist = receptionists.find((rec) => rec.id === r.receptionist_id);
-        return receptionist?.clinic_id === selectedClinic;
-      });
-    }
-
-    const totalRevenue = dayReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
-    const totalPatients = new Set(dayReceipts.map((r) => r.patient_id)).size;
-
-    const clinicMap: Record<string, { name: string; revenue: number; refunded: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
-    for (const clinic of clinics) {
-      clinicMap[clinic.id] = { name: clinic.name, revenue: 0, refunded: 0, patients: new Set(), paymentMethods: {} };
-    }
-
-    for (const receipt of dayReceipts) {
-      const receptionist = receptionists.find((r) => r.id === receipt.receptionist_id);
-      const clinicId = receptionist?.clinic_id;
-      if (!clinicId || !clinicMap[clinicId]) continue;
-
-      const entry = clinicMap[clinicId];
-      entry.revenue += Number(receipt.total || 0);
-      if (receipt.patient_id) entry.patients.add(receipt.patient_id);
-
-      const cat = getPaymentCategory(receipt.payment_method || "");
-      entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Number(receipt.total || 0);
-    }
-
-    const paymentBreakdown: Record<string, number> = {};
-    for (const r of dayReceipts) {
-      const cat = getPaymentCategory(r.payment_method || "");
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
-    }
-
-    const dayRefunds = refunds.filter((ref) => {
-      const receipt = receipts.find((r) => r.id === ref.receipt_id);
-      if (!receipt) return false;
-      const rDate = new Date(receipt.created_at || new Date());
-      return rDate >= dayStart && rDate <= dayEnd;
-    });
-
-    const totalRefunded = dayRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
-    const netRevenue = totalRevenue - totalRefunded;
-
-    const dayReceiptItems = receiptItems.filter((item) => dayReceipts.some((r) => r.id === item.receipt_id));
-    const serviceMap: Record<string, { name: string; count: number; revenue: number }> = {};
-    for (const item of dayReceiptItems) {
-      const name = item.services?.name || services.find((s) => s.id === item.service_id)?.name || "Unknown";
-      if (!serviceMap[item.service_id]) serviceMap[item.service_id] = { name, count: 0, revenue: 0 };
-      serviceMap[item.service_id].count += 1;
-      serviceMap[item.service_id].revenue += Number(item.total || item.price || 0);
-    }
-    const topServices = Object.values(serviceMap)
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 10);
-
-    return { totalRevenue: netRevenue, totalPatients, totalTransactions: dayReceipts.length, clinicMap, paymentBreakdown, topServices, selectedDate, dayRefunds, totalRefunded, grossRevenue: totalRevenue };
-  }, [selectedDate, calendarStats, role, receipts, refunds, receiptItems, services, clinics, receptionists, selectedClinic]);
 
   const chartData = useMemo(() => {
     if (role !== "boss") return [];
@@ -645,7 +688,7 @@ export default function ReportsPage() {
         }
         return 0;
       });
-  }, [role, receipts, filterType, startDate, endDate, selectedDate, selectedClinic, receptionists]);
+  }, [role, receipts, filterType, selectedClinic, receptionists, getFilterRange, getFilteredReceipts]);
 
   if (role === null) {
     return (
@@ -969,6 +1012,118 @@ export default function ReportsPage() {
               )}
             </div>
 
+            {/* ── TOP SERVICES ANALYTICS ── */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="flex flex-col gap-4 border-b border-slate-200 pb-6 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900">Top Services</h3>
+                  <p className="mt-2 text-sm text-slate-500">
+                    Ranked by revenue for {clinicLabel} during {filterLabel}.
+                  </p>
+                </div>
+
+                {topServicesSummary.highestRevenue && (
+                  <div className="rounded-2xl bg-teal-50 px-4 py-3 lg:max-w-xs">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-700">Top Performer</p>
+                    <p className="mt-2 text-base font-semibold text-slate-900">{topServicesSummary.highestRevenue.name}</p>
+                    <p className="mt-1 text-sm text-teal-700">
+                      AED {topServicesSummary.highestRevenue.revenue.toFixed(2)}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {topServicesSummary.highestRevenue.count} times performed
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {topServicesLoading ? (
+                <div className="flex h-56 items-center justify-center rounded-xl bg-slate-50 text-sm text-slate-500">
+                  Loading service analytics...
+                </div>
+              ) : topServicesError ? (
+                <div className="flex h-56 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-sm text-red-600">
+                  {topServicesError}
+                </div>
+              ) : topServicesSummary.services.length > 0 ? (
+                <>
+                  <div className="grid gap-4 py-6 sm:grid-cols-3">
+                    <div className="rounded-2xl bg-slate-50 px-4 py-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Services Offered</p>
+                      <p className="mt-3 text-2xl font-bold text-slate-900">{topServicesSummary.uniqueServices}</p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 px-4 py-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Most Performed</p>
+                      <p className="mt-3 text-base font-semibold text-slate-900">{topServicesSummary.mostPerformed?.name || "—"}</p>
+                      <p className="mt-1 text-sm text-slate-500">
+                        {topServicesSummary.mostPerformed ? `${topServicesSummary.mostPerformed.count} times` : "No activity"}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 px-4 py-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Highest Revenue</p>
+                      <p className="mt-3 text-base font-semibold text-slate-900">{topServicesSummary.highestRevenue?.name || "—"}</p>
+                      <p className="mt-1 text-sm text-slate-500">
+                        {topServicesSummary.highestRevenue
+                          ? `AED ${topServicesSummary.highestRevenue.revenue.toFixed(2)}`
+                          : "No activity"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[680px] text-sm">
+                      <thead className="border-b border-slate-200">
+                        <tr>
+                          <th className="text-left px-4 py-3 font-semibold text-slate-700">Service</th>
+                          <th className="text-center px-4 py-3 font-semibold text-slate-700">Times Performed</th>
+                          <th className="text-right px-4 py-3 font-semibold text-slate-700">Revenue</th>
+                          <th className="text-right px-4 py-3 font-semibold text-slate-700">% of Revenue</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {topServicesSummary.services.map((service) => (
+                          <tr
+                            key={service.id}
+                            onClick={() => {
+                              setSelectedServiceId(service.id);
+                              setSelectedServiceDetail(null);
+                              setServiceDetailError("");
+                              setShowServicePanel(true);
+                            }}
+                            className={`cursor-pointer border-b border-slate-100 transition-colors last:border-0 hover:bg-slate-50 ${
+                              service.isTopPerformer ? "bg-teal-50/60" : "bg-white"
+                            }`}
+                          >
+                            <td className="px-4 py-4">
+                              <div>
+                                <p className="font-medium text-slate-900">{service.name}</p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                  {service.patientCount} patients • {service.doctorCount} dentists
+                                </p>
+                              </div>
+                            </td>
+                            <td className="px-4 py-4 text-center text-slate-600">{service.count}</td>
+                            <td className="px-4 py-4 text-right font-semibold text-teal-700">AED {service.revenue.toFixed(2)}</td>
+                            <td className="px-4 py-4 text-right text-slate-600">{service.revenueShare.toFixed(1)}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <p className="mt-4 text-xs text-slate-500">
+                    Click any service to inspect patients treated, dentists involved, average price, and revenue trend.
+                  </p>
+                </>
+              ) : (
+                <div className="flex h-56 items-center justify-center rounded-xl border border-slate-200 bg-slate-50">
+                  <div className="text-center text-slate-500">
+                    <p className="text-sm font-medium">No services were performed during the selected period.</p>
+                    <p className="mt-1 text-xs text-slate-400">Try another clinic or date range.</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* ── CALENDAR ── */}
             <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
               <div className="flex items-center justify-between mb-4">
@@ -1088,16 +1243,18 @@ export default function ReportsPage() {
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <h3 className="text-sm font-semibold text-slate-900 mb-4">Top Services</h3>
                 <div className="space-y-3">
-                  {bossStats && bossStats.topServices.length > 0 ? (
-                    bossStats.topServices.slice(0, 5).map((service, i) => (
-                      <div key={i} className="flex items-center justify-between pb-3 border-b border-slate-100 last:border-0">
+                  {topServicesSummary.services.length > 0 ? (
+                    topServicesSummary.services.slice(0, 5).map((service) => (
+                      <div key={service.id} className="flex items-center justify-between pb-3 border-b border-slate-100 last:border-0">
                         <div>
                           <p className="text-sm font-medium text-slate-900">{service.name}</p>
-                          <p className="text-xs text-slate-500">{service.count} bookings</p>
+                          <p className="text-xs text-slate-500">{service.count} times performed</p>
                         </div>
                         <p className="font-semibold text-teal-700">AED {service.revenue.toFixed(2)}</p>
                       </div>
                     ))
+                  ) : topServicesLoading ? (
+                    <p className="text-sm text-slate-500">Loading service data...</p>
                   ) : (
                     <p className="text-sm text-slate-500">No service data available</p>
                   )}
@@ -1116,165 +1273,140 @@ export default function ReportsPage() {
               </div>
             </div>
 
-            {/* ── DETAILED TOP SERVICES ANALYTICS ── */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <h3 className="text-sm font-semibold text-slate-900 mb-6">Services Performance</h3>
-              
-              {detailedServiceAnalytics.services.length > 0 ? (
-                <>
-                  {/* Summary Stats */}
-                  <div className="grid grid-cols-3 gap-4 mb-6 pb-6 border-b border-slate-200">
-                    <div className="text-center">
-                      <p className="text-2xl font-bold text-teal-700">{detailedServiceAnalytics.uniqueServices}</p>
-                      <p className="text-xs text-slate-600 mt-1">Services Offered</p>
-                    </div>
-                    <div className="text-center">
-                      <p className="text-sm font-semibold text-slate-900">{detailedServiceAnalytics.mostPerformed?.name}</p>
-                      <p className="text-xs text-slate-600 mt-1">Most Performed: {detailedServiceAnalytics.mostPerformed?.count}x</p>
-                    </div>
-                    <div className="text-center">
-                      <p className="text-sm font-semibold text-slate-900">{detailedServiceAnalytics.highestRevenue?.name}</p>
-                      <p className="text-xs text-slate-600 mt-1">Highest Revenue: AED {detailedServiceAnalytics.highestRevenue?.revenue.toFixed(2)}</p>
-                    </div>
-                  </div>
-
-                  {/* Services Table */}
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead className="border-b border-slate-200">
-                        <tr>
-                          <th className="text-left px-4 py-3 font-semibold text-slate-700">Service</th>
-                          <th className="text-center px-4 py-3 font-semibold text-slate-700">Times</th>
-                          <th className="text-right px-4 py-3 font-semibold text-slate-700">Revenue</th>
-                          <th className="text-right px-4 py-3 font-semibold text-slate-700">% Total</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {detailedServiceAnalytics.services.map((service, idx) => {
-                          const percentage = detailedServiceAnalytics.totalRevenue > 0 
-                            ? ((service.revenue / detailedServiceAnalytics.totalRevenue) * 100).toFixed(1)
-                            : "0.0";
-                          return (
-                            <tr 
-                              key={service.id}
-                              onClick={() => {
-                                setSelectedServiceId(service.id);
-                                setShowServicePanel(true);
-                              }}
-                              className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer transition-colors last:border-0"
-                            >
-                              <td className="px-4 py-3 font-medium text-slate-900">{service.name}</td>
-                              <td className="text-center px-4 py-3 text-slate-600">{service.count}</td>
-                              <td className="text-right px-4 py-3 font-semibold text-teal-700">AED {service.revenue.toFixed(2)}</td>
-                              <td className="text-right px-4 py-3 text-slate-600">{percentage}%</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              ) : (
-                <div className="h-40 flex items-center justify-center bg-slate-50 rounded-lg border border-slate-200">
-                  <div className="text-center text-slate-500">
-                    <p className="text-sm font-medium">No services performed</p>
-                    <p className="text-xs mt-1 text-slate-400">
-                      {receiptItems.length === 0 
-                        ? "receipt_items table may not be populated in the database"
-                        : "during the selected period"}
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-
             {/* ── SERVICE DETAILS PANEL ── */}
             {showServicePanel && selectedServiceId && (
               <div className="fixed inset-0 z-50 overflow-hidden">
-                <div className="absolute inset-0 bg-black/50" onClick={() => setShowServicePanel(false)} />
+                <div
+                  className="absolute inset-0 bg-black/50"
+                  onClick={() => {
+                    setShowServicePanel(false);
+                    setSelectedServiceDetail(null);
+                    setServiceDetailError("");
+                    setServiceDetailLoading(false);
+                  }}
+                />
                 <div className="absolute right-0 top-0 h-full w-full max-w-md bg-white shadow-lg rounded-l-2xl overflow-y-auto">
-                  {(() => {
-                    const service = detailedServiceAnalytics.services.find((s) => s.id === selectedServiceId);
-                    if (!service) return null;
+                  <div className="p-6">
+                    <div className="flex items-center justify-between mb-6">
+                      <h2 className="text-lg font-bold text-slate-900">
+                        {selectedServiceDetail?.name || "Service Details"}
+                      </h2>
+                      <button
+                        onClick={() => {
+                          setShowServicePanel(false);
+                          setSelectedServiceDetail(null);
+                          setServiceDetailError("");
+                          setServiceDetailLoading(false);
+                        }}
+                        className="text-slate-400 hover:text-slate-600 transition-colors"
+                      >
+                        ✕
+                      </button>
+                    </div>
 
-                    return (
-                      <div className="p-6">
-                        <div className="flex items-center justify-between mb-6">
-                          <h2 className="text-lg font-bold text-slate-900">{service.name}</h2>
-                          <button
-                            onClick={() => setShowServicePanel(false)}
-                            className="text-slate-400 hover:text-slate-600 transition-colors"
-                          >
-                            ✕
-                          </button>
-                        </div>
-
-                        {/* Service Metrics */}
-                        <div className="space-y-4 pb-6 border-b border-slate-200">
+                    {serviceDetailLoading ? (
+                      <div className="flex h-64 items-center justify-center rounded-xl bg-slate-50 text-sm text-slate-500">
+                        Loading service detail...
+                      </div>
+                    ) : serviceDetailError ? (
+                      <div className="flex h-64 items-center justify-center rounded-xl border border-red-100 bg-red-50 px-6 text-center text-sm text-red-600">
+                        {serviceDetailError}
+                      </div>
+                    ) : selectedServiceDetail ? (
+                      <>
+                        <div className="space-y-4 border-b border-slate-200 pb-6">
                           <div>
-                            <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Total Revenue</p>
-                            <p className="text-2xl font-bold text-teal-700 mt-1">AED {service.revenue.toFixed(2)}</p>
+                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Total Revenue</p>
+                            <p className="mt-1 text-2xl font-bold text-teal-700">AED {selectedServiceDetail.revenue.toFixed(2)}</p>
                           </div>
                           <div className="grid grid-cols-2 gap-4">
                             <div>
-                              <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Times Performed</p>
-                              <p className="text-xl font-bold text-slate-900 mt-1">{service.count}</p>
+                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Times Performed</p>
+                              <p className="mt-1 text-xl font-bold text-slate-900">{selectedServiceDetail.count}</p>
                             </div>
                             <div>
-                              <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Patients</p>
-                              <p className="text-xl font-bold text-slate-900 mt-1">{service.patients.length}</p>
+                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Patients Treated</p>
+                              <p className="mt-1 text-xl font-bold text-slate-900">{selectedServiceDetail.patientCount}</p>
                             </div>
                           </div>
-                          <div>
-                            <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Average Price</p>
-                            <p className="text-xl font-bold text-slate-900 mt-1">AED {service.averagePrice.toFixed(2)}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider">% of Total Revenue</p>
-                            <p className="text-xl font-bold text-slate-900 mt-1">
-                              {detailedServiceAnalytics.totalRevenue > 0 
-                                ? ((service.revenue / detailedServiceAnalytics.totalRevenue) * 100).toFixed(1)
-                                : "0.0"}%
-                            </p>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Average Price</p>
+                              <p className="mt-1 text-lg font-bold text-slate-900">AED {selectedServiceDetail.averagePrice.toFixed(2)}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">% of Revenue</p>
+                              <p className="mt-1 text-lg font-bold text-slate-900">{selectedServiceDetail.revenueShare.toFixed(1)}%</p>
+                            </div>
                           </div>
                         </div>
 
-                        {/* Dentists */}
-                        {service.doctors && service.doctors.length > 0 && (
-                          <div className="py-6 border-b border-slate-200">
-                            <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider mb-3">Performed By</p>
-                            <div className="space-y-2">
-                              {service.doctors.map((doctorId) => {
-                                const doctorName = doctorId; // In a real app, you'd look up the doctor name from a doctors table
-                                return (
-                                  <p key={doctorId} className="text-sm text-slate-700">
-                                    • {doctorName}
-                                  </p>
-                                );
-                              })}
-                            </div>
+                        <div className="py-6 border-b border-slate-200">
+                          <div className="mb-4 flex items-center justify-between">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Revenue Trend</p>
+                            <p className="text-xs text-slate-500">{filterLabel}</p>
                           </div>
-                        )}
+                          {selectedServiceDetail.revenueTrend.length > 0 ? (
+                            <div className="h-48 w-full">
+                              <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={selectedServiceDetail.revenueTrend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                                  <XAxis dataKey="label" stroke="#64748b" style={{ fontSize: "0.7rem" }} />
+                                  <YAxis
+                                    stroke="#64748b"
+                                    style={{ fontSize: "0.7rem" }}
+                                    tickFormatter={(value) => `AED ${Number(value).toFixed(0)}`}
+                                  />
+                                  <Tooltip
+                                    formatter={(value, name) => {
+                                      if (name === "revenue") return [`AED ${Number(value).toFixed(2)}`, "Revenue"];
+                                      if (name === "count") return [value, "Times Performed"];
+                                      return [value, name];
+                                    }}
+                                  />
+                                  <Line type="monotone" dataKey="revenue" stroke="#0d9488" strokeWidth={3} dot={{ fill: "#0d9488", r: 3 }} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+                          ) : (
+                            <div className="flex h-32 items-center justify-center rounded-xl bg-slate-50 text-sm text-slate-500">
+                              No trend data available for this filter.
+                            </div>
+                          )}
+                        </div>
 
-                        {/* Patient List */}
-                        {service.patients && service.patients.length > 0 && (
-                          <div className="py-6">
-                            <p className="text-xs font-semibold text-slate-600 uppercase tracking-wider mb-3">Patients Treated</p>
-                            <div className="space-y-2 max-h-64 overflow-y-auto">
-                              {service.patients.map((patientId) => {
-                                const patient = patients.find((p) => p.id === patientId);
-                                return (
-                                  <p key={patientId} className="text-sm text-slate-700">
-                                    • {patient?.name || patientId}
-                                  </p>
-                                );
-                              })}
+                        <div className="py-6 border-b border-slate-200">
+                          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-600">Dentists Who Performed It</p>
+                          {selectedServiceDetail.doctors.length > 0 ? (
+                            <div className="space-y-2">
+                              {selectedServiceDetail.doctors.map((doctor) => (
+                                <p key={doctor.id} className="text-sm text-slate-700">• {doctor.name}</p>
+                              ))}
                             </div>
-                          </div>
-                        )}
+                          ) : (
+                            <p className="text-sm text-slate-500">No dentists recorded for this service.</p>
+                          )}
+                        </div>
+
+                        <div className="py-6">
+                          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-600">Patients Treated</p>
+                          {selectedServiceDetail.patients.length > 0 ? (
+                            <div className="max-h-64 space-y-2 overflow-y-auto">
+                              {selectedServiceDetail.patients.map((patient) => (
+                                <p key={patient.id} className="text-sm text-slate-700">• {patient.name}</p>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-slate-500">No patient records found for this service.</p>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="flex h-64 items-center justify-center rounded-xl bg-slate-50 px-6 text-center text-sm text-slate-500">
+                        This service was not found for the selected filters.
                       </div>
-                    );
-                  })()}
+                    )}
+                  </div>
                 </div>
               </div>
             )}

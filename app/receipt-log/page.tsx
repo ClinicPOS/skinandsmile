@@ -224,7 +224,7 @@ export default function ReceiptLogPage() {
   .row { display: flex; justify-content: space-between; gap: 6px; margin: 1px 0; }
   .item-name { flex: 1; min-width: 0; }
   .amount { text-align: right; white-space: nowrap; font-weight: 700; }
-  @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; } * { color: #000 !important; border-color: #000 !important; } img { filter: contrast(180%) brightness(110%); } }
+  @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; } * { color: #000 !important; border-color: #000 !important; } img { -webkit-print-color-adjust: exact; print-color-adjust: exact; image-rendering: crisp-edges; } }
 </style></head>
 <body>
   <div class="double">REFUND RECEIPT</div>
@@ -263,7 +263,7 @@ export default function ReceiptLogPage() {
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id);
     const doctor = doctors.find((d) => d.id === selectedReceipt.doctor_id);
-    const logoPath = clinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo3.png";
+    const logoPath = clinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo6.jpg";
     const clinicDisplayName = clinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
     const clinicAddress = clinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
     const clinicRoom = clinic?.room ? `2nd Floor, Room ${clinic.room.replace(/^Room\s+/i, "")}` : "";
@@ -297,7 +297,7 @@ export default function ReceiptLogPage() {
   .hr { border-top: 1px dashed #000; margin: 5px 0; }
   .double { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 3px 0; margin: 5px 0; text-align: center; font-weight: 700; }
   .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-  .logo { max-width: 35mm; max-height: 20mm; object-fit: contain; }
+  .logo { max-width: 48mm; max-height: 26mm; object-fit: contain; }
   .clinic-name { text-align: center; font-size: 14px; font-weight: 700; }
   .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
   .row { display: flex; justify-content: space-between; gap: 6px; margin: 1px 0; }
@@ -307,7 +307,7 @@ export default function ReceiptLogPage() {
   .item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .amount { text-align: right; white-space: nowrap; }
   .footer-center { text-align: center; margin-top: 4px; }
-  @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; } }
+  @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; } * { color: #000 !important; border-color: #000 !important; } img { -webkit-print-color-adjust: exact; print-color-adjust: exact; image-rendering: crisp-edges; } }
 </style></head>
 <body>
   <div class="logo-wrap" id="lw">
@@ -317,7 +317,7 @@ export default function ReceiptLogPage() {
   <div class="clinic-name">${clinicDisplayName}</div>
   <div class="address">
     ${clinicAddress.split(/\\n|\n/).map((line: string) => `<div>${line}</div>`).join("")}
-    ${clinicRoom && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
+    ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
     ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
   </div>
   <div class="hr"></div>
