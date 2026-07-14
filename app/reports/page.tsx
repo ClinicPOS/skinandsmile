@@ -224,10 +224,11 @@ export default function ReportsPage() {
     }
     if (found) {
       setRole("receptionist");
-      setActiveClinicId(found.clinic_id);
+      const clinicId = found.clinic_id || "";
+      setActiveClinicId(clinicId);
       setActiveClinicName(found.name);
-      if (found.clinic_id) {
-        const clinic = clinics.find((c) => c.id === found.clinic_id);
+      if (clinicId) {
+        const clinic = clinics.find((c) => c.id === clinicId);
         if (clinic) setActiveClinicName(clinic.name);
       }
       setPinError("");
