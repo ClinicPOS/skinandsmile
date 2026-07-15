@@ -363,7 +363,7 @@ export default function ReportsPage() {
     }
     
     const totalRevenue = filteredReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
-    const totalPatients = new Set(filteredReceipts.map((r) => r.patient_id)).size;
+    const totalPatients = new Set(filteredReceipts.filter((r) => r.patient_id).map((r) => r.patient_id)).size;
 
     const clinicMap: Record<string, { name: string; revenue: number; refunded: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
     for (const clinic of clinics) {
@@ -1437,7 +1437,7 @@ export default function ReportsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {getFilteredReceipts(receipts).slice(0, 10).map((receipt, i) => {
+                  {getFilteredReceipts(receipts).filter((r) => r.patient_id).slice(0, 10).map((receipt, i) => {
                     const patient = patients.find((p) => p.id === receipt.patient_id);
                     const receptionist = receptionists.find((r) => r.id === receipt.receptionist_id);
                     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id);
