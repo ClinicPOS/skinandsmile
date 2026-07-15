@@ -262,6 +262,7 @@ export default function ReceiptsPage() {
   const [patientEmiratesIdInput, setPatientEmiratesIdInput] = useState("");
   const [patientPassportInput, setPatientPassportInput] = useState("");
   const [patientNationalityInput, setPatientNationalityInput] = useState("");
+  const [patientFileNumberInput, setPatientFileNumberInput] = useState("");
   const [nationalitySearch, setNationalitySearch] = useState("");
   const [showNationalitySuggestions, setShowNationalitySuggestions] = useState(false);
   const [nationalityHighlightIndex, setNationalityHighlightIndex] = useState(-1);
@@ -507,6 +508,7 @@ export default function ReceiptsPage() {
       setPatientDobInput("");
       setPatientSexInput("");
       setPatientNationalityInput("");
+      setPatientFileNumberInput("");
       setNationalitySearch("");
       setShowNationalitySuggestions(false);
       setPatientEmiratesIdInput("");
@@ -533,6 +535,7 @@ export default function ReceiptsPage() {
     setPatientSexInput(patient.sex || "");
     setPatientNationalityInput(patient.nationality || "");
     setNationalitySearch(patient.nationality || "");
+    setPatientFileNumberInput(patient.patient_number != null ? String(patient.patient_number) : "");
     setPatientEmiratesIdInput(patient.emirates_id || "");
     setPatientPassportInput(patient.passport_number || "");
     setSelectedPatientInfo({
@@ -706,6 +709,7 @@ export default function ReceiptsPage() {
     setPatientDobInput("");
     setPatientSexInput("");
     setPatientNationalityInput("");
+    setPatientFileNumberInput("");
     setNationalitySearch("");
     setShowNationalitySuggestions(false);
     setPatientEmiratesIdInput("");
@@ -1258,6 +1262,7 @@ export default function ReceiptsPage() {
           nationality: patientNationalityInput.trim() || null,
           emirates_id: patientEmiratesIdInput.trim() || null,
           passport_number: patientPassportInput.trim() || null,
+          ...(patientFileNumberInput.trim() ? { patient_number: parseInt(patientFileNumberInput.trim(), 10) } : {}),
         })
         .eq("id", patientId);
     }
@@ -1268,13 +1273,18 @@ export default function ReceiptsPage() {
       let lastError: any = null;
 
       for (let attempt = 0; attempt < 5; attempt++) {
-        const { data: maxPatient } = await supabase
-          .from("patients")
-          .select("patient_number")
-          .not("patient_number", "is", null)
-          .order("patient_number", { ascending: false })
-          .limit(1);
-        const nextPatientNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
+        let patientNumber: number;
+        if (patientFileNumberInput.trim()) {
+          patientNumber = parseInt(patientFileNumberInput.trim(), 10);
+        } else {
+          const { data: maxPatient } = await supabase
+            .from("patients")
+            .select("patient_number")
+            .not("patient_number", "is", null)
+            .order("patient_number", { ascending: false })
+            .limit(1);
+          patientNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
+        }
 
         const { data, error } = await supabase
           .from("patients")
@@ -1288,7 +1298,7 @@ export default function ReceiptsPage() {
               nationality: patientNationalityInput.trim() || null,
               emirates_id: patientEmiratesIdInput.trim() || null,
               passport_number: patientPassportInput.trim() || null,
-              patient_number: nextPatientNumber,
+              patient_number: patientNumber,
             },
           ])
           .select()
@@ -1301,6 +1311,7 @@ export default function ReceiptsPage() {
 
         lastError = error;
         if ((error as any).code !== "23505") break; // non-duplicate error, don't retry
+        if (patientFileNumberInput.trim()) break; // manual file no. duplicate — don't retry with same number
       }
 
       if (!newPatient) {
@@ -2780,6 +2791,20 @@ export default function ReceiptsPage() {
                 </select>
               </div>
 
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-slate-700">
+                  File No. <span className="font-normal text-slate-400">(Optional — auto-assigned if empty)</span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={patientFileNumberInput}
+                  onChange={(e) => setPatientFileNumberInput(e.target.value)}
+                  placeholder="e.g. 1004"
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
+                />
+              </div>
+
               <div className="relative space-y-2">
                 <label className="block text-sm font-semibold text-slate-700">
                   Nationality <span className="font-normal text-slate-400">(Optional)</span>
@@ -3302,6 +3327,7 @@ export default function ReceiptsPage() {
                         setPatientDobInput("");
                         setPatientSexInput("");
                         setPatientNationalityInput("");
+                        setPatientFileNumberInput("");
                         setNationalitySearch("");
                         setShowNationalitySuggestions(false);
                         setPatientEmiratesIdInput("");
