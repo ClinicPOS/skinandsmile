@@ -886,18 +886,16 @@ export default function ReportsPage() {
             <div>
               <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 mb-4">Key Metrics • {filterLabel}</h2>
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {/* Total Revenue */}
+                {/* Gross Sales */}
                 <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Total Revenue</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Gross Sales</p>
                       <p className="mt-2 text-2xl font-bold text-slate-900">
-                        AED {bossStats?.totalRevenue.toFixed(2)}
+                        AED {bossStats?.grossRevenue.toFixed(2)}
                       </p>
                       <p className="mt-1 text-xs text-slate-400">
-                        {bossStats?.grossRevenue && bossStats.grossRevenue > bossStats.totalRevenue
-                          ? `−AED ${(bossStats.grossRevenue - bossStats.totalRevenue).toFixed(2)} refunded`
-                          : "No refunds"}
+                        Net: AED {bossStats?.totalRevenue.toFixed(2)}
                       </p>
                     </div>
                     <div className="text-3xl text-teal-600">💰</div>

@@ -54,3 +54,14 @@ export type CashRegisterSession = {
   opened_at: string;
   closed_at: string | null;
 };
+
+export type PatientNote = {
+  id: string;
+  patient_id: string;
+  receipt_id: string | null;
+  note: string;
+  doctor_id: string | null;
+  receptionist_id: string | null;
+  clinic_id: string | null;
+  created_at: string;
+};

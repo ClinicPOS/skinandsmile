@@ -10,6 +10,34 @@ import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal, TreatmentHistoryModal } from "../../components/pos-modals";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara", "Split Payment"];
+
+const COUNTRIES = [
+  "Afghanistan","Albania","Algeria","Andorra","Angola","Antigua and Barbuda","Argentina","Armenia",
+  "Australia","Austria","Azerbaijan","Bahamas","Bahrain","Bangladesh","Barbados","Belarus","Belgium",
+  "Belize","Benin","Bhutan","Bolivia","Bosnia and Herzegovina","Botswana","Brazil","Brunei","Bulgaria",
+  "Burkina Faso","Burundi","Cabo Verde","Cambodia","Cameroon","Canada","Central African Republic","Chad",
+  "Chile","China","Colombia","Comoros","Congo","Costa Rica","Croatia","Cuba","Cyprus","Czech Republic",
+  "Democratic Republic of the Congo","Denmark","Djibouti","Dominica","Dominican Republic","Ecuador",
+  "Egypt","El Salvador","Equatorial Guinea","Eritrea","Estonia","Eswatini","Ethiopia","Fiji","Finland",
+  "France","Gabon","Gambia","Georgia","Germany","Ghana","Greece","Grenada","Guatemala","Guinea",
+  "Guinea-Bissau","Guyana","Haiti","Honduras","Hungary","Iceland","India","Indonesia","Iran","Iraq",
+  "Ireland","Israel","Italy","Jamaica","Japan","Jordan","Kazakhstan","Kenya","Kiribati","Kuwait",
+  "Kyrgyzstan","Laos","Latvia","Lebanon","Lesotho","Liberia","Libya","Liechtenstein","Lithuania",
+  "Luxembourg","Madagascar","Malawi","Malaysia","Maldives","Mali","Malta","Marshall Islands",
+  "Mauritania","Mauritius","Mexico","Micronesia","Moldova","Monaco","Mongolia","Montenegro","Morocco",
+  "Mozambique","Myanmar","Namibia","Nauru","Nepal","Netherlands","New Zealand","Nicaragua","Niger",
+  "Nigeria","North Korea","North Macedonia","Norway","Oman","Pakistan","Palau","Palestine","Panama",
+  "Papua New Guinea","Paraguay","Peru","Philippines","Poland","Portugal","Qatar","Romania","Russia",
+  "Rwanda","Saint Kitts and Nevis","Saint Lucia","Saint Vincent and the Grenadines","Samoa",
+  "San Marino","Sao Tome and Principe","Saudi Arabia","Senegal","Serbia","Seychelles","Sierra Leone",
+  "Singapore","Slovakia","Slovenia","Solomon Islands","Somalia","South Africa","South Korea",
+  "South Sudan","Spain","Sri Lanka","Sudan","Suriname","Sweden","Switzerland","Syria","Taiwan",
+  "Tajikistan","Tanzania","Thailand","Timor-Leste","Togo","Tonga","Trinidad and Tobago","Tunisia",
+  "Turkey","Turkmenistan","Tuvalu","Uganda","Ukraine","United Arab Emirates","United Kingdom",
+  "United States","Uruguay","Uzbekistan","Vanuatu","Vatican City","Venezuela","Vietnam","Yemen",
+  "Zambia","Zimbabwe",
+];
+
 const POS_REGISTER_SESSION_KEY = "posRegisterSession";
 const POS_RECENT_SERVICES_KEY = "posRecentServices";
 const REGISTER_TABLE = "cash_register_sessions";
@@ -233,6 +261,10 @@ export default function ReceiptsPage() {
   const [patientSexInput, setPatientSexInput] = useState("");
   const [patientEmiratesIdInput, setPatientEmiratesIdInput] = useState("");
   const [patientPassportInput, setPatientPassportInput] = useState("");
+  const [patientNationalityInput, setPatientNationalityInput] = useState("");
+  const [nationalitySearch, setNationalitySearch] = useState("");
+  const [showNationalitySuggestions, setShowNationalitySuggestions] = useState(false);
+  const [nationalityHighlightIndex, setNationalityHighlightIndex] = useState(-1);
   const [filteredPatients, setFilteredPatients] = useState<any[]>([]);
   const [showPatientSuggestions, setShowPatientSuggestions] = useState(false);
   const [transactionPatientId, setTransactionPatientId] = useState(""); // Track patient ID for current transaction
@@ -465,6 +497,9 @@ export default function ReceiptsPage() {
       setPatientEmailInput("");
       setPatientDobInput("");
       setPatientSexInput("");
+      setPatientNationalityInput("");
+      setNationalitySearch("");
+      setShowNationalitySuggestions(false);
       setPatientEmiratesIdInput("");
       setPatientPassportInput("");
       setSelectedPatientInfo(null);
@@ -487,6 +522,8 @@ export default function ReceiptsPage() {
     setPatientEmailInput(patient.email || "");
     setPatientDobInput(patient.date_of_birth || "");
     setPatientSexInput(patient.sex || "");
+    setPatientNationalityInput(patient.nationality || "");
+    setNationalitySearch(patient.nationality || "");
     setPatientEmiratesIdInput(patient.emirates_id || "");
     setPatientPassportInput(patient.passport_number || "");
     setSelectedPatientInfo({
@@ -659,6 +696,9 @@ export default function ReceiptsPage() {
     setPatientEmailInput("");
     setPatientDobInput("");
     setPatientSexInput("");
+    setPatientNationalityInput("");
+    setNationalitySearch("");
+    setShowNationalitySuggestions(false);
     setPatientEmiratesIdInput("");
     setPatientPassportInput("");
     setSelectedPatientInfo(null);
@@ -1197,6 +1237,22 @@ export default function ReceiptsPage() {
 
     let finalPatientId = patientId;
 
+    // Update existing patient fields if a patient is already selected
+    if (patientId) {
+      await supabase
+        .from("patients")
+        .update({
+          phone: patientPhoneInput.trim() || null,
+          email: patientEmailInput.trim() || null,
+          date_of_birth: patientDobInput || null,
+          sex: patientSexInput || null,
+          nationality: patientNationalityInput.trim() || null,
+          emirates_id: patientEmiratesIdInput.trim() || null,
+          passport_number: patientPassportInput.trim() || null,
+        })
+        .eq("id", patientId);
+    }
+
     // If patientId is empty but patientName exists, create new patient
     if (!patientId && patientName.trim()) {
       let newPatient = null;
@@ -1220,6 +1276,7 @@ export default function ReceiptsPage() {
               email: patientEmailInput.trim() || null,
               date_of_birth: patientDobInput || null,
               sex: patientSexInput || null,
+              nationality: patientNationalityInput.trim() || null,
               emirates_id: patientEmiratesIdInput.trim() || null,
               passport_number: patientPassportInput.trim() || null,
               patient_number: nextPatientNumber,
@@ -1474,6 +1531,21 @@ export default function ReceiptsPage() {
     }
 
     setCurrentReceipt(receiptData);
+
+    if (notes.trim()) {
+      const { error: noteError } = await supabase.from("patient_notes").insert({
+        patient_id: transactionPatientId,
+        receipt_id: receiptData.id,
+        note: notes.trim(),
+        doctor_id: doctorId || null,
+        receptionist_id: activeReceptionistId,
+        clinic_id: activeClinic?.id || null,
+      });
+      if (noteError) {
+        console.error("Patient note save error", noteError.message, noteError.code, noteError.details, noteError.hint);
+      }
+    }
+
     return receiptData;
     } finally {
       setIsSavingReceipt(false);
@@ -2691,6 +2763,74 @@ export default function ReceiptsPage() {
                 </select>
               </div>
 
+              <div className="relative space-y-2">
+                <label className="block text-sm font-semibold text-slate-700">
+                  Nationality <span className="font-normal text-slate-400">(Optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={nationalitySearch}
+                  onChange={(e) => {
+                    setNationalitySearch(e.target.value);
+                    setPatientNationalityInput("");
+                    setShowNationalitySuggestions(true);
+                    setNationalityHighlightIndex(-1);
+                  }}
+                  onKeyDown={(e) => {
+                    const filtered = COUNTRIES.filter((c) =>
+                      c.toLowerCase().includes(nationalitySearch.toLowerCase())
+                    );
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setNationalityHighlightIndex((i) => Math.min(i + 1, filtered.length - 1));
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setNationalityHighlightIndex((i) => Math.max(i - 1, 0));
+                    } else if (e.key === "Enter" && nationalityHighlightIndex >= 0) {
+                      e.preventDefault();
+                      const selected = filtered[nationalityHighlightIndex];
+                      setPatientNationalityInput(selected);
+                      setNationalitySearch(selected);
+                      setShowNationalitySuggestions(false);
+                      setNationalityHighlightIndex(-1);
+                    } else if (e.key === "Escape") {
+                      setShowNationalitySuggestions(false);
+                    }
+                  }}
+                  onFocus={() => setShowNationalitySuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowNationalitySuggestions(false), 150)}
+                  placeholder="Search nationality..."
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
+                />
+                {showNationalitySuggestions && nationalitySearch && (() => {
+                  const filtered = COUNTRIES.filter((c) =>
+                    c.toLowerCase().includes(nationalitySearch.toLowerCase())
+                  );
+                  return filtered.length > 0 ? (
+                    <ul className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
+                      {filtered.map((country, idx) => (
+                        <li
+                          key={country}
+                          onMouseDown={() => {
+                            setPatientNationalityInput(country);
+                            setNationalitySearch(country);
+                            setShowNationalitySuggestions(false);
+                            setNationalityHighlightIndex(-1);
+                          }}
+                          className={`cursor-pointer px-4 py-2 text-sm transition ${
+                            idx === nationalityHighlightIndex
+                              ? "bg-cyan-50 text-cyan-700"
+                              : "hover:bg-slate-50"
+                          }`}
+                        >
+                          {country}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null;
+                })()}
+              </div>
+
               <div className="space-y-2">
                 <label className="block text-sm font-semibold text-slate-700">
                   {activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician" : "Doctor / Therapist"}{" "}
@@ -3103,6 +3243,9 @@ export default function ReceiptsPage() {
                         setPatientEmailInput("");
                         setPatientDobInput("");
                         setPatientSexInput("");
+                        setPatientNationalityInput("");
+                        setNationalitySearch("");
+                        setShowNationalitySuggestions(false);
                         setPatientEmiratesIdInput("");
                         setPatientPassportInput("");
                         setSelectedPatientInfo(null);
@@ -3197,8 +3340,16 @@ export default function ReceiptsPage() {
       </div>
       )}
 
-      <SearchPatientModal isOpen={showSearchPatientModal} onClose={() => setShowSearchPatientModal(false)} />
-      <ReceiptHistoryModal isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} />
+      <SearchPatientModal
+        isOpen={showSearchPatientModal}
+        onClose={() => setShowSearchPatientModal(false)}
+        onSelect={(patient) => {
+          selectPatient(patient);
+          setShowSearchPatientModal(false);
+        }}
+        patients={patients}
+      />
+      <ReceiptHistoryModal isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} clinicId={activeClinic?.id} clinic={activeClinic ?? null} />
       <TreatmentHistoryModal isOpen={showTreatmentHistoryModal} onClose={() => setShowTreatmentHistoryModal(false)} />
     </AppFrame>
   );
