@@ -6,7 +6,7 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import type { Clinic, Patient, Receptionist, Service } from "../../lib/types";
 
-const BOSS_PIN = "0404";
+const BOSS_PIN = "doctorsafarreport";
 
 function getPaymentCategory(method: string): string {
   const m = (method || "").toLowerCase();
