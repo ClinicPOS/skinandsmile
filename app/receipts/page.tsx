@@ -438,7 +438,16 @@ export default function ReceiptsPage() {
     });
   }
 
-  const subtotal = selectedServices.reduce((sum, service) => sum + Number(service.price), 0);
+  function updateCartItemQuantity(index: number, qty: number) {
+    if (!Number.isFinite(qty) || qty < 1) return;
+    setSelectedServices((current) => {
+      const updated = [...current];
+      updated[index] = { ...updated[index], quantity: Math.round(qty) };
+      return updated;
+    });
+  }
+
+  const subtotal = selectedServices.reduce((sum, service) => sum + Number(service.price) * (service.quantity ?? 1), 0);
   const discountAmount = (() => {
     const v = parseFloat(discountInput) || 0;
     if (v <= 0) return 0;
@@ -1514,13 +1523,16 @@ export default function ReceiptsPage() {
       return false;
     }
 
-    const items = selectedServices.map((service) => ({
-      receipt_id: receiptData.id,
-      service_id: service.id,
-      quantity: 1,
-      price: service.price,
-      total: service.price,
-    }));
+    const items = selectedServices.map((service) => {
+      const qty = service.quantity ?? 1;
+      return {
+        receipt_id: receiptData.id,
+        service_id: service.id,
+        quantity: qty,
+        price: service.price,
+        total: service.price * qty,
+      };
+    });
 
     const { data: itemsData, error: itemsError } = await supabase.from("receipt_items").insert(items).select();
 
@@ -2290,22 +2302,27 @@ export default function ReceiptsPage() {
       receptionists.find((person) => person.id === (receptionistId || loginReceptionistId))?.name || "Reception";
 
     const itemsHtml = selectedServices
-      .map(
-        (service) => service.originalPrice != null
+      .map((service) => {
+        const qty = service.quantity ?? 1;
+        const lineTotal = Number(service.price) * qty;
+        const qtyLabel = service.requires_quantity && qty > 1
+          ? ` <span style="font-size:9px;">×${qty} ${service.billing_unit || "Unit"}</span>`
+          : "";
+        return service.originalPrice != null
           ? `
           <div class="row item-row">
-            <span class="item-name">${service.name} <span style="font-size:10px;">(Promo)</span></span>
+            <span class="item-name">${service.name}${qtyLabel} <span style="font-size:10px;">(Promo)</span></span>
             <span class="amount" style="text-align:right;">
-              <span style="text-decoration:line-through;font-size:10px;">AED ${Number(service.originalPrice).toFixed(2)}</span><br/>
-              AED ${Number(service.price).toFixed(2)}
+              <span style="text-decoration:line-through;font-size:10px;">AED ${Number(service.originalPrice * qty).toFixed(2)}</span><br/>
+              AED ${lineTotal.toFixed(2)}
             </span>
           </div>`
           : `
           <div class="row item-row">
-            <span class="item-name">${service.name}</span>
-            <span class="amount">AED ${Number(service.price).toFixed(2)}</span>
-          </div>`
-      )
+            <span class="item-name">${service.name}${qtyLabel}</span>
+            <span class="amount">AED ${lineTotal.toFixed(2)}</span>
+          </div>`;
+      })
       .join("");
 
     let paymentSection = `
@@ -3009,20 +3026,61 @@ export default function ReceiptsPage() {
                       </span>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-bold text-teal-900">{service.name}</p>
-                        <div className="mt-1 flex items-center gap-1.5">
-                          {service.originalPrice != null && (
-                            <span className="text-xs text-slate-400 line-through">AED {Number(service.originalPrice).toFixed(2)}</span>
-                          )}
-                          <span className="text-xs font-medium text-teal-600">AED</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={Number(service.price)}
-                            onChange={(e) => updateCartItemPrice(index, e.target.value)}
-                            className="w-20 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-900 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
-                          />
-                        </div>
+                        {service.requires_quantity ? (
+                          <div className="mt-1 space-y-1.5">
+                            <div className="flex items-center gap-1.5 text-xs">
+                              {service.originalPrice != null && (
+                                <span className="text-slate-400 line-through">AED {Number(service.originalPrice).toFixed(2)}</span>
+                              )}
+                              <span className="text-teal-600">AED</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={Number(service.price)}
+                                onChange={(e) => updateCartItemPrice(index, e.target.value)}
+                                className="w-20 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 font-semibold text-teal-900 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                              />
+                              <span className="text-slate-500">per {service.billing_unit || "Unit"}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => updateCartItemQuantity(index, (service.quantity ?? 1) - 1)}
+                                className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-sm font-bold text-teal-700 hover:bg-teal-200"
+                              >−</button>
+                              <input
+                                type="number"
+                                min="1"
+                                value={service.quantity ?? 1}
+                                onChange={(e) => updateCartItemQuantity(index, Number(e.target.value))}
+                                className="w-12 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 text-center text-xs font-semibold text-teal-900 outline-none focus:border-teal-400"
+                              />
+                              <button
+                                onClick={() => updateCartItemQuantity(index, (service.quantity ?? 1) + 1)}
+                                className="flex h-6 w-6 items-center justify-center rounded-lg bg-teal-100 text-sm font-bold text-teal-700 hover:bg-teal-200"
+                              >+</button>
+                              <span className="text-xs text-slate-500">{service.billing_unit || "Unit"}</span>
+                              <span className="ml-auto text-xs font-bold text-teal-900">
+                                = AED {(Number(service.price) * (service.quantity ?? 1)).toFixed(2)}
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="mt-1 flex items-center gap-1.5">
+                            {service.originalPrice != null && (
+                              <span className="text-xs text-slate-400 line-through">AED {Number(service.originalPrice).toFixed(2)}</span>
+                            )}
+                            <span className="text-xs font-medium text-teal-600">AED</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={Number(service.price)}
+                              onChange={(e) => updateCartItemPrice(index, e.target.value)}
+                              className="w-20 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-900 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                            />
+                          </div>
+                        )}
                       </div>
                     </div>
                     <button

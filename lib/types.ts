@@ -35,6 +35,8 @@ export type Service = {
   name: string;
   price: number;
   clinic_id?: string | null;
+  requires_quantity?: boolean;
+  billing_unit?: string | null;
 };
 
 export type Receptionist = {

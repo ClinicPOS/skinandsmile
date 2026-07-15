@@ -29,6 +29,8 @@ create table if not exists public.services (
   name text not null,
   description text,
   price numeric(10,2),
+  requires_quantity boolean not null default false,
+  billing_unit text not null default 'Session',
   created_at timestamptz not null default now()
 );
 

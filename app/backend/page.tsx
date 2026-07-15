@@ -55,9 +55,13 @@ export default function BackendPage() {
 
   const [serviceName, setServiceName] = useState("");
   const [servicePrice, setServicePrice] = useState("");
+  const [serviceBillingUnit, setServiceBillingUnit] = useState("Session");
+  const [serviceRequiresQuantity, setServiceRequiresQuantity] = useState(false);
   const [editingServiceId, setEditingServiceId] = useState("");
   const [editingServiceName, setEditingServiceName] = useState("");
   const [editingServicePrice, setEditingServicePrice] = useState("");
+  const [editingServiceBillingUnit, setEditingServiceBillingUnit] = useState("Session");
+  const [editingServiceRequiresQuantity, setEditingServiceRequiresQuantity] = useState(false);
   const [servicePage, setServicePage] = useState(1);
 
   const [receptionistName, setReceptionistName] = useState("");
@@ -496,6 +500,8 @@ export default function BackendPage() {
         name: serviceName,
         price: parsedPrice,
         clinic_id: selectedClinicId,
+        requires_quantity: serviceRequiresQuantity,
+        billing_unit: serviceBillingUnit,
       },
     ]);
 
@@ -506,6 +512,8 @@ export default function BackendPage() {
 
     setServiceName("");
     setServicePrice("");
+    setServiceBillingUnit("Session");
+    setServiceRequiresQuantity(false);
     loadAll();
   }
 
@@ -523,7 +531,12 @@ export default function BackendPage() {
 
     const { error } = await supabase
       .from("services")
-      .update({ name: editingServiceName, price: parsedPrice })
+      .update({
+        name: editingServiceName,
+        price: parsedPrice,
+        requires_quantity: editingServiceRequiresQuantity,
+        billing_unit: editingServiceBillingUnit,
+      })
       .eq("id", id);
 
     if (error) {
@@ -534,6 +547,8 @@ export default function BackendPage() {
     setEditingServiceId("");
     setEditingServiceName("");
     setEditingServicePrice("");
+    setEditingServiceBillingUnit("Session");
+    setEditingServiceRequiresQuantity(false);
     loadAll();
   }
 
@@ -1083,6 +1098,29 @@ export default function BackendPage() {
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
           </div>
+          <div className="mt-3 flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-slate-500">Billing Unit</label>
+              <select
+                value={serviceBillingUnit}
+                onChange={(e) => setServiceBillingUnit(e.target.value)}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
+              >
+                {["Session", "Tooth", "Syringe", "Area", "Unit", "Pack", "Other"].map((u) => (
+                  <option key={u} value={u}>{u}</option>
+                ))}
+              </select>
+            </div>
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={serviceRequiresQuantity}
+                onChange={(e) => setServiceRequiresQuantity(e.target.checked)}
+                className="h-4 w-4 rounded accent-cyan-600"
+              />
+              <span className="text-sm text-slate-700">Requires Quantity</span>
+            </label>
+          </div>
           <button
             onClick={addService}
             className="mt-3 rounded-2xl bg-cyan-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-cyan-500"
@@ -1108,6 +1146,29 @@ export default function BackendPage() {
                       placeholder="Price"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
+                    <div className="flex flex-wrap items-center gap-4">
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs font-semibold text-slate-500">Billing Unit</label>
+                        <select
+                          value={editingServiceBillingUnit}
+                          onChange={(e) => setEditingServiceBillingUnit(e.target.value)}
+                          className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300"
+                        >
+                          {["Session", "Tooth", "Syringe", "Area", "Unit", "Pack", "Other"].map((u) => (
+                            <option key={u} value={u}>{u}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={editingServiceRequiresQuantity}
+                          onChange={(e) => setEditingServiceRequiresQuantity(e.target.checked)}
+                          className="h-4 w-4 rounded accent-cyan-600"
+                        />
+                        <span className="text-sm text-slate-700">Requires Quantity</span>
+                      </label>
+                    </div>
                     <div className="flex gap-2">
                       <button
                         onClick={() => updateService(service.id)}
@@ -1127,7 +1188,12 @@ export default function BackendPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-slate-900">{service.name}</p>
-                      <p className="text-sm text-slate-500">AED {Number(service.price || 0).toFixed(2)}</p>
+                      <p className="flex items-center gap-1.5 text-sm text-slate-500">
+                        AED {Number(service.price || 0).toFixed(2)} / {service.billing_unit || "Session"}
+                        {service.requires_quantity && (
+                          <span className="rounded-full bg-cyan-100 px-1.5 py-0.5 text-xs font-semibold text-cyan-700">Qty</span>
+                        )}
+                      </p>
                     </div>
                     <div className="flex gap-2">
                       <button
@@ -1135,6 +1201,8 @@ export default function BackendPage() {
                           setEditingServiceId(service.id);
                           setEditingServiceName(service.name || "");
                           setEditingServicePrice(String(service.price ?? ""));
+                          setEditingServiceBillingUnit(service.billing_unit || "Session");
+                          setEditingServiceRequiresQuantity(service.requires_quantity ?? false);
                         }}
                         className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600"
                       >
