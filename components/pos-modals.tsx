@@ -234,18 +234,23 @@ export function SearchPatientModal({
       .eq("patient_id", patient.id)
       .order("created_at", { ascending: false })
       .limit(1);
+    // receptionist_id is a uuid — an .eq() sentinel would 400, so skip the
+    // query entirely when the clinic has no receptionists.
+    let skipLastVisit = false;
     if (clinicId) {
       const ids = receptionistIdsForClinic(
         (allReceptionistsResult.data as { id: string; clinic_id: string | null }[]) || [],
         clinicId
       );
       if (ids.length === 0) {
-        receiptsQuery = receiptsQuery.eq("receptionist_id", "__none__");
+        skipLastVisit = true;
       } else {
         receiptsQuery = receiptsQuery.in("receptionist_id", ids);
       }
     }
-    const lastVisitResult = await receiptsQuery;
+    const lastVisitResult = skipLastVisit
+      ? { data: [] as { created_at: string }[] }
+      : await receiptsQuery;
 
     setNotes((notesResult.data as PatientNote[]) || []);
     setDoctors((doctorsResult.data as LookupItem[]) || []);
@@ -823,9 +828,20 @@ export function ReceiptHistoryModal({
     setView("refund");
   }
 
+  // Refunds can't exceed money actually collected: partial-payment receipts
+  // only took amount_paid (NULL = paid in full), minus prior refunds.
+  function maxRefundableFor(receipt: Receipt): number {
+    const paidAmount = Number(receipt.amount_paid ?? receipt.total ?? 0);
+    const previouslyRefunded = (refundsMap[receipt.id] || []).reduce(
+      (s: number, r: any) => s + Number(r.total_amount || 0),
+      0
+    );
+    return Math.max(0, Math.round((paidAmount - previouslyRefunded) * 100) / 100);
+  }
+
   function calcRefundTotal(): number {
     if (!refundTargetReceipt) return 0;
-    if (refundAll) return Number(refundTargetReceipt.total || 0);
+    if (refundAll) return maxRefundableFor(refundTargetReceipt);
     const itemsToRefund = refundItems.filter((i) => checkedItems[i.id]);
     const receiptVat = Number(refundTargetReceipt.vat || 0);
     const receiptSubtotal = Number(refundTargetReceipt.subtotal || 0);
@@ -842,6 +858,18 @@ export function ReceiptHistoryModal({
 
     setIsProcessingRefund(true);
     const totalRefund = calcRefundTotal();
+    const maxRefundable = maxRefundableFor(refundTargetReceipt);
+
+    if (totalRefund <= 0) {
+      alert("Nothing left to refund — everything the patient paid has already been refunded.");
+      setIsProcessingRefund(false);
+      return;
+    }
+    if (totalRefund > maxRefundable + 0.0049) {
+      alert(`Refund exceeds what the patient actually paid. Maximum refundable is AED ${maxRefundable.toFixed(2)}.`);
+      setIsProcessingRefund(false);
+      return;
+    }
 
     const { data: refundData, error: refundError } = await supabase
       .from("refunds")
@@ -872,6 +900,29 @@ export function ReceiptHistoryModal({
           amount: Number(item.total || item.price || 0),
         }))
       );
+    }
+
+    // A fully refunded partial-payment receipt shouldn't keep chasing the
+    // patient for the remainder — remove its auto-created outstanding balance,
+    // unless payments were already collected against it (needs manual review).
+    if (refundAll && refundTargetReceipt.amount_paid != null) {
+      const { data: linkedBalances } = await supabase
+        .from("outstanding_balances")
+        .select("id")
+        .eq("receipt_id", refundTargetReceipt.id);
+      const balanceIds = (linkedBalances || []).map((b: any) => b.id);
+      if (balanceIds.length > 0) {
+        const { data: collected } = await supabase
+          .from("balance_payments")
+          .select("id")
+          .in("outstanding_balance_id", balanceIds)
+          .limit(1);
+        if ((collected || []).length === 0) {
+          await supabase.from("outstanding_balances").delete().in("id", balanceIds);
+        } else {
+          alert("Note: this receipt's outstanding balance already has collected payments, so it was kept. Review it in the Backend page.");
+        }
+      }
     }
 
     setRefundsMap((prev) => ({

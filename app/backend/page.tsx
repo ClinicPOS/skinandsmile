@@ -7,6 +7,7 @@ import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic, Ou
 import { calculateAge } from "../../lib/utils";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
+import { effectiveServiceCategory } from "../../lib/service-categories";
 
 const BACKEND_PIN = "0404";
 
@@ -62,11 +63,13 @@ export default function BackendPage() {
 
   const [serviceName, setServiceName] = useState("");
   const [servicePrice, setServicePrice] = useState("");
+  const [serviceCategory, setServiceCategory] = useState("");
   const [serviceBillingUnit, setServiceBillingUnit] = useState("Session");
   const [serviceRequiresQuantity, setServiceRequiresQuantity] = useState(false);
   const [editingServiceId, setEditingServiceId] = useState("");
   const [editingServiceName, setEditingServiceName] = useState("");
   const [editingServicePrice, setEditingServicePrice] = useState("");
+  const [editingServiceCategory, setEditingServiceCategory] = useState("");
   const [editingServiceBillingUnit, setEditingServiceBillingUnit] = useState("Session");
   const [editingServiceRequiresQuantity, setEditingServiceRequiresQuantity] = useState(false);
   const [servicePage, setServicePage] = useState(1);
@@ -157,10 +160,44 @@ export default function BackendPage() {
     [doctors, selectedClinicId]
   );
 
-  const displayedServices = useMemo(() =>
-    selectedClinicId ? services.filter(s => s.clinic_id === selectedClinicId) : [],
-    [services, selectedClinicId]
-  );
+  const displayedServices = useMemo(() => {
+    if (!selectedClinicId) return [];
+    return services
+      .filter(s => s.clinic_id === selectedClinicId)
+      .sort((a, b) => {
+        const catA = (a.category || "").toLowerCase();
+        const catB = (b.category || "").toLowerCase();
+        if (catA !== catB) {
+          if (!catA) return 1; // uncategorized last
+          if (!catB) return -1;
+          return catA < catB ? -1 : 1;
+        }
+        return (a.name || "").localeCompare(b.name || "");
+      });
+  }, [services, selectedClinicId]);
+
+  const existingServiceCategories = useMemo(() => {
+    // Categories are per-clinic: only suggest what the selected clinic's
+    // services effectively use — saved categories plus the legacy keyword
+    // groups — deduped case-insensitively so "facial services" can't sit
+    // next to "Facial Services".
+    const map = new Map<string, string>();
+    for (const s of services) {
+      if (!selectedClinicId || s.clinic_id !== selectedClinicId) continue;
+      const c = effectiveServiceCategory(s);
+      if (c && !map.has(c.toLowerCase())) map.set(c.toLowerCase(), c);
+    }
+    return [...map.values()].sort((a, b) => a.localeCompare(b));
+  }, [services, selectedClinicId]);
+
+  // Reuse an existing category's exact spelling when the typed value matches
+  // it ignoring case, so typos in casing don't create duplicate categories.
+  function canonicalServiceCategory(input: string): string | null {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    const match = existingServiceCategories.find((c) => c.toLowerCase() === trimmed.toLowerCase());
+    return match || trimmed;
+  }
 
   const serviceTotalPages = Math.max(1, Math.ceil(displayedServices.length / 10));
   const pagedServices = useMemo(() => {
@@ -582,6 +619,7 @@ export default function BackendPage() {
         name: serviceName,
         price: parsedPrice,
         clinic_id: selectedClinicId,
+        category: canonicalServiceCategory(serviceCategory),
         requires_quantity: serviceRequiresQuantity,
         billing_unit: serviceBillingUnit,
       },
@@ -594,6 +632,7 @@ export default function BackendPage() {
 
     setServiceName("");
     setServicePrice("");
+    setServiceCategory("");
     setServiceBillingUnit("Session");
     setServiceRequiresQuantity(false);
     loadAll();
@@ -616,6 +655,7 @@ export default function BackendPage() {
       .update({
         name: editingServiceName,
         price: parsedPrice,
+        category: canonicalServiceCategory(editingServiceCategory),
         requires_quantity: editingServiceRequiresQuantity,
         billing_unit: editingServiceBillingUnit,
       })
@@ -1241,6 +1281,18 @@ export default function BackendPage() {
               placeholder="Price"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
+            <input
+              list="service-category-options"
+              value={serviceCategory}
+              onChange={(e) => setServiceCategory(e.target.value)}
+              placeholder="Category (pick existing or type a new one)"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
+            />
+            <datalist id="service-category-options">
+              {existingServiceCategories.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
@@ -1290,6 +1342,13 @@ export default function BackendPage() {
                       placeholder="Price"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
+                    <input
+                      list="service-category-options"
+                      value={editingServiceCategory}
+                      onChange={(e) => setEditingServiceCategory(e.target.value)}
+                      placeholder="Category (pick existing or type a new one)"
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
                     <div className="flex flex-wrap items-center gap-4">
                       <div className="flex items-center gap-2">
                         <label className="text-xs font-semibold text-slate-500">Billing Unit</label>
@@ -1334,6 +1393,9 @@ export default function BackendPage() {
                       <p className="text-sm font-semibold text-slate-900">{service.name}</p>
                       <p className="flex items-center gap-1.5 text-sm text-slate-500">
                         AED {Number(service.price || 0).toFixed(2)} / {service.billing_unit || "Session"}
+                        {service.category && (
+                          <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-semibold text-slate-600">{service.category}</span>
+                        )}
                         {service.requires_quantity && (
                           <span className="rounded-full bg-cyan-100 px-1.5 py-0.5 text-xs font-semibold text-cyan-700">Qty</span>
                         )}
@@ -1345,6 +1407,7 @@ export default function BackendPage() {
                           setEditingServiceId(service.id);
                           setEditingServiceName(service.name || "");
                           setEditingServicePrice(String(service.price ?? ""));
+                          setEditingServiceCategory(service.category || "");
                           setEditingServiceBillingUnit(service.billing_unit || "Session");
                           setEditingServiceRequiresQuantity(service.requires_quantity ?? false);
                         }}

@@ -152,13 +152,29 @@ export default function ReceiptLogPage() {
     const itemsToRefund = refundAll ? receiptItems : receiptItems.filter((item) => checkedItems[String(item.id)]);
     const receiptVat = Number(selectedReceipt.vat || 0);
     const receiptSubtotal = Number(selectedReceipt.subtotal || 0);
+    // Refunds can't exceed money actually collected: partial-payment receipts
+    // only took amount_paid (NULL = paid in full), minus prior refunds.
+    const paidAmount = Number(selectedReceipt.amount_paid ?? selectedReceipt.total ?? 0);
+    const previouslyRefunded = receiptRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
+    const maxRefundable = Math.max(0, Math.round((paidAmount - previouslyRefunded) * 100) / 100);
     const totalRefund = refundAll
-      ? Number(selectedReceipt.total || 0)
+      ? maxRefundable
       : (() => {
           const itemsSubtotal = itemsToRefund.reduce((sum, item) => sum + Number(item.total || item.price || 0), 0);
           const proportionalVat = receiptSubtotal > 0 ? (itemsSubtotal / receiptSubtotal) * receiptVat : 0;
           return Math.round((itemsSubtotal + proportionalVat) * 100) / 100;
         })();
+
+    if (totalRefund <= 0) {
+      alert(`Nothing left to refund — AED ${previouslyRefunded.toFixed(2)} of the AED ${paidAmount.toFixed(2)} paid has already been refunded.`);
+      setIsProcessing(false);
+      return;
+    }
+    if (totalRefund > maxRefundable + 0.0049) {
+      alert(`Refund exceeds what the patient actually paid. Maximum refundable is AED ${maxRefundable.toFixed(2)} (paid AED ${paidAmount.toFixed(2)}, already refunded AED ${previouslyRefunded.toFixed(2)}).`);
+      setIsProcessing(false);
+      return;
+    }
 
     const { data: refundData, error: refundError } = await supabase
       .from("refunds")
@@ -189,6 +205,29 @@ export default function ReceiptLogPage() {
           amount: Number(item.total || item.price || 0),
         }))
       );
+    }
+
+    // A fully refunded partial-payment receipt shouldn't keep chasing the
+    // patient for the remainder — remove its auto-created outstanding balance,
+    // unless payments were already collected against it (needs manual review).
+    if (refundAll && selectedReceipt.amount_paid != null) {
+      const { data: linkedBalances } = await supabase
+        .from("outstanding_balances")
+        .select("id")
+        .eq("receipt_id", selectedReceipt.id);
+      const balanceIds = (linkedBalances || []).map((b: any) => b.id);
+      if (balanceIds.length > 0) {
+        const { data: collected } = await supabase
+          .from("balance_payments")
+          .select("id")
+          .in("outstanding_balance_id", balanceIds)
+          .limit(1);
+        if ((collected || []).length === 0) {
+          await supabase.from("outstanding_balances").delete().in("id", balanceIds);
+        } else {
+          alert("Note: this receipt's outstanding balance already has collected payments, so it was kept. Review it in the Backend page.");
+        }
+      }
     }
 
     // Refresh refund data for the current receipt
@@ -384,7 +423,7 @@ export default function ReceiptLogPage() {
       : `#${String(receipt.id).slice(0, 8)}`;
     const patientName = patients.find((p) => p.id === receipt.patient_id)?.name || "Unknown Patient";
     const confirmed = confirm(
-      `Permanently delete receipt ${receiptLabel} for ${patientName} (AED ${Number(receipt.total || 0).toFixed(2)})?\n\nThis also deletes its items, refunds, and any outstanding balance created by it. This cannot be undone.`
+      `Permanently delete receipt ${receiptLabel} for ${patientName} (AED ${Number(receipt.total || 0).toFixed(2)})?\n\nThis also deletes its items, refunds, and any outstanding balance created by it — INCLUDING payments already collected against that balance. This cannot be undone.`
     );
     if (!confirmed) return;
 

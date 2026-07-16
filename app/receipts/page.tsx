@@ -12,8 +12,9 @@ import { CollectBalancePaymentModal } from "../../components/outstanding-balance
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { printPaymentReceipt } from "../../lib/print-payment-receipt";
 import { COUNTRIES } from "../../lib/countries";
+import { getAestheticServiceCategory } from "../../lib/service-categories";
 
-const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara", "Split Payment"];
+const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Split Payment"];
 
 const POS_REGISTER_SESSION_KEY = "posRegisterSession";
 const POS_RECENT_SERVICES_KEY = "posRecentServices";
@@ -67,7 +68,9 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
     cash: 0,
     card: 0,
     tabby: 0,
+    tabbyCard: 0,
     tamara: 0,
+    tamaraCard: 0,
     insurance: 0,
     bankTransfer: 0,
     addOn: 0,
@@ -80,28 +83,45 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
     const cashValue = cashMatch ? Number(cashMatch[1]) : 0;
     const otherMethod = (otherMatch?.[1] || "").trim().toLowerCase();
     const otherValue = otherMatch ? Number(otherMatch[2]) : 0;
+    const safeOther = Number.isFinite(otherValue) ? otherValue : 0;
 
     breakdown.cash = Number.isFinite(cashValue) ? cashValue : 0;
     breakdown.mop = "SPLIT";
 
-    if (otherMethod.includes("tabby")) {
-      breakdown.tabby = Number.isFinite(otherValue) ? otherValue : 0;
+    if (otherMethod.includes("tabby card")) {
+      breakdown.tabbyCard = safeOther;
+    } else if (otherMethod.includes("tabby")) {
+      breakdown.tabby = safeOther;
+    } else if (otherMethod.includes("tamara card")) {
+      breakdown.tamaraCard = safeOther;
     } else if (otherMethod.includes("tamara")) {
-      breakdown.tamara = Number.isFinite(otherValue) ? otherValue : 0;
+      breakdown.tamara = safeOther;
     } else if (otherMethod.includes("insurance")) {
-      breakdown.insurance = Number.isFinite(otherValue) ? otherValue : 0;
+      breakdown.insurance = safeOther;
     } else if (otherMethod.includes("bank")) {
-      breakdown.bankTransfer = Number.isFinite(otherValue) ? otherValue : 0;
+      breakdown.bankTransfer = safeOther;
     } else {
-      breakdown.card = Number.isFinite(otherValue) ? otherValue : 0;
+      breakdown.card = safeOther;
     }
 
+    return breakdown;
+  }
+
+  if (paymentMethod.includes("tabby card")) {
+    breakdown.tabbyCard = totalAmount;
+    breakdown.mop = "TABBY CARD";
     return breakdown;
   }
 
   if (paymentMethod.includes("tabby")) {
     breakdown.tabby = totalAmount;
     breakdown.mop = "TABBY";
+    return breakdown;
+  }
+
+  if (paymentMethod.includes("tamara card")) {
+    breakdown.tamaraCard = totalAmount;
+    breakdown.mop = "TAMARA CARD";
     return breakdown;
   }
 
@@ -189,27 +209,6 @@ function matchesServiceCategory(serviceName: string, category: string) {
   }
 
   return true;
-}
-
-function getAestheticServiceCategory(serviceName: string): string | null {
-  const name = serviceName.toLowerCase();
-
-  // Facial Services
-  if (name.includes("hydrafacial") || name.includes("bb glow") || name.includes("deep facial") || name.includes("clarifying")) {
-    return "Facial Services";
-  }
-
-  // Hyperpigmentation Treatment
-  if (name.includes("acne") || name.includes("mesotherapy") || name.includes("co2 fractional") || name.includes("green peel") || name.includes("prp treatment")) {
-    return "Hyperpigmentation Treatment";
-  }
-
-  // Hair Laser Removal
-  if (name.includes("upper lip") || name.includes("underarm") || name.includes("half legs") || name.includes("half arms") || name.includes("full face") || name.includes("beard") || name.includes("bikini") || name.includes("full legs")) {
-    return "Hair Laser Removal";
-  }
-
-  return null;
 }
 
 const serviceCategories = [
@@ -468,6 +467,36 @@ export default function ReceiptsPage() {
     return services.filter((s) => s.clinic_id === activeClinic.id);
   }, [services, activeClinic]);
 
+  // Real categories (managed in Backend) for the active clinic's services.
+  // When any exist, the POS tabs are built from them instead of the legacy
+  // name-keyword tabs.
+  const clinicDbCategories = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of clinicServices) {
+      const c = String(s.category || "").trim();
+      if (c) set.add(c);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [clinicServices]);
+
+  const clinicHasUncategorized = useMemo(
+    () => clinicServices.some((s) => !String(s.category || "").trim()),
+    [clinicServices]
+  );
+
+  const categoryTabs = useMemo(() => {
+    if (clinicDbCategories.length === 0) return serviceCategories;
+    return [
+      { key: "all", label: "All" },
+      ...clinicDbCategories.map((c) => ({ key: `db:${c}`, label: c })),
+      ...(clinicHasUncategorized ? [{ key: "db:__other__", label: "Other" }] : []),
+    ];
+  }, [clinicDbCategories, clinicHasUncategorized]);
+
+  useEffect(() => {
+    setServiceCategory("all");
+  }, [activeClinic?.id]);
+
   const clinicDoctors = useMemo(() => {
     if (!activeClinic) return [];
     return doctors.filter((d) => d.clinic_id === activeClinic.id);
@@ -477,7 +506,16 @@ export default function ReceiptsPage() {
     const query = serviceSearch.trim().toLowerCase();
     const filtered = clinicServices.filter((service) => {
       const name = String(service.name || "");
-      const inCategory = matchesServiceCategory(name, serviceCategory);
+      let inCategory: boolean;
+      if (serviceCategory.startsWith("db:")) {
+        const dbCategory = String(service.category || "").trim();
+        inCategory =
+          serviceCategory === "db:__other__"
+            ? !dbCategory
+            : dbCategory === serviceCategory.slice(3);
+      } else {
+        inCategory = matchesServiceCategory(name, serviceCategory);
+      }
       const inSearch = !query || name.toLowerCase().includes(query);
       return inCategory && inSearch;
     });
@@ -837,7 +875,7 @@ export default function ReceiptsPage() {
 
     const { data: receiptsData, error: receiptsError } = await supabase
       .from("receipts")
-      .select("id, receipt_number, created_at, patient_id, doctor_id, receptionist_id, payment_method, subtotal, discount_amount, total, amount_paid")
+      .select("id, receipt_number, created_at, patient_id, doctor_id, receptionist_id, payment_method, subtotal, vat, discount_amount, total, amount_paid")
       .in("receptionist_id", receptionistIds)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -988,13 +1026,16 @@ export default function ReceiptsPage() {
       "Gross Total",
       "Promo / Discount",
       "Net Total",
+      "VAT",
       "Cash",
       "Card",
       "Card Transaction Reference",
       "Tabby",
       "Tabby Transaction Reference",
+      "Tabby Card",
       "Tamara",
       "Tamara Transaction Reference",
+      "Tamara Card",
       "Insurance",
       "Refund Amount",
       "Payment Method",
@@ -1007,6 +1048,7 @@ export default function ReceiptsPage() {
     let grossRevenue = 0;
     let totalDiscounts = 0;
     let netRevenue = 0;
+    let totalVat = 0;
     let totalRefunds = 0;
     let collectedTodayTotal = 0;
     let outstandingCreatedTotal = 0;
@@ -1014,7 +1056,9 @@ export default function ReceiptsPage() {
     let cashTotal = 0;
     let cardTotal = 0;
     let tabbyTotal = 0;
+    let tabbyCardTotal = 0;
     let tamaraTotal = 0;
+    let tamaraCardTotal = 0;
     let insuranceTotal = 0;
     let bankTransferTotal = 0;
 
@@ -1026,6 +1070,7 @@ export default function ReceiptsPage() {
       const paymentMethodRaw = String(receipt.payment_method || "");
       const discountAmount = Number(receipt.discount_amount || 0);
       const netTotal = Number(receipt.total || 0);
+      const vatAmount = Number(receipt.vat || 0);
       const grossTotal = Number(receipt.subtotal || 0) + discountAmount;
       const refundAmount = Number(refundMap.get(receiptId) || 0);
       // NULL amount_paid = paid in full; the breakdown reflects money actually received.
@@ -1036,6 +1081,7 @@ export default function ReceiptsPage() {
       grossRevenue += grossTotal;
       totalDiscounts += discountAmount;
       netRevenue += netTotal;
+      totalVat += vatAmount;
       totalRefunds += refundAmount;
       collectedTodayTotal += paidToday;
       outstandingCreatedTotal += outstandingCreated;
@@ -1043,7 +1089,9 @@ export default function ReceiptsPage() {
       cashTotal += breakdown.cash;
       cardTotal += breakdown.card;
       tabbyTotal += breakdown.tabby;
+      tabbyCardTotal += breakdown.tabbyCard;
       tamaraTotal += breakdown.tamara;
+      tamaraCardTotal += breakdown.tamaraCard;
       insuranceTotal += breakdown.insurance;
       bankTransferTotal += breakdown.bankTransfer;
 
@@ -1066,13 +1114,16 @@ export default function ReceiptsPage() {
         grossTotal,
         discountAmount,
         netTotal,
+        vatAmount,
         breakdown.cash,
         breakdown.card,
         extractTransactionReference(paymentMethodRaw, "card"),
         breakdown.tabby,
         extractTransactionReference(paymentMethodRaw, "tabby"),
+        breakdown.tabbyCard,
         breakdown.tamara,
         extractTransactionReference(paymentMethodRaw, "tamara"),
+        breakdown.tamaraCard,
         breakdown.insurance,
         refundAmount,
         paymentMethodRaw,
@@ -1081,7 +1132,7 @@ export default function ReceiptsPage() {
       ]);
     });
 
-    const totalCollected = cashTotal + cardTotal + tabbyTotal + tamaraTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal;
+    const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tamaraTotal + tamaraCardTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal;
     const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
 
     const workbook = XLSX.utils.book_new();
@@ -1127,6 +1178,7 @@ export default function ReceiptsPage() {
       ["Gross Revenue", grossRevenue],
       ["Total Discounts (Promo)", totalDiscounts],
       ["Net Revenue", netRevenue],
+      ["Total VAT (Included)", totalVat],
       ["Total Refunds", totalRefunds],
       ["Collected Today (Treatments)", collectedTodayTotal],
       ["Outstanding Created Today", outstandingCreatedTotal],
@@ -1136,7 +1188,9 @@ export default function ReceiptsPage() {
       ["Cash", cashTotal],
       ["Card", cardTotal],
       ["Tabby", tabbyTotal],
+      ["Tabby Card", tabbyCardTotal],
       ["Tamara", tamaraTotal],
+      ["Tamara Card", tamaraCardTotal],
       ["Insurance", insuranceTotal],
       ["Bank Transfer", bankTransferTotal],
       ["Balance Collections", balanceCollectionsTotal],
@@ -1149,7 +1203,7 @@ export default function ReceiptsPage() {
       { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
       { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } },
       { s: { r: 8, c: 0 }, e: { r: 8, c: 1 } },
-      { s: { r: 19, c: 0 }, e: { r: 19, c: 1 } },
+      { s: { r: 20, c: 0 }, e: { r: 20, c: 1 } },
     ];
 
     const styleSummaryCell = (row: number, col: number, style: Record<string, unknown>) => {
@@ -1169,7 +1223,7 @@ export default function ReceiptsPage() {
       }
     }
 
-    [3, 9, 20].forEach((row) => {
+    [3, 9, 21].forEach((row) => {
       styleSummaryCell(row, 1, {
         fill: { fgColor: { rgb: "1F4E78" } },
         font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
@@ -1190,24 +1244,30 @@ export default function ReceiptsPage() {
       fill: { fgColor: { rgb: "0B132B" } },
     });
 
-    for (let row = 12; row <= 18; row++) {
+    for (let row = 12; row <= 19; row++) {
       styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
     }
-    for (let row = 21; row <= 28; row++) {
+    for (let row = 22; row <= 31; row++) {
       styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
     }
 
-    styleSummaryCell(28, 1, {
+    styleSummaryCell(31, 1, {
       fill: { fgColor: { rgb: "FFF2CC" } },
       font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
     });
-    styleSummaryCell(28, 2, {
+    styleSummaryCell(31, 2, {
       fill: { fgColor: { rgb: "FFF2CC" } },
       font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
     });
 
-    // Formula for Total Collected in summary payment section (Cash..Balance Collections).
-    (summarySheet as any)["B28"] = { t: "n", f: "SUM(B21:B27)", s: (summarySheet as any)["B28"]?.s };
+    // Formula for Total Collected (Cash..Balance Collections) with a cached
+    // value so viewers that don't recalculate formulas still show the number.
+    (summarySheet as any)["B31"] = {
+      t: "n",
+      f: "SUM(B22:B30)",
+      v: Math.round(totalCollected * 100) / 100,
+      s: (summarySheet as any)["B31"]?.s,
+    };
 
     const detailsData: (string | number)[][] = [detailHeaders, ...detailRows, new Array(detailHeaders.length).fill("") as string[]];
     const detailsSheet = XLSX.utils.aoa_to_sheet(detailsData);
@@ -1216,7 +1276,7 @@ export default function ReceiptsPage() {
     const formulaEnd = Math.max(detailsDataStart, detailsDataEnd);
     const totalsRow = detailRows.length + 2;
 
-    const writeCell = (address: string, value: string | number | { t: string; f: string }) => {
+    const writeCell = (address: string, value: string | number | { t: string; f: string; v?: number }) => {
       if (typeof value === "object" && "f" in value) {
         (detailsSheet as any)[address] = { ...(detailsSheet as any)[address], ...value };
         return;
@@ -1226,11 +1286,20 @@ export default function ReceiptsPage() {
 
     writeCell(`A${totalsRow}`, "TOTALS");
 
-    ["I", "J", "K", "L", "M", "O", "Q", "S", "T", "V", "W"].forEach((col) => {
-      writeCell(`${col}${totalsRow}`, { t: "n", f: `SUM(${col}${detailsDataStart}:${col}${formulaEnd})` });
+    // Write both the formula AND a computed value: some viewers (Google Sheets
+    // import, phone previews, Protected View) don't recalculate formulas on
+    // open, which made totals show empty depending on where the file was opened.
+    ["I", "J", "K", "L", "M", "N", "P", "R", "S", "U", "V", "W", "Y", "Z"].forEach((col) => {
+      const colIndex = XLSX.utils.decode_col(col);
+      const computed = detailRows.reduce((s, row) => s + Number(row[colIndex] || 0), 0);
+      writeCell(`${col}${totalsRow}`, {
+        t: "n",
+        f: `SUM(${col}${detailsDataStart}:${col}${formulaEnd})`,
+        v: Math.round(computed * 100) / 100,
+      });
     });
 
-    detailsSheet["!autofilter"] = { ref: `A1:W${totalsRow}` };
+    detailsSheet["!autofilter"] = { ref: `A1:Z${totalsRow}` };
     detailsSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
 
     const autoWidths = detailHeaders.map((header, index) => {
@@ -1245,15 +1314,15 @@ export default function ReceiptsPage() {
         }
       });
 
-      const padding = index === 7 || index === 20 ? 6 : 3;
+      const padding = index === 7 || index === 23 ? 6 : 3;
       return { wch: Math.min(48, Math.max(10, maxLength + padding)) };
     });
 
     autoWidths[7] = { wch: 42 };
-    autoWidths[13] = { wch: 26 };
-    autoWidths[15] = { wch: 30 };
-    autoWidths[17] = { wch: 30 };
-    autoWidths[20] = { wch: 34 };
+    autoWidths[14] = { wch: 26 };
+    autoWidths[16] = { wch: 30 };
+    autoWidths[19] = { wch: 30 };
+    autoWidths[23] = { wch: 34 };
     detailsSheet["!cols"] = autoWidths;
 
     const styleDetailsCell = (row: number, col: number, style: Record<string, unknown>) => {
@@ -1272,7 +1341,7 @@ export default function ReceiptsPage() {
       });
     }
 
-    const currencyCols = new Set([9, 10, 11, 12, 13, 15, 17, 19, 20, 22, 23]);
+    const currencyCols = new Set([9, 10, 11, 12, 13, 14, 16, 18, 19, 21, 22, 23, 25, 26]);
     for (let row = 2; row <= totalsRow; row++) {
       const isTotalsRow = row === totalsRow;
       const isEvenDataRow = row % 2 === 0;
@@ -1282,8 +1351,8 @@ export default function ReceiptsPage() {
           font: { name: "Calibri", sz: 10, color: { rgb: "111827" }, bold: isTotalsRow },
           alignment: {
             vertical: "top",
-            horizontal: currencyCols.has(col) ? "right" : col === 8 || col === 21 ? "left" : "center",
-            wrapText: col === 8 || col === 21,
+            horizontal: currencyCols.has(col) ? "right" : col === 8 || col === 24 ? "left" : "center",
+            wrapText: col === 8 || col === 24,
           },
           fill: isTotalsRow
             ? { fgColor: { rgb: "FFF2CC" } }
@@ -1518,7 +1587,9 @@ export default function ReceiptsPage() {
     const dueToday = getAmountDueToday();
     const outstanding = getOutstandingAfterPayment();
 
-    if (dueToday <= 0) {
+    // Free services (e.g. consultations priced at 0) are legitimate — only
+    // require a payment amount when there is actually something to pay.
+    if (total > 0 && dueToday <= 0) {
       alert("Amount to pay today must be greater than 0.");
       return;
     }
@@ -1724,6 +1795,41 @@ export default function ReceiptsPage() {
     } finally {
       setIsSavingReceipt(false);
     }
+  }
+
+  // Save the transaction, optionally print, then reset the form for the next sale.
+  async function completeTransaction(shouldPrint: boolean) {
+    const savedReceipt = await confirmPaymentAndSave();
+    if (!savedReceipt) return;
+    if (shouldPrint) printReceipt(savedReceipt);
+    setShowPrintModal(false);
+    setPatientId("");
+    setPatientName("");
+    setPatientPhoneInput("");
+    setPatientEmailInput("");
+    setPatientDobInput("");
+    setPatientSexInput("");
+    setPatientNationalityInput("");
+    setPatientFileNumberInput("");
+    setNationalitySearch("");
+    setShowNationalitySuggestions(false);
+    setPatientEmiratesIdInput("");
+    setPatientPassportInput("");
+    setPatientMrnInput("");
+    setSelectedPatientInfo(null);
+    setTransactionPatientId("");
+    setDoctorId("");
+    setSelectedPaymentMethod("");
+    setTabbyReferenceInput("");
+    setTamaraReferenceInput("");
+    setPayTodayInput("");
+    setNotes("");
+    setSelectedServices([]);
+    setDiscountInput("");
+    setDiscountType("AED");
+    setFilteredPatients([]);
+    setShowPatientSuggestions(false);
+    router.refresh();
   }
 
   function generateInvoiceHtml() {
@@ -2952,11 +3058,9 @@ export default function ReceiptsPage() {
                         <button
                           onClick={() => {
                             if (!receptionistId) { alert("Open the register first."); return; }
-                            setCollectBalanceContext({
-                              balance,
-                              payments,
-                              patient: patients.find((p) => p.id === patientId) || selectedPatientInfo,
-                            });
+                            const patientRow = patients.find((p) => p.id === patientId);
+                            if (!patientRow) { alert("Patient not found — refresh the page and try again."); return; }
+                            setCollectBalanceContext({ balance, payments, patient: patientRow });
                           }}
                           className="rounded-xl bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500"
                         >
@@ -3153,7 +3257,7 @@ export default function ReceiptsPage() {
 
               {activeClinic?.name !== "Skin & Smile Aesthetic Clinic" ? (
                 <div className="flex gap-2 overflow-x-auto pb-1">
-                  {serviceCategories.map((category) => {
+                  {categoryTabs.map((category) => {
                     const isActive = serviceCategory === category.key;
                     return (
                       <button
@@ -3181,31 +3285,49 @@ export default function ReceiptsPage() {
               </div>
             ) : activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? (
               <div className="mt-4 space-y-6">
-                {["Facial Services", "Hyperpigmentation Treatment", "Hair Laser Removal"].map((categoryName) => {
-                  const categoryServices = filteredServices.filter((s) => getAestheticServiceCategory(s.name) === categoryName);
-                  if (categoryServices.length === 0) return null;
-                  return (
-                    <div key={categoryName}>
-                      <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.15em] text-slate-600">{categoryName}</h3>
-                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
-                        {categoryServices.map((service) => (
-                          <button
-                            key={service.id}
-                            onClick={() => addService(service)}
-                            className="rounded-2xl border border-slate-200 bg-white p-3 text-left shadow-sm transition hover:border-cyan-300 hover:bg-cyan-50 focus:outline-none focus:ring-4 focus:ring-cyan-100"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <p className="text-sm font-semibold text-slate-900">{service.name}</p>
-                              <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
-                                AED {Number(service.price || 0).toFixed(0)}
-                              </span>
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                {(() => {
+                  // Group by the service's category column (managed in Backend),
+                  // fall back to legacy name keywords, and always render
+                  // unmatched services under "Other Services" so no service is
+                  // ever hidden from the picker.
+                  const groups = new Map<string, any[]>();
+                  for (const s of filteredServices) {
+                    const categoryName =
+                      String(s.category || "").trim() ||
+                      getAestheticServiceCategory(String(s.name || "")) ||
+                      "Other Services";
+                    const arr = groups.get(categoryName) || [];
+                    arr.push(s);
+                    groups.set(categoryName, arr);
+                  }
+                  const groupNames = [...groups.keys()].sort((a, b) =>
+                    a === "Other Services" ? 1 : b === "Other Services" ? -1 : a.localeCompare(b)
                   );
-                })}
+                  return groupNames.map((categoryName) => {
+                    const categoryServices = groups.get(categoryName) || [];
+                    return (
+                      <div key={categoryName}>
+                        <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.15em] text-slate-600">{categoryName}</h3>
+                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
+                          {categoryServices.map((service) => (
+                            <button
+                              key={service.id}
+                              onClick={() => addService(service)}
+                              className="rounded-2xl border border-slate-200 bg-white p-3 text-left shadow-sm transition hover:border-cyan-300 hover:bg-cyan-50 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <p className="text-sm font-semibold text-slate-900">{service.name}</p>
+                                <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
+                                  AED {Number(service.price || 0).toFixed(0)}
+                                </span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             ) : (
               <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
@@ -3555,49 +3677,24 @@ export default function ReceiptsPage() {
             {showPrintModal && (
               <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50">
                 <div className="rounded-3xl bg-white p-6 shadow-2xl max-w-md w-full mx-4">
-                  <h3 className="text-lg font-semibold text-slate-900 mb-4">Ready to print</h3>
+                  <h3 className="text-lg font-semibold text-slate-900 mb-4">Complete transaction</h3>
                   <p className="mb-6 text-sm text-slate-600">
-                    Print the receipt to complete and save the transaction.
+                    Save the transaction with or without printing the receipt.
                   </p>
                   <div className="grid gap-3">
                     <button
-                      onClick={async () => {
-                        const savedReceipt = await confirmPaymentAndSave();
-                        if (!savedReceipt) return;
-                        printReceipt(savedReceipt);
-                        setShowPrintModal(false);
-                        setPatientId("");
-                        setPatientName("");
-                        setPatientPhoneInput("");
-                        setPatientEmailInput("");
-                        setPatientDobInput("");
-                        setPatientSexInput("");
-                        setPatientNationalityInput("");
-                        setPatientFileNumberInput("");
-                        setNationalitySearch("");
-                        setShowNationalitySuggestions(false);
-                        setPatientEmiratesIdInput("");
-                        setPatientPassportInput("");
-                        setPatientMrnInput("");
-                        setSelectedPatientInfo(null);
-                        setTransactionPatientId("");
-                        setDoctorId("");
-                        setSelectedPaymentMethod("");
-                        setTabbyReferenceInput("");
-                        setTamaraReferenceInput("");
-                        setPayTodayInput("");
-                        setNotes("");
-                        setSelectedServices([]);
-                        setDiscountInput("");
-                        setDiscountType("AED");
-                        setFilteredPatients([]);
-                        setShowPatientSuggestions(false);
-                        router.refresh();
-                      }}
+                      onClick={() => completeTransaction(true)}
                       className="inline-flex items-center justify-center rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400"
                       disabled={isSavingReceipt}
                     >
                       {isSavingReceipt ? "Saving..." : "Print Receipt"}
+                    </button>
+                    <button
+                      onClick={() => completeTransaction(false)}
+                      className="inline-flex items-center justify-center rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
+                      disabled={isSavingReceipt}
+                    >
+                      {isSavingReceipt ? "Saving..." : "Proceed without Printing"}
                     </button>
                     <button
                       onClick={() => {

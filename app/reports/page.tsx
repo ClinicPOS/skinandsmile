@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import * as XLSX from "xlsx-js-style";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
+import { calculateAge } from "../../lib/utils";
 import type { Clinic, Patient, Receptionist, Service, BalancePayment } from "../../lib/types";
 
 const BOSS_PIN = "doctorsafarreport";
@@ -12,7 +14,9 @@ function getPaymentCategory(method: string): string {
   const m = (method || "").toLowerCase();
   if (m.startsWith("cash")) return "Cash";
   if (m.startsWith("split")) return "Split Payment";
+  if (m.includes("tabby card")) return "Tabby Card";
   if (m.includes("tabby")) return "Tabby";
+  if (m.includes("tamara card")) return "Tamara Card";
   if (m.includes("tamara")) return "Tamara";
   if (m.includes("visa")) return "Visa";
   if (m.includes("mastercard")) return "Mastercard";
@@ -68,6 +72,20 @@ function receiptPaidAmount(r: Receipt): number {
   return r.amount_paid != null ? Number(r.amount_paid) : Number(r.total || 0);
 }
 
+// PostgREST caps responses at 1000 rows; page through so exports stay complete
+// as the patient database grows into the thousands.
+async function fetchAllRows(table: string, select: string): Promise<any[]> {
+  const pageSize = 1000;
+  const rows: any[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase.from(table).select(select).range(from, from + pageSize - 1);
+    if (error) throw new Error(`Failed loading ${table}: ${error.message}`);
+    rows.push(...(data || []));
+    if (!data || data.length < pageSize) break;
+  }
+  return rows;
+}
+
 type ReceiptItem = {
   id: string;
   receipt_id: string;
@@ -118,6 +136,7 @@ export default function ReportsPage() {
   const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
 
   const [isLoading, setIsLoading] = useState(false);
+  const [isExportingPatients, setIsExportingPatients] = useState(false);
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [calendarDate, setCalendarDate] = useState(new Date());
   const [selectedClinic, setSelectedClinic] = useState<string | null>(null); // null = All Clinics
@@ -181,7 +200,7 @@ export default function ReportsPage() {
 
     const [receiptsRes, itemsRes, servicesRes, balPayRes] = await Promise.allSettled([
       supabase.from("receipts").select("*").gte("created_at", from).lt("created_at", to),
-      supabase.from("receipt_items").select("*, services(name)").gte("created_at", from).lt("created_at", to),
+      supabase.from("receipt_items").select("*").gte("created_at", from).lt("created_at", to),
       supabase.from("services").select("*"),
       supabase.from("balance_payments").select("*").gte("created_at", from).lt("created_at", to),
     ]);
@@ -210,7 +229,7 @@ export default function ReportsPage() {
     setIsLoading(true);
     const [receiptsRes, itemsRes, servicesRes, balPayRes] = await Promise.allSettled([
       supabase.from("receipts").select("*"),
-      supabase.from("receipt_items").select("*, services(name)"),
+      supabase.from("receipt_items").select("*"),
       supabase.from("services").select("*"),
       supabase.from("balance_payments").select("*"),
     ]);
@@ -233,6 +252,231 @@ export default function ReportsPage() {
       setBalancePayments([]);
     }
     setIsLoading(false);
+  }
+
+  async function downloadPatientsMasterList() {
+    if (isExportingPatients) return;
+    setIsExportingPatients(true);
+    try {
+      // Bulk fetches only — everything else is joined in memory below.
+      // (receipt_items ⇢ services is joined manually: the live DB has no FK
+      // between them, so PostgREST can't embed services(name).)
+      const [allPatients, allReceipts, allItems, allServices, allBalances, allBalancePayments] = await Promise.all([
+        fetchAllRows("patients", "id, patient_number, mrn, name, date_of_birth, sex, nationality, phone, email, emirates_id, passport_number"),
+        fetchAllRows("receipts", "id, patient_id, receptionist_id, created_at"),
+        fetchAllRows("receipt_items", "receipt_id, service_id"),
+        fetchAllRows("services", "id, name"),
+        fetchAllRows("outstanding_balances", "id, patient_id, clinic_id, original_amount"),
+        fetchAllRows("balance_payments", "outstanding_balance_id, amount"),
+      ]);
+
+      const serviceNameById = new Map(allServices.map((s) => [s.id, String(s.name || "").trim()]));
+
+      const clinicNameById = new Map(clinics.map((c) => [c.id, c.name]));
+      const clinicByReceptionist = new Map(receptionists.map((r) => [r.id, r.clinic_id || ""]));
+
+      // Boss exports everything; clinic staff export only their clinic's
+      // patients (visited it, or owe it money) per the existing role system.
+      const isClinicScoped = role === "receptionist" && !!activeClinicId;
+      const scopedReceipts = isClinicScoped
+        ? allReceipts.filter((r) => clinicByReceptionist.get(r.receptionist_id) === activeClinicId)
+        : allReceipts;
+      const scopedBalances = isClinicScoped
+        ? allBalances.filter((b) => b.clinic_id === activeClinicId)
+        : allBalances;
+
+      const visitAgg = new Map<string, { count: number; first: string; last: string; clinicIds: Set<string> }>();
+      const patientByReceiptId = new Map<string, string>();
+      for (const r of scopedReceipts) {
+        if (!r.patient_id) continue;
+        patientByReceiptId.set(r.id, r.patient_id);
+        const agg = visitAgg.get(r.patient_id) || { count: 0, first: r.created_at, last: r.created_at, clinicIds: new Set<string>() };
+        agg.count += 1;
+        if (r.created_at < agg.first) agg.first = r.created_at;
+        if (r.created_at > agg.last) agg.last = r.created_at;
+        const clinicId = clinicByReceptionist.get(r.receptionist_id);
+        if (clinicId) agg.clinicIds.add(clinicId);
+        visitAgg.set(r.patient_id, agg);
+      }
+
+      // patientByReceiptId only contains scoped receipts, so items outside the
+      // scope fall out here naturally.
+      const servicesByPatient = new Map<string, Set<string>>();
+      for (const item of allItems) {
+        const patientId = patientByReceiptId.get(item.receipt_id);
+        if (!patientId) continue;
+        const serviceName = serviceNameById.get(item.service_id) || "";
+        if (!serviceName) continue;
+        const set = servicesByPatient.get(patientId) || new Set<string>();
+        set.add(serviceName);
+        servicesByPatient.set(patientId, set);
+      }
+
+      const paidByBalance = new Map<string, number>();
+      for (const p of allBalancePayments) {
+        paidByBalance.set(
+          p.outstanding_balance_id,
+          (paidByBalance.get(p.outstanding_balance_id) || 0) + Number(p.amount || 0)
+        );
+      }
+      const outstandingByPatient = new Map<string, number>();
+      for (const b of scopedBalances) {
+        const remaining = Math.max(0, Number(b.original_amount || 0) - (paidByBalance.get(b.id) || 0));
+        if (remaining <= 0.0049) continue;
+        outstandingByPatient.set(b.patient_id, (outstandingByPatient.get(b.patient_id) || 0) + remaining);
+      }
+
+      const scopedPatients = (
+        isClinicScoped
+          ? allPatients.filter((p) => visitAgg.has(p.id) || outstandingByPatient.has(p.id))
+          : allPatients
+      ).sort((a, b) => {
+        const fileA = a.patient_number != null ? Number(a.patient_number) : Number.POSITIVE_INFINITY;
+        const fileB = b.patient_number != null ? Number(b.patient_number) : Number.POSITIVE_INFINITY;
+        if (fileA !== fileB) return fileA - fileB;
+        return String(a.name || "").localeCompare(String(b.name || ""));
+      });
+
+      const fmtDate = (iso: string | null | undefined) =>
+        iso ? new Date(iso).toLocaleDateString("en-GB") : "";
+
+      const headers = [
+        "File No.",
+        "MRN",
+        "Patient Name",
+        "Age",
+        "Sex",
+        "Nationality",
+        "Phone Number",
+        "Email",
+        "Emirates ID Number",
+        "Passport Number",
+        "Outstanding Balance",
+        "Total Visits",
+        "Clinics Visited",
+        "Treatments / Services Received",
+        "First Visit Date",
+        "Last Visit Date",
+      ];
+
+      const dataRows = scopedPatients.map((p) => {
+        const agg = visitAgg.get(p.id);
+        const clinicNames = agg
+          ? [...agg.clinicIds].map((id) => clinicNameById.get(id) || "Unknown").sort().join(", ")
+          : "";
+        const treatments = [...(servicesByPatient.get(p.id) || [])].sort().join(", ");
+        const outstanding = outstandingByPatient.get(p.id) || 0;
+        const age = calculateAge(p.date_of_birth);
+        return [
+          p.patient_number != null ? String(p.patient_number).padStart(5, "0") : "",
+          p.mrn || "",
+          p.name || "",
+          age != null ? age : "",
+          p.sex || "",
+          p.nationality || "",
+          p.phone || "",
+          p.email || "",
+          p.emirates_id || "",
+          p.passport_number || "",
+          `AED ${outstanding.toFixed(2)}`,
+          agg?.count ?? 0,
+          clinicNames,
+          treatments,
+          fmtDate(agg?.first),
+          fmtDate(agg?.last),
+        ] as (string | number)[];
+      });
+
+      const clinicGroup = role === "boss" ? "All Clinics" : activeClinicName;
+      const generatedBy = role === "boss" ? "Administrator" : `${activeClinicName} Reception`;
+      const exportDate = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
+
+      const HEADER_ROW = 7; // 1-based sheet row of the column headers
+      const blankTail = new Array(headers.length - 1).fill("");
+      const aoa: (string | number)[][] = [
+        ["Patient Master List", ...blankTail],
+        [],
+        ["Clinic Group", clinicGroup],
+        ["Export Date", exportDate],
+        ["Generated By", generatedBy],
+        ["Total Patients", scopedPatients.length],
+        headers,
+        ...dataRows,
+      ];
+
+      const sheet = XLSX.utils.aoa_to_sheet(aoa);
+      sheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
+      sheet["!freeze"] = { xSplit: 0, ySplit: HEADER_ROW };
+      sheet["!autofilter"] = { ref: `A${HEADER_ROW}:P${HEADER_ROW + dataRows.length}` };
+      sheet["!cols"] = headers.map((header, i) => {
+        let max = header.length;
+        for (const row of dataRows) {
+          const len = String(row[i] ?? "").length;
+          if (len > max) max = len;
+        }
+        return { wch: Math.min(60, Math.max(10, max + 2)) };
+      });
+
+      const setStyle = (r: number, c: number, style: Record<string, unknown>) => {
+        const ref = XLSX.utils.encode_cell({ r, c });
+        const cell = (sheet as any)[ref];
+        if (!cell) return;
+        cell.s = { ...(cell.s || {}), ...style };
+      };
+      const thinBorder = {
+        top: { style: "thin", color: { rgb: "D9D9D9" } },
+        bottom: { style: "thin", color: { rgb: "D9D9D9" } },
+        left: { style: "thin", color: { rgb: "D9D9D9" } },
+        right: { style: "thin", color: { rgb: "D9D9D9" } },
+      };
+
+      for (let c = 0; c < headers.length; c++) {
+        setStyle(0, c, {
+          fill: { fgColor: { rgb: "0B132B" } },
+          font: { name: "Calibri", sz: 18, bold: true, color: { rgb: "FFFFFF" } },
+          alignment: { horizontal: "center", vertical: "center" },
+        });
+      }
+      for (let r = 2; r <= 5; r++) {
+        setStyle(r, 0, { font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "1F2937" } } });
+        setStyle(r, 1, { font: { name: "Calibri", sz: 11, color: { rgb: "1F2937" } } });
+      }
+      for (let c = 0; c < headers.length; c++) {
+        setStyle(HEADER_ROW - 1, c, {
+          fill: { fgColor: { rgb: "1F4E78" } },
+          font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FFFFFF" } },
+          alignment: { horizontal: "center", vertical: "center", wrapText: true },
+          border: thinBorder,
+        });
+      }
+      const rightAlignedCols = new Set([10, 11]); // Outstanding Balance, Total Visits
+      for (let i = 0; i < dataRows.length; i++) {
+        const r = HEADER_ROW + i;
+        const isEven = i % 2 === 1;
+        for (let c = 0; c < headers.length; c++) {
+          setStyle(r, c, {
+            border: thinBorder,
+            font: { name: "Calibri", sz: 10, color: { rgb: "111827" } },
+            alignment: {
+              vertical: "top",
+              horizontal: rightAlignedCols.has(c) ? "right" : "left",
+              wrapText: c === 13, // treatments column
+            },
+            fill: { fgColor: { rgb: isEven ? "F8FAFC" : "FFFFFF" } },
+          });
+        }
+      }
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, sheet, "Patient Master List");
+      const fileDate = new Date().toLocaleDateString("en-CA");
+      XLSX.writeFile(workbook, `Patients_Master_List_${fileDate}.xlsx`);
+    } catch (error) {
+      console.error("Patient export failed", error);
+      alert(error instanceof Error ? error.message : "Could not generate the patient list. Please try again.");
+    } finally {
+      setIsExportingPatients(false);
+    }
   }
 
   function handleUnlock() {
@@ -816,6 +1060,13 @@ export default function ReportsPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={downloadPatientsMasterList}
+              disabled={isExportingPatients}
+              className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white transition hover:bg-teal-600 disabled:opacity-60"
+            >
+              {isExportingPatients ? "Preparing…" : "Download Patients"}
+            </button>
             {role === "boss" && (
               <button
                 onClick={() => { setRole(null); setPinInput(""); }}

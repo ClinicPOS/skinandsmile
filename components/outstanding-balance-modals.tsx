@@ -5,7 +5,7 @@ import { supabase } from "../lib/supabase";
 import type { Clinic, Patient, OutstandingBalance, BalancePayment } from "../lib/types";
 import { rollupBalance } from "../lib/outstanding-balances";
 
-const PAYMENT_METHODS = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara"];
+const PAYMENT_METHODS = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card"];
 
 function Overlay({
   isOpen,
