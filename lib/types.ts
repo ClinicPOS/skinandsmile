@@ -22,6 +22,7 @@ export type Patient = {
   emirates_id?: string | null;
   passport_number?: string | null;
   mrn?: string | null;
+  address?: string | null;
 };
 
 export type Doctor = {
@@ -91,5 +92,20 @@ export type BalancePayment = {
   receptionist_id: string;
   register_session_id: string | null;
   notes: string | null;
+  created_at: string;
+};
+
+export type PatientCredit = {
+  id: string;
+  patient_id: string;
+  clinic_id: string;
+  amount: number; // positive = deposit received, negative = credit applied
+  payment_method: string | null;
+  reason: string | null;
+  expected_treatment_date: string | null;
+  notes: string | null;
+  receipt_id: string | null;
+  receptionist_id: string | null;
+  register_session_id: string | null;
   created_at: string;
 };

@@ -5,6 +5,7 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { Patient } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
+import { nextAutoFileNumber } from "../../lib/patient-file-number";
 
 export default function PatientsPage() {
   const [name, setName] = useState("");
@@ -41,32 +42,39 @@ export default function PatientsPage() {
       return;
     }
 
-    const { data: maxPatient } = await supabase
-      .from("patients")
-      .select("patient_number")
-      .not("patient_number", "is", null)
-      .order("patient_number", { ascending: false })
-      .limit(1);
-    const nextNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
+    // Auto-assigned File Numbers start at 20,000 (old-system files stop around
+    // 18,000). Retry on a duplicate so simultaneous saves get distinct numbers.
+    let saveError: unknown = null;
+    let saved = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const nextNumber = await nextAutoFileNumber();
 
-    const { error } = await supabase.from("patients").insert([
-      {
-        name: name.trim(),
-        phone: phone.trim() || null,
-        email: email.trim() || null,
-        notes: notes.trim() || null,
-        date_of_birth: dateOfBirth || null,
-        sex: sex || null,
-        nationality: nationality.trim() || null,
-        emirates_id: emiratesId.trim() || null,
-        passport_number: passportNumber.trim() || null,
-        patient_number: nextNumber,
-      },
-    ]);
+      const { error } = await supabase.from("patients").insert([
+        {
+          name: name.trim(),
+          phone: phone.trim() || null,
+          email: email.trim() || null,
+          notes: notes.trim() || null,
+          date_of_birth: dateOfBirth || null,
+          sex: sex || null,
+          nationality: nationality.trim() || null,
+          emirates_id: emiratesId.trim() || null,
+          passport_number: passportNumber.trim() || null,
+          patient_number: nextNumber,
+        },
+      ]);
 
-    if (error) {
+      if (!error) {
+        saved = true;
+        break;
+      }
+      saveError = error;
+      if ((error as { code?: string }).code !== "23505") break;
+    }
+
+    if (!saved) {
       alert("Error saving patient");
-      console.error(error);
+      console.error(saveError);
       return;
     }
 

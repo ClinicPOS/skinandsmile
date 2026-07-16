@@ -5,6 +5,7 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { COUNTRIES } from "../../lib/countries";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
+import { nextAutoFileNumber } from "../../lib/patient-file-number";
 import type { Clinic, Patient, OutstandingBalance } from "../../lib/types";
 
 export default function AddPatientPage() {
@@ -57,6 +58,25 @@ export default function AddPatientPage() {
       return;
     }
 
+    // File numbers are official physical file labels — verify a manual entry
+    // is unique before inserting so the receptionist gets a clear message.
+    if (fileNo.trim()) {
+      const manualNumber = parseInt(fileNo.trim(), 10);
+      if (!Number.isFinite(manualNumber) || manualNumber <= 0) {
+        alert("File No. must be a positive number.");
+        return;
+      }
+      const { data: fileNoDupes } = await supabase
+        .from("patients")
+        .select("id")
+        .eq("patient_number", manualNumber)
+        .limit(1);
+      if ((fileNoDupes || []).length > 0) {
+        alert("This File Number already exists. Please use another File Number.");
+        return;
+      }
+    }
+
     setSaving(true);
     try {
       let saved: Patient | null = null;
@@ -71,13 +91,9 @@ export default function AddPatientPage() {
             return;
           }
         } else {
-          const { data: maxPatient } = await supabase
-            .from("patients")
-            .select("patient_number")
-            .not("patient_number", "is", null)
-            .order("patient_number", { ascending: false })
-            .limit(1);
-          patientNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
+          // Auto-assigned numbers start at 20,000 (old-system files stop
+          // around 18,000). On a duplicate retry this fetches a fresh number.
+          patientNumber = await nextAutoFileNumber();
         }
 
         const chosenNationality = nationality || nationalitySearch.trim() || null;
@@ -117,7 +133,7 @@ export default function AddPatientPage() {
         console.error("Error keys:", lastError ? Object.keys(lastError) : "no error object");
         console.error("Error JSON:", JSON.stringify(lastError, null, 2));
         if (lastError?.code === "23505" && fileNo.trim()) {
-          alert(`File No. ${fileNo.trim()} is already taken. Please pick another or leave it blank to auto-assign.`);
+          alert("This File Number already exists. Please use another File Number.");
         } else {
           const detail =
             lastError?.message ||

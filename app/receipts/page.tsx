@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx-js-style";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Clinic, OutstandingBalance, BalancePayment } from "../../lib/types";
+import { Clinic, OutstandingBalance, BalancePayment, PatientCredit } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal, TreatmentHistoryModal } from "../../components/pos-modals";
 import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
@@ -13,6 +13,7 @@ import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-bal
 import { printPaymentReceipt } from "../../lib/print-payment-receipt";
 import { COUNTRIES } from "../../lib/countries";
 import { getAestheticServiceCategory } from "../../lib/service-categories";
+import { nextAutoFileNumber } from "../../lib/patient-file-number";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Split Payment"];
 
@@ -308,6 +309,7 @@ export default function ReceiptsPage() {
   const [showTreatmentHistoryModal, setShowTreatmentHistoryModal] = useState(false);
   const [outstandingBalances, setOutstandingBalances] = useState<OutstandingBalance[]>([]);
   const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
+  const [patientCredits, setPatientCredits] = useState<PatientCredit[]>([]);
   const [collectBalanceContext, setCollectBalanceContext] = useState<{
     balance: OutstandingBalance;
     payments: BalancePayment[];
@@ -357,7 +359,7 @@ export default function ReceiptsPage() {
   }, [receptionistId, clinics]);
 
   async function loadData() {
-    const [patientResult, doctorResult, receptionistResult, serviceResult, clinicResult, balancesResult, balancePaymentsResult] = await Promise.allSettled([
+    const [patientResult, doctorResult, receptionistResult, serviceResult, clinicResult, balancesResult, balancePaymentsResult, patientCreditsResult] = await Promise.allSettled([
       supabase.from("patients").select("*"),
       supabase.from("doctors").select("*"),
       supabase.from("receptionist").select("*"),
@@ -365,6 +367,7 @@ export default function ReceiptsPage() {
       supabase.from("clinics").select("*"),
       supabase.from("outstanding_balances").select("*"),
       supabase.from("balance_payments").select("*"),
+      supabase.from("patient_credits").select("*"),
     ]);
 
     if (patientResult.status === "fulfilled") {
@@ -393,6 +396,11 @@ export default function ReceiptsPage() {
 
     if (balancePaymentsResult.status === "fulfilled" && !balancePaymentsResult.value.error) {
       setBalancePayments((balancePaymentsResult.value.data || []) as BalancePayment[]);
+    }
+
+    // Tolerates databases that haven't run supabase-patient-credits-migration.sql yet.
+    if (patientCreditsResult.status === "fulfilled" && !patientCreditsResult.value.error) {
+      setPatientCredits((patientCreditsResult.value.data || []) as PatientCredit[]);
     }
   }
 
@@ -803,7 +811,7 @@ export default function ReceiptsPage() {
       return 0;
     }
 
-    const [receiptsRes, balancePaymentsRes] = await Promise.all([
+    const [receiptsRes, balancePaymentsRes, depositsRes] = await Promise.all([
       supabase
         .from("receipts")
         .select("total, amount_paid")
@@ -816,6 +824,13 @@ export default function ReceiptsPage() {
         .eq("receptionist_id", activeReceptionistId)
         .ilike("payment_method", "Cash%")
         .gte("created_at", registerOpenedAt),
+      supabase
+        .from("patient_credits")
+        .select("amount")
+        .eq("receptionist_id", activeReceptionistId)
+        .gt("amount", 0)
+        .ilike("payment_method", "Cash%")
+        .gte("created_at", registerOpenedAt),
     ]);
 
     if (receiptsRes.error) {
@@ -824,6 +839,9 @@ export default function ReceiptsPage() {
     if (balancePaymentsRes.error && balancePaymentsRes.error.code !== "42P01") {
       console.warn("Failed loading balance payments for shift", balancePaymentsRes.error);
     }
+    if (depositsRes.error && depositsRes.error.code !== "42P01") {
+      console.warn("Failed loading patient deposits for shift", depositsRes.error);
+    }
 
     // amount_paid is what actually entered the drawer; NULL means paid in full.
     const receiptsTotal = (receiptsRes.data || []).reduce(
@@ -831,7 +849,9 @@ export default function ReceiptsPage() {
       0
     );
     const balancePaymentsTotal = (balancePaymentsRes.data || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
-    return receiptsTotal + balancePaymentsTotal;
+    // Cash deposits (advance payments) also enter the drawer.
+    const depositsTotal = (depositsRes.data || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    return receiptsTotal + balancePaymentsTotal + depositsTotal;
   }
 
   async function openCloseRegisterModal() {
@@ -1014,6 +1034,22 @@ export default function ReceiptsPage() {
       balanceCollectionsTotal = (balancePaymentsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
     }
 
+    // Deposits (advance payments) received today — also separate from
+    // treatment revenue; they are money held on patients' accounts.
+    let depositsReceivedTotal = 0;
+    const { data: depositsData, error: depositsError } = await supabase
+      .from("patient_credits")
+      .select("amount")
+      .in("receptionist_id", receptionistIds)
+      .gt("amount", 0)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso);
+    if (depositsError) {
+      console.warn("Failed loading patient deposits for report", depositsError);
+    } else {
+      depositsReceivedTotal = (depositsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
+    }
+
     const detailHeaders = [
       "Time",
       "Receipt Number",
@@ -1132,7 +1168,7 @@ export default function ReceiptsPage() {
       ]);
     });
 
-    const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tamaraTotal + tamaraCardTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal;
+    const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tamaraTotal + tamaraCardTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal + depositsReceivedTotal;
     const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
 
     const workbook = XLSX.utils.book_new();
@@ -1183,6 +1219,7 @@ export default function ReceiptsPage() {
       ["Collected Today (Treatments)", collectedTodayTotal],
       ["Outstanding Created Today", outstandingCreatedTotal],
       ["Balance Collections (Old Balances)", balanceCollectionsTotal],
+      ["Deposits Received (Advance Payments)", depositsReceivedTotal],
       ["", ""],
       ["Payment Summary", "Amount (AED)"],
       ["Cash", cashTotal],
@@ -1194,6 +1231,7 @@ export default function ReceiptsPage() {
       ["Insurance", insuranceTotal],
       ["Bank Transfer", bankTransferTotal],
       ["Balance Collections", balanceCollectionsTotal],
+      ["Deposits Received", depositsReceivedTotal],
       ["Total Collected", totalCollected],
     ];
 
@@ -1203,7 +1241,7 @@ export default function ReceiptsPage() {
       { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
       { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } },
       { s: { r: 8, c: 0 }, e: { r: 8, c: 1 } },
-      { s: { r: 20, c: 0 }, e: { r: 20, c: 1 } },
+      { s: { r: 21, c: 0 }, e: { r: 21, c: 1 } },
     ];
 
     const styleSummaryCell = (row: number, col: number, style: Record<string, unknown>) => {
@@ -1223,7 +1261,7 @@ export default function ReceiptsPage() {
       }
     }
 
-    [3, 9, 21].forEach((row) => {
+    [3, 9, 22].forEach((row) => {
       styleSummaryCell(row, 1, {
         fill: { fgColor: { rgb: "1F4E78" } },
         font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
@@ -1244,29 +1282,29 @@ export default function ReceiptsPage() {
       fill: { fgColor: { rgb: "0B132B" } },
     });
 
-    for (let row = 12; row <= 19; row++) {
+    for (let row = 12; row <= 20; row++) {
       styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
     }
-    for (let row = 22; row <= 31; row++) {
+    for (let row = 23; row <= 33; row++) {
       styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
     }
 
-    styleSummaryCell(31, 1, {
+    styleSummaryCell(33, 1, {
       fill: { fgColor: { rgb: "FFF2CC" } },
       font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
     });
-    styleSummaryCell(31, 2, {
+    styleSummaryCell(33, 2, {
       fill: { fgColor: { rgb: "FFF2CC" } },
       font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
     });
 
-    // Formula for Total Collected (Cash..Balance Collections) with a cached
+    // Formula for Total Collected (Cash..Deposits Received) with a cached
     // value so viewers that don't recalculate formulas still show the number.
-    (summarySheet as any)["B31"] = {
+    (summarySheet as any)["B33"] = {
       t: "n",
-      f: "SUM(B22:B30)",
+      f: "SUM(B23:B32)",
       v: Math.round(totalCollected * 100) / 100,
-      s: (summarySheet as any)["B31"]?.s,
+      s: (summarySheet as any)["B33"]?.s,
     };
 
     const detailsData: (string | number)[][] = [detailHeaders, ...detailRows, new Array(detailHeaders.length).fill("") as string[]];
@@ -1394,6 +1432,26 @@ export default function ReceiptsPage() {
 
     let finalPatientId = patientId;
 
+    // File numbers are official physical file labels — verify a manual entry
+    // is unique before writing (covers both the update and create paths below).
+    if (patientFileNumberInput.trim()) {
+      const fileNo = parseInt(patientFileNumberInput.trim(), 10);
+      if (!Number.isFinite(fileNo) || fileNo <= 0) {
+        alert("File No. must be a positive number.");
+        return;
+      }
+      const { data: fileNoDupes } = await supabase
+        .from("patients")
+        .select("id")
+        .eq("patient_number", fileNo)
+        .limit(1);
+      const takenByOther = (fileNoDupes || []).some((row) => row.id !== patientId);
+      if (takenByOther) {
+        alert("This File Number already exists. Please use another File Number.");
+        return;
+      }
+    }
+
     // Update existing patient fields if a patient is already selected
     if (patientId) {
       await supabase
@@ -1422,13 +1480,9 @@ export default function ReceiptsPage() {
         if (patientFileNumberInput.trim()) {
           patientNumber = parseInt(patientFileNumberInput.trim(), 10);
         } else {
-          const { data: maxPatient } = await supabase
-            .from("patients")
-            .select("patient_number")
-            .not("patient_number", "is", null)
-            .order("patient_number", { ascending: false })
-            .limit(1);
-          patientNumber = ((maxPatient?.[0]?.patient_number as number) || 0) + 1;
+          // Auto-assigned numbers start at 20,000 (old-system files stop
+          // around 18,000). On a duplicate retry this fetches a fresh number.
+          patientNumber = await nextAutoFileNumber();
         }
 
         const { data, error } = await supabase
@@ -1462,7 +1516,11 @@ export default function ReceiptsPage() {
 
       if (!newPatient) {
         console.error("Create patient error", lastError);
-        alert(`Error creating new patient: ${lastError?.message || "unknown error"}`);
+        if ((lastError as any)?.code === "23505" && patientFileNumberInput.trim()) {
+          alert("This File Number already exists. Please use another File Number.");
+        } else {
+          alert(`Error creating new patient: ${lastError?.message || "unknown error"}`);
+        }
         return;
       }
 
@@ -3780,7 +3838,19 @@ export default function ReceiptsPage() {
         clinicId={activeClinic?.id ?? null}
         outstandingBalances={outstandingBalances}
         balancePayments={balancePayments}
+        patientCredits={patientCredits}
         clinicsList={clinics}
+        clinic={activeClinic ?? null}
+        receptionistId={receptionistId || loginReceptionistId || null}
+        receptionistName={
+          receptionists.find((p: any) => p.id === (receptionistId || loginReceptionistId))?.name || "Reception"
+        }
+        registerSessionId={registerSessionId || null}
+        onCreditSaved={(credit) => setPatientCredits((prev) => [credit, ...prev])}
+        onPatientUpdated={(updated) => {
+          setPatients((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
+          if (patientId === updated.id) selectPatient(updated);
+        }}
         onCollectBalance={({ balance, payments, patient }) => {
           if (!receptionistId) { alert("Open the register first."); return; }
           setShowSearchPatientModal(false);

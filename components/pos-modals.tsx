@@ -3,8 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { receptionistIdsForClinic } from "../lib/clinic-scope";
-import type { OutstandingBalance, BalancePayment } from "../lib/types";
+import type { OutstandingBalance, BalancePayment, PatientCredit, Clinic as ClinicRecord, Patient as PatientRecord } from "../lib/types";
 import { rollupBalance, formatBalanceReference } from "../lib/outstanding-balances";
+import { availableCredit } from "../lib/patient-credits";
+import { ReceiveDepositModal } from "./patient-credit-modals";
+import { EditPatientModal } from "./edit-patient-modal";
 
 type Patient = {
   id: string;
@@ -108,8 +111,15 @@ export function SearchPatientModal({
   clinicId,
   outstandingBalances = [],
   balancePayments = [],
+  patientCredits = [],
   clinicsList = [],
+  clinic = null,
+  receptionistId = null,
+  receptionistName = "Reception",
+  registerSessionId = null,
   onCollectBalance,
+  onCreditSaved,
+  onPatientUpdated,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -118,12 +128,21 @@ export function SearchPatientModal({
   clinicId?: string | null;
   outstandingBalances?: OutstandingBalance[];
   balancePayments?: BalancePayment[];
+  patientCredits?: PatientCredit[];
   clinicsList?: Clinic[];
+  clinic?: ClinicRecord | null;
+  receptionistId?: string | null;
+  receptionistName?: string;
+  registerSessionId?: string | null;
   onCollectBalance?: (payload: { balance: OutstandingBalance; payments: BalancePayment[]; patient: FullPatient }) => void;
+  onCreditSaved?: (credit: PatientCredit) => void;
+  onPatientUpdated?: (patient: FullPatient) => void;
 }) {
   const [view, setView] = useState<"search" | "profile">("search");
   const [query, setQuery] = useState("");
   const [selectedPatient, setSelectedPatient] = useState<FullPatient | null>(null);
+  const [showDepositModal, setShowDepositModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
   const [notes, setNotes] = useState<PatientNote[]>([]);
   const [doctors, setDoctors] = useState<LookupItem[]>([]);
   const [receptionists, setReceptionists] = useState<LookupItem[]>([]);
@@ -145,6 +164,8 @@ export function SearchPatientModal({
       setExpandedNoteIds(new Set());
       setShowAddNote(false);
       setNewNoteText("");
+      setShowDepositModal(false);
+      setShowEditModal(false);
     }
   }, [isOpen]);
 
@@ -192,6 +213,27 @@ export function SearchPatientModal({
       .filter((b) => b.patient_id === selectedPatient.id)
       .sort((a, b) => (a.original_date < b.original_date ? 1 : -1));
   }, [outstandingBalances, selectedPatient]);
+
+  // Total still owed by the selected patient across all clinics — shown in the
+  // profile header alongside available credit.
+  const selectedPatientOutstandingTotal = useMemo(() => {
+    return selectedPatientBalances.reduce(
+      (sum, b) => sum + rollupBalance(b, paymentsByBalanceId.get(b.id) || []).remaining,
+      0
+    );
+  }, [selectedPatientBalances, paymentsByBalanceId]);
+
+  const selectedPatientCredits = useMemo(() => {
+    if (!selectedPatient) return [];
+    return patientCredits
+      .filter((c) => c.patient_id === selectedPatient.id)
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  }, [patientCredits, selectedPatient]);
+
+  const selectedPatientAvailableCredit = useMemo(
+    () => availableCredit(selectedPatientCredits),
+    [selectedPatientCredits]
+  );
 
   const clinicNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -422,11 +464,47 @@ export function SearchPatientModal({
 
               {/* Demographics card */}
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <div className="mb-3">
-                  <h3 className="text-lg font-bold text-slate-900">{selectedPatient.name}</h3>
-                  {selectedPatient.patient_number != null && (
-                    <span className="text-xs font-semibold text-teal-600">Patient #{selectedPatient.patient_number}</span>
-                  )}
+                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">{selectedPatient.name}</h3>
+                    <div className="mt-1 space-y-0.5 text-sm">
+                      <p className="font-semibold text-teal-700">
+                        File No.: {selectedPatient.patient_number != null
+                          ? `#${String(selectedPatient.patient_number).padStart(5, "0")}`
+                          : "Not assigned"}
+                      </p>
+                      {selectedPatient.mrn && <p className="text-slate-600">MRN: {selectedPatient.mrn}</p>}
+                      {selectedPatient.phone && <p className="text-slate-600">Phone: {selectedPatient.phone}</p>}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      onClick={() => {
+                        if (!receptionistId) { alert("Open the register first."); return; }
+                        if (!clinic?.id) { alert("Deposits need an active clinic. Open the register for a clinic first."); return; }
+                        setShowDepositModal(true);
+                      }}
+                      className="rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500"
+                    >
+                      Receive Deposit
+                    </button>
+                    <button
+                      onClick={() => setShowEditModal(true)}
+                      className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+                    >
+                      Edit
+                    </button>
+                  </div>
+                </div>
+                <div className="mb-3 grid grid-cols-2 gap-2">
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">Outstanding Balance</p>
+                    <p className="text-base font-bold text-amber-800">AED {selectedPatientOutstandingTotal.toFixed(2)}</p>
+                  </div>
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Available Credit</p>
+                    <p className="text-base font-bold text-emerald-800">AED {selectedPatientAvailableCredit.toFixed(2)}</p>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
                   {calcAge(selectedPatient.date_of_birth) !== null && (
@@ -445,12 +523,6 @@ export function SearchPatientModal({
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Nationality</p>
                       <p className="text-slate-800">{selectedPatient.nationality}</p>
-                    </div>
-                  )}
-                  {selectedPatient.phone && (
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Mobile</p>
-                      <p className="text-slate-800">{selectedPatient.phone}</p>
                     </div>
                   )}
                   {selectedPatient.email && (
@@ -475,12 +547,6 @@ export function SearchPatientModal({
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Passport No.</p>
                       <p className="text-slate-800">{selectedPatient.passport_number}</p>
-                    </div>
-                  )}
-                  {selectedPatient.mrn && (
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">MRN</p>
-                      <p className="text-slate-800">{selectedPatient.mrn}</p>
                     </div>
                   )}
                   <div>
@@ -559,6 +625,53 @@ export function SearchPatientModal({
                         </div>
                       );
                     })}
+                  </div>
+                </div>
+              )}
+
+              {selectedPatientCredits.length > 0 && (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Patient Credit / Deposits</p>
+                    <p className="text-sm font-bold text-emerald-800">
+                      Available: AED {selectedPatientAvailableCredit.toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    {selectedPatientCredits.map((credit) => (
+                      <div key={credit.id} className="rounded-xl border border-emerald-200 bg-white p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-slate-500">
+                              {clinicNameById.get(credit.clinic_id) || "Clinic"} · {new Date(credit.created_at).toLocaleDateString("en-GB")}
+                            </p>
+                            <p className="text-sm font-semibold text-slate-800">
+                              {Number(credit.amount) > 0
+                                ? credit.reason || "Deposit"
+                                : "Applied to treatment"}
+                            </p>
+                            {credit.expected_treatment_date && (
+                              <p className="mt-0.5 text-xs text-slate-500">
+                                Expected treatment: {new Date(credit.expected_treatment_date).toLocaleDateString("en-GB")}
+                              </p>
+                            )}
+                            {credit.notes && <p className="mt-0.5 text-xs text-slate-500">{credit.notes}</p>}
+                          </div>
+                          <div className="text-right">
+                            <p className={
+                              Number(credit.amount) > 0
+                                ? "text-sm font-bold text-emerald-700"
+                                : "text-sm font-bold text-slate-600"
+                            }>
+                              {Number(credit.amount) > 0 ? "+" : "−"} AED {Math.abs(Number(credit.amount)).toFixed(2)}
+                            </p>
+                            {credit.payment_method && (
+                              <p className="text-[10px] text-slate-500">{credit.payment_method}</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -719,6 +832,28 @@ export function SearchPatientModal({
         )}
 
       </div>
+
+      <ReceiveDepositModal
+        isOpen={showDepositModal}
+        onClose={() => setShowDepositModal(false)}
+        patient={selectedPatient}
+        clinic={clinic}
+        receptionistId={receptionistId}
+        registerSessionId={registerSessionId}
+        cashierName={receptionistName}
+        existingCredits={selectedPatientCredits}
+        onSaved={(credit) => onCreditSaved?.(credit)}
+      />
+      <EditPatientModal
+        isOpen={showEditModal}
+        onClose={() => setShowEditModal(false)}
+        patient={selectedPatient}
+        onSaved={(updated) => {
+          const merged = { ...selectedPatient, ...(updated as PatientRecord) } as FullPatient;
+          setSelectedPatient(merged);
+          onPatientUpdated?.(merged);
+        }}
+      />
     </div>
   );
 }
