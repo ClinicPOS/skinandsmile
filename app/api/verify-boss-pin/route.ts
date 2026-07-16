@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 
-const BOSS_PIN_HASH = "$2b$10$Ptmc/LcRtgXMk0oFLCPrR.ubhQQGCk65M1WhV8rIO9P0nboqJiuoK";
+const BOSS_PIN_HASH = "$2b$10$juQo.K2bq2qfmr07RKn8S.mNImJ8/WhlG5iXGqHkRpBMCBiGtFGUu";
 
 export async function POST(req: NextRequest) {
   const { pin } = await req.json();
