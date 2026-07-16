@@ -2,6 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
+import { receptionistIdsForClinic } from "../lib/clinic-scope";
+import type { OutstandingBalance, BalancePayment } from "../lib/types";
+import { rollupBalance, formatBalanceReference } from "../lib/outstanding-balances";
 
 type Patient = {
   id: string;
@@ -20,6 +23,7 @@ type Receipt = {
   subtotal: number;
   vat: number;
   total: number;
+  amount_paid?: number | null;
   discount_amount?: number | null;
   notes: string | null;
   created_at?: string;
@@ -42,6 +46,8 @@ type FullPatient = {
   passport_number?: string | null;
   patient_number?: number | null;
   address?: string | null;
+  mrn?: string | null;
+  notes?: string | null;
 };
 
 type PatientNote = {
@@ -99,11 +105,21 @@ export function SearchPatientModal({
   onClose,
   onSelect,
   patients,
+  clinicId,
+  outstandingBalances = [],
+  balancePayments = [],
+  clinicsList = [],
+  onCollectBalance,
 }: {
   isOpen: boolean;
   onClose: () => void;
   onSelect: (patient: FullPatient) => void;
   patients: FullPatient[];
+  clinicId?: string | null;
+  outstandingBalances?: OutstandingBalance[];
+  balancePayments?: BalancePayment[];
+  clinicsList?: Clinic[];
+  onCollectBalance?: (payload: { balance: OutstandingBalance; payments: BalancePayment[]; patient: FullPatient }) => void;
 }) {
   const [view, setView] = useState<"search" | "profile">("search");
   const [query, setQuery] = useState("");
@@ -118,6 +134,8 @@ export function SearchPatientModal({
   const [showAddNote, setShowAddNote] = useState(false);
   const [newNoteText, setNewNoteText] = useState("");
   const [isSavingNote, setIsSavingNote] = useState(false);
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [editingNoteText, setEditingNoteText] = useState("");
 
   useEffect(() => {
     if (isOpen) {
@@ -144,6 +162,43 @@ export function SearchPatientModal({
     );
   }, [patients, query]);
 
+  const paymentsByBalanceId = useMemo(() => {
+    const map = new Map<string, BalancePayment[]>();
+    for (const p of balancePayments) {
+      const arr = map.get(p.outstanding_balance_id) || [];
+      arr.push(p);
+      map.set(p.outstanding_balance_id, arr);
+    }
+    return map;
+  }, [balancePayments]);
+
+  const outstandingByPatient = useMemo(() => {
+    const map = new Map<string, { remaining: number; count: number }>();
+    for (const b of outstandingBalances) {
+      const roll = rollupBalance(b, paymentsByBalanceId.get(b.id) || []);
+      if (roll.remaining <= 0.0049) continue;
+      const prev = map.get(b.patient_id) || { remaining: 0, count: 0 };
+      map.set(b.patient_id, {
+        remaining: prev.remaining + roll.remaining,
+        count: prev.count + 1,
+      });
+    }
+    return map;
+  }, [outstandingBalances, paymentsByBalanceId]);
+
+  const selectedPatientBalances = useMemo(() => {
+    if (!selectedPatient) return [];
+    return outstandingBalances
+      .filter((b) => b.patient_id === selectedPatient.id)
+      .sort((a, b) => (a.original_date < b.original_date ? 1 : -1));
+  }, [outstandingBalances, selectedPatient]);
+
+  const clinicNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const c of clinicsList) map.set(c.id, c.name);
+    return map;
+  }, [clinicsList]);
+
   async function openProfile(patient: FullPatient) {
     setSelectedPatient(patient);
     setView("profile");
@@ -153,14 +208,44 @@ export function SearchPatientModal({
     setShowAddNote(false);
     setNewNoteText("");
     setExpandedNoteIds(new Set());
+    setEditingNoteId(null);
+    setEditingNoteText("");
 
-    const [notesResult, doctorsResult, receptionistsResult, clinicsResult, lastVisitResult] = await Promise.all([
-      supabase.from("patient_notes").select("*").eq("patient_id", patient.id).order("created_at", { ascending: false }),
+    let notesQuery = supabase
+      .from("patient_notes")
+      .select("*")
+      .eq("patient_id", patient.id)
+      .order("created_at", { ascending: false });
+    if (clinicId) notesQuery = notesQuery.eq("clinic_id", clinicId);
+
+    const [notesResult, doctorsResult, receptionistsResult, clinicsResult, allReceptionistsResult] = await Promise.all([
+      notesQuery,
       supabase.from("doctors").select("id, name"),
       supabase.from("receptionist").select("id, name"),
       supabase.from("clinics").select("id, name"),
-      supabase.from("receipts").select("created_at").eq("patient_id", patient.id).order("created_at", { ascending: false }).limit(1),
+      clinicId
+        ? supabase.from("receptionist").select("id, clinic_id")
+        : Promise.resolve({ data: [] as { id: string; clinic_id: string | null }[] }),
     ]);
+
+    let receiptsQuery = supabase
+      .from("receipts")
+      .select("created_at")
+      .eq("patient_id", patient.id)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (clinicId) {
+      const ids = receptionistIdsForClinic(
+        (allReceptionistsResult.data as { id: string; clinic_id: string | null }[]) || [],
+        clinicId
+      );
+      if (ids.length === 0) {
+        receiptsQuery = receiptsQuery.eq("receptionist_id", "__none__");
+      } else {
+        receiptsQuery = receiptsQuery.in("receptionist_id", ids);
+      }
+    }
+    const lastVisitResult = await receiptsQuery;
 
     setNotes((notesResult.data as PatientNote[]) || []);
     setDoctors((doctorsResult.data as LookupItem[]) || []);
@@ -185,18 +270,65 @@ export function SearchPatientModal({
     const { error } = await supabase.from("patient_notes").insert({
       patient_id: selectedPatient.id,
       note: newNoteText.trim(),
+      clinic_id: clinicId ?? null,
     });
     if (!error) {
-      const { data } = await supabase
+      let refetch = supabase
         .from("patient_notes")
         .select("*")
         .eq("patient_id", selectedPatient.id)
         .order("created_at", { ascending: false });
+      if (clinicId) refetch = refetch.eq("clinic_id", clinicId);
+      const { data } = await refetch;
       setNotes((data as PatientNote[]) || []);
       setNewNoteText("");
       setShowAddNote(false);
     }
     setIsSavingNote(false);
+  }
+
+  async function refetchNotes(patientId: string) {
+    let q = supabase
+      .from("patient_notes")
+      .select("*")
+      .eq("patient_id", patientId)
+      .order("created_at", { ascending: false });
+    if (clinicId) q = q.eq("clinic_id", clinicId);
+    const { data } = await q;
+    setNotes((data as PatientNote[]) || []);
+  }
+
+  function startEditNote(note: PatientNote) {
+    setEditingNoteId(note.id);
+    setEditingNoteText(note.note);
+  }
+
+  function cancelEditNote() {
+    setEditingNoteId(null);
+    setEditingNoteText("");
+  }
+
+  async function saveEditNote() {
+    if (!editingNoteId || !editingNoteText.trim() || !selectedPatient) return;
+    setIsSavingNote(true);
+    const { error } = await supabase
+      .from("patient_notes")
+      .update({ note: editingNoteText.trim() })
+      .eq("id", editingNoteId);
+    if (!error) {
+      await refetchNotes(selectedPatient.id);
+      cancelEditNote();
+    }
+    setIsSavingNote(false);
+  }
+
+  async function deleteNote(noteId: string) {
+    if (!selectedPatient) return;
+    if (!confirm("Delete this note? This cannot be undone.")) return;
+    const { error } = await supabase.from("patient_notes").delete().eq("id", noteId);
+    if (!error) {
+      await refetchNotes(selectedPatient.id);
+    }
   }
 
   function calcAge(dob: string | null | undefined): number | null {
@@ -248,23 +380,33 @@ export function SearchPatientModal({
                 {filteredPatients.length === 0 && (
                   <p className="py-6 text-center text-sm text-slate-400">No patients found</p>
                 )}
-                {filteredPatients.map((patient) => (
-                  <button
-                    key={patient.id}
-                    onClick={() => openProfile(patient)}
-                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-teal-200 hover:bg-teal-50"
-                  >
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm font-semibold text-slate-900">{patient.name}</p>
-                      {patient.patient_number != null && (
-                        <span className="rounded-full bg-teal-100 px-2 py-0.5 text-xs font-semibold text-teal-700">
-                          #{patient.patient_number}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-0.5 text-xs text-slate-500">{patient.phone || "No phone"}</p>
-                  </button>
-                ))}
+                {filteredPatients.map((patient) => {
+                  const owed = outstandingByPatient.get(patient.id);
+                  return (
+                    <button
+                      key={patient.id}
+                      onClick={() => openProfile(patient)}
+                      className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-teal-200 hover:bg-teal-50"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold text-slate-900">{patient.name}</p>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {owed && owed.remaining > 0 && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800" title="Outstanding balance">
+                              AED {owed.remaining.toFixed(2)}
+                            </span>
+                          )}
+                          {patient.patient_number != null && (
+                            <span className="rounded-full bg-teal-100 px-2 py-0.5 text-xs font-semibold text-teal-700">
+                              #{patient.patient_number}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <p className="mt-0.5 text-xs text-slate-500">{patient.phone || "No phone"}</p>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -330,6 +472,12 @@ export function SearchPatientModal({
                       <p className="text-slate-800">{selectedPatient.passport_number}</p>
                     </div>
                   )}
+                  {selectedPatient.mrn && (
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">MRN</p>
+                      <p className="text-slate-800">{selectedPatient.mrn}</p>
+                    </div>
+                  )}
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Last Visit</p>
                     <p className="text-slate-800">
@@ -340,6 +488,75 @@ export function SearchPatientModal({
                   </div>
                 </div>
               </div>
+
+              {selectedPatient.notes && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                  <p className="mb-2 text-xs font-bold uppercase tracking-wide text-amber-700">Medical History</p>
+                  <p className="whitespace-pre-wrap text-sm text-slate-800">{selectedPatient.notes}</p>
+                </div>
+              )}
+
+              {selectedPatientBalances.length > 0 && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                  <p className="mb-2 text-xs font-bold uppercase tracking-wide text-amber-700">Outstanding Balances</p>
+                  <div className="space-y-2">
+                    {selectedPatientBalances.map((bal) => {
+                      const payments = paymentsByBalanceId.get(bal.id) || [];
+                      const roll = rollupBalance(bal, payments);
+                      const belongsToClinic = !clinicId || bal.clinic_id === clinicId;
+                      return (
+                        <div key={bal.id} className="rounded-xl border border-amber-200 bg-white p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold text-slate-500">
+                                {clinicNameById.get(bal.clinic_id) || "Clinic"} · {new Date(bal.original_date).toLocaleDateString("en-GB")}
+                              </p>
+                              <p className="text-sm font-semibold text-slate-800">
+                                {formatBalanceReference(bal)}
+                              </p>
+                              {bal.reason && (
+                                <p className="mt-0.5 text-xs text-slate-500">{bal.reason}</p>
+                              )}
+                            </div>
+                            <div className="text-right">
+                              <p className={
+                                roll.status === "Paid"
+                                  ? "text-xs font-semibold uppercase text-emerald-700"
+                                  : roll.status === "Partial"
+                                  ? "text-xs font-semibold uppercase text-amber-700"
+                                  : "text-xs font-semibold uppercase text-rose-700"
+                              }>
+                                {roll.status}
+                              </p>
+                              <p className="text-sm font-bold text-slate-900">AED {roll.remaining.toFixed(2)}</p>
+                              <p className="text-[10px] text-slate-500">
+                                of AED {Number(bal.original_amount).toFixed(2)}
+                              </p>
+                            </div>
+                          </div>
+                          {roll.remaining > 0.0049 && onCollectBalance && belongsToClinic && (
+                            <div className="mt-3">
+                              <button
+                                onClick={() =>
+                                  onCollectBalance({ balance: bal, payments, patient: selectedPatient })
+                                }
+                                className="rounded-xl bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-amber-500"
+                              >
+                                Collect Payment
+                              </button>
+                            </div>
+                          )}
+                          {roll.remaining > 0.0049 && !belongsToClinic && (
+                            <p className="mt-2 text-[10px] italic text-slate-400">
+                              Recorded at another clinic — collect from that clinic.
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* Clinical Notes */}
               <div>
@@ -395,29 +612,78 @@ export function SearchPatientModal({
                       const clinic = clinics.find((c) => c.id === note.clinic_id);
                       const isExpanded = expandedNoteIds.has(note.id);
                       const isLong = note.note.length > 160;
+                      const isEditing = editingNoteId === note.id;
                       const contextLine = [clinic?.name, doctor ? `Dr. ${doctor.name}` : null, receptionist?.name]
                         .filter(Boolean)
                         .join(" · ");
                       return (
                         <div key={note.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-                          <p className="mb-1 text-xs font-semibold text-slate-500">
-                            {new Date(note.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
-                            {" · "}
-                            {new Date(note.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
-                          </p>
-                          {contextLine && (
-                            <p className="mb-2 text-xs text-slate-400">{contextLine}</p>
-                          )}
-                          <p className={`whitespace-pre-wrap text-sm text-slate-800 ${!isExpanded && isLong ? "line-clamp-3" : ""}`}>
-                            {note.note}
-                          </p>
-                          {isLong && (
-                            <button
-                              onClick={() => toggleNote(note.id)}
-                              className="mt-1 text-xs font-semibold text-teal-600 transition hover:text-teal-800"
-                            >
-                              {isExpanded ? "Show less" : "Show more"}
-                            </button>
+                          <div className="mb-1 flex items-start justify-between gap-2">
+                            <div>
+                              <p className="text-xs font-semibold text-slate-500">
+                                {new Date(note.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                                {" · "}
+                                {new Date(note.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                              </p>
+                              {contextLine && (
+                                <p className="mt-1 text-xs text-slate-400">{contextLine}</p>
+                              )}
+                            </div>
+                            {!isEditing && (
+                              <div className="flex shrink-0 gap-1">
+                                <button
+                                  onClick={() => startEditNote(note)}
+                                  className="rounded-full border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-500 transition hover:bg-slate-50 hover:text-teal-600"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() => deleteNote(note.id)}
+                                  className="rounded-full border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-500 transition hover:bg-red-50 hover:text-red-600"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          {isEditing ? (
+                            <div className="mt-2 space-y-2">
+                              <textarea
+                                value={editingNoteText}
+                                onChange={(e) => setEditingNoteText(e.target.value)}
+                                rows={4}
+                                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
+                              />
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={saveEditNote}
+                                  disabled={isSavingNote || !editingNoteText.trim()}
+                                  className="rounded-xl bg-teal-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-teal-400 disabled:opacity-50"
+                                >
+                                  {isSavingNote ? "Saving…" : "Save"}
+                                </button>
+                                <button
+                                  onClick={cancelEditNote}
+                                  className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <p className={`whitespace-pre-wrap text-sm text-slate-800 ${!isExpanded && isLong ? "line-clamp-3" : ""}`}>
+                                {note.note}
+                              </p>
+                              {isLong && (
+                                <button
+                                  onClick={() => toggleNote(note.id)}
+                                  className="mt-1 text-xs font-semibold text-teal-600 transition hover:text-teal-800"
+                                >
+                                  {isExpanded ? "Show less" : "Show more"}
+                                </button>
+                              )}
+                            </>
                           )}
                         </div>
                       );
@@ -653,6 +919,8 @@ export function ReceiptHistoryModal({
     const vatAmount = Number(receipt.vat || 0);
     const total = Number(receipt.total || 0);
     const discountAmount = Number(receipt.discount_amount || 0);
+    const paidAtSale = receipt.amount_paid != null ? Number(receipt.amount_paid) : total;
+    const wasPartial = receipt.amount_paid != null && total - paidAtSale > 0.0049;
 
     const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Reprint</title><style>
       *{box-sizing:border-box;}
@@ -698,7 +966,9 @@ export function ReceiptHistoryModal({
       <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${total.toFixed(2)}</span></div>
       <div class="hr"></div>
       <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${(receipt.payment_method || "-").toUpperCase()}</span></div>
-      <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${total.toFixed(2)}</span></div>
+      <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidAtSale.toFixed(2)}</span></div>
+      ${wasPartial ? `<div class="row"><span>Outstanding at Sale / المتبقي</span><span>: AED ${(total - paidAtSale).toFixed(2)}</span></div>` : ""}
+      <div class="row" style="font-weight:700;"><span>Payment Status / حالة الدفع</span><span>: ${wasPartial ? "PARTIAL PAYMENT" : "PAID"}</span></div>
       ${receipt.notes ? `<div style="margin-top:4px;">Note / ملاحظة: ${receipt.notes}</div>` : ""}
       <div class="hr"></div>
       <div class="footer-center">VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه</div>
@@ -776,6 +1046,9 @@ export function ReceiptHistoryModal({
                           <span className="text-sm font-semibold text-slate-900">{formatReceiptNo(receipt)}</span>
                           {hasRefund && (
                             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">Refunded</span>
+                          )}
+                          {receipt.amount_paid != null && Number(receipt.total || 0) - Number(receipt.amount_paid) > 0.0049 && (
+                            <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700">Partial</span>
                           )}
                         </div>
                         <div className="flex items-center gap-3">
@@ -928,7 +1201,15 @@ export function ReceiptHistoryModal({
 }
 
 // Treatment History Modal
-export function TreatmentHistoryModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+export function TreatmentHistoryModal({
+  isOpen,
+  onClose,
+  clinicId,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  clinicId?: string | null;
+}) {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [services, setServices] = useState<LookupItem[]>([]);
@@ -940,20 +1221,44 @@ export function TreatmentHistoryModal({ isOpen, onClose }: { isOpen: boolean; on
     if (isOpen) {
       loadHistory();
     }
-  }, [isOpen]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, clinicId]);
 
   async function loadHistory() {
-    const [patientResult, receiptResult, serviceResult, itemResult] = await Promise.all([
+    const [patientResult, allReceiptsResult, serviceResult, receptionistsResult] = await Promise.all([
       supabase.from("patients").select("id, name, phone").order("name", { ascending: true }),
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
       supabase.from("services").select("id, name"),
-      supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total"),
+      clinicId
+        ? supabase.from("receptionist").select("id, clinic_id")
+        : Promise.resolve({ data: [] as { id: string; clinic_id: string | null }[] }),
     ]);
 
+    let scopedReceipts = (allReceiptsResult.data as Receipt[]) || [];
+    if (clinicId) {
+      const ids = new Set(
+        receptionistIdsForClinic(
+          (receptionistsResult.data as { id: string; clinic_id: string | null }[]) || [],
+          clinicId
+        )
+      );
+      scopedReceipts = scopedReceipts.filter((r) => r.receptionist_id != null && ids.has(r.receptionist_id));
+    }
+
+    const receiptIds = scopedReceipts.map((r) => r.id);
+    let itemsData: ReceiptItem[] = [];
+    if (receiptIds.length > 0) {
+      const { data: items } = await supabase
+        .from("receipt_items")
+        .select("receipt_id, service_id, quantity, price, total")
+        .in("receipt_id", receiptIds);
+      itemsData = (items as ReceiptItem[]) || [];
+    }
+
     setPatients((patientResult.data as Patient[]) || []);
-    setReceipts((receiptResult.data as Receipt[]) || []);
+    setReceipts(scopedReceipts);
     setServices((serviceResult.data as LookupItem[]) || []);
-    setReceiptItems((itemResult.data as ReceiptItem[]) || []);
+    setReceiptItems(itemsData);
 
     if (patientResult.data?.length) {
       setSelectedPatientId(patientResult.data[0].id);
@@ -1007,10 +1312,10 @@ export function TreatmentHistoryModal({ isOpen, onClose }: { isOpen: boolean; on
                 <div className="mt-2 space-y-1">
                   {receiptItems
                     .filter((item) => item.receipt_id === visit.id)
-                    .map((item) => {
+                    .map((item, idx) => {
                       const service = services.find((s) => s.id === item.service_id);
                       return (
-                        <p key={`${item.receipt_id}-${item.service_id}`} className="text-sm text-slate-900">
+                        <p key={`${item.receipt_id}-${item.service_id}-${idx}`} className="text-sm text-slate-900">
                           {service?.name || "Service"} x{item.quantity}
                         </p>
                       );

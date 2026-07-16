@@ -5,38 +5,15 @@ import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx-js-style";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Clinic } from "../../lib/types";
+import { Clinic, OutstandingBalance, BalancePayment } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal, TreatmentHistoryModal } from "../../components/pos-modals";
+import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
+import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
+import { printPaymentReceipt } from "../../lib/print-payment-receipt";
+import { COUNTRIES } from "../../lib/countries";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tamara", "Split Payment"];
-
-const COUNTRIES = [
-  "Afghanistan","Albania","Algeria","Andorra","Angola","Antigua and Barbuda","Argentina","Armenia",
-  "Australia","Austria","Azerbaijan","Bahamas","Bahrain","Bangladesh","Barbados","Belarus","Belgium",
-  "Belize","Benin","Bhutan","Bolivia","Bosnia and Herzegovina","Botswana","Brazil","Brunei","Bulgaria",
-  "Burkina Faso","Burundi","Cabo Verde","Cambodia","Cameroon","Canada","Central African Republic","Chad",
-  "Chile","China","Colombia","Comoros","Congo","Costa Rica","Croatia","Cuba","Cyprus","Czech Republic",
-  "Democratic Republic of the Congo","Denmark","Djibouti","Dominica","Dominican Republic","Ecuador",
-  "Egypt","El Salvador","Equatorial Guinea","Eritrea","Estonia","Eswatini","Ethiopia","Fiji","Finland",
-  "France","Gabon","Gambia","Georgia","Germany","Ghana","Greece","Grenada","Guatemala","Guinea",
-  "Guinea-Bissau","Guyana","Haiti","Honduras","Hungary","Iceland","India","Indonesia","Iran","Iraq",
-  "Ireland","Israel","Italy","Jamaica","Japan","Jordan","Kazakhstan","Kenya","Kiribati","Kuwait",
-  "Kyrgyzstan","Laos","Latvia","Lebanon","Lesotho","Liberia","Libya","Liechtenstein","Lithuania",
-  "Luxembourg","Madagascar","Malawi","Malaysia","Maldives","Mali","Malta","Marshall Islands",
-  "Mauritania","Mauritius","Mexico","Micronesia","Moldova","Monaco","Mongolia","Montenegro","Morocco",
-  "Mozambique","Myanmar","Namibia","Nauru","Nepal","Netherlands","New Zealand","Nicaragua","Niger",
-  "Nigeria","North Korea","North Macedonia","Norway","Oman","Pakistan","Palau","Palestine","Panama",
-  "Papua New Guinea","Paraguay","Peru","Philippines","Poland","Portugal","Qatar","Romania","Russia",
-  "Rwanda","Saint Kitts and Nevis","Saint Lucia","Saint Vincent and the Grenadines","Samoa",
-  "San Marino","Sao Tome and Principe","Saudi Arabia","Senegal","Serbia","Seychelles","Sierra Leone",
-  "Singapore","Slovakia","Slovenia","Solomon Islands","Somalia","South Africa","South Korea",
-  "South Sudan","Spain","Sri Lanka","Sudan","Suriname","Sweden","Switzerland","Syria","Taiwan",
-  "Tajikistan","Tanzania","Thailand","Timor-Leste","Togo","Tonga","Trinidad and Tobago","Tunisia",
-  "Turkey","Turkmenistan","Tuvalu","Uganda","Ukraine","United Arab Emirates","United Kingdom",
-  "United States","Uruguay","Uzbekistan","Vanuatu","Vatican City","Venezuela","Vietnam","Yemen",
-  "Zambia","Zimbabwe",
-];
 
 const POS_REGISTER_SESSION_KEY = "posRegisterSession";
 const POS_RECENT_SERVICES_KEY = "posRecentServices";
@@ -261,6 +238,7 @@ export default function ReceiptsPage() {
   const [patientSexInput, setPatientSexInput] = useState("");
   const [patientEmiratesIdInput, setPatientEmiratesIdInput] = useState("");
   const [patientPassportInput, setPatientPassportInput] = useState("");
+  const [patientMrnInput, setPatientMrnInput] = useState("");
   const [patientNationalityInput, setPatientNationalityInput] = useState("");
   const [patientFileNumberInput, setPatientFileNumberInput] = useState("");
   const [nationalitySearch, setNationalitySearch] = useState("");
@@ -275,6 +253,7 @@ export default function ReceiptsPage() {
     nationality?: string | null;
     emirates_id?: string | null;
     passport_number?: string | null;
+    mrn?: string | null;
     email?: string | null;
   } | null>(null);
   const [doctorId, setDoctorId] = useState("");
@@ -304,6 +283,7 @@ export default function ReceiptsPage() {
   const [tabbyReferenceInput, setTabbyReferenceInput] = useState("");
   const [tamaraReferenceInput, setTamaraReferenceInput] = useState("");
   const [cashReceivedInput, setCashReceivedInput] = useState("");
+  const [payTodayInput, setPayTodayInput] = useState("");
   const [mixedCashInput, setMixedCashInput] = useState("");
   const [mixedOtherMethod, setMixedOtherMethod] = useState("Card");
   const [mixedOtherAmountInput, setMixedOtherAmountInput] = useState("");
@@ -327,6 +307,13 @@ export default function ReceiptsPage() {
   const [showSearchPatientModal, setShowSearchPatientModal] = useState(false);
   const [showReceiptHistoryModal, setShowReceiptHistoryModal] = useState(false);
   const [showTreatmentHistoryModal, setShowTreatmentHistoryModal] = useState(false);
+  const [outstandingBalances, setOutstandingBalances] = useState<OutstandingBalance[]>([]);
+  const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
+  const [collectBalanceContext, setCollectBalanceContext] = useState<{
+    balance: OutstandingBalance;
+    payments: BalancePayment[];
+    patient: any;
+  } | null>(null);
   const isProceedingRef = useRef(false);
   const [isProceeding, setIsProceeding] = useState(false);
   const router = useRouter();
@@ -371,12 +358,14 @@ export default function ReceiptsPage() {
   }, [receptionistId, clinics]);
 
   async function loadData() {
-    const [patientResult, doctorResult, receptionistResult, serviceResult, clinicResult] = await Promise.allSettled([
+    const [patientResult, doctorResult, receptionistResult, serviceResult, clinicResult, balancesResult, balancePaymentsResult] = await Promise.allSettled([
       supabase.from("patients").select("*"),
       supabase.from("doctors").select("*"),
       supabase.from("receptionist").select("*"),
       supabase.from("services").select("*"),
       supabase.from("clinics").select("*"),
+      supabase.from("outstanding_balances").select("*"),
+      supabase.from("balance_payments").select("*"),
     ]);
 
     if (patientResult.status === "fulfilled") {
@@ -397,6 +386,21 @@ export default function ReceiptsPage() {
 
     if (clinicResult.status === "fulfilled") {
       setClinics((clinicResult.value.data || []) as Clinic[]);
+    }
+
+    if (balancesResult.status === "fulfilled" && !balancesResult.value.error) {
+      setOutstandingBalances((balancesResult.value.data || []) as OutstandingBalance[]);
+    }
+
+    if (balancePaymentsResult.status === "fulfilled" && !balancePaymentsResult.value.error) {
+      setBalancePayments((balancePaymentsResult.value.data || []) as BalancePayment[]);
+    }
+  }
+
+  async function refetchBalancePayments() {
+    const { data, error } = await supabase.from("balance_payments").select("*");
+    if (!error) {
+      setBalancePayments((data || []) as BalancePayment[]);
     }
   }
 
@@ -500,6 +504,26 @@ export default function ReceiptsPage() {
       .filter(Boolean);
   }, [recentServiceIds, clinicServices]);
 
+  const balancePaymentsByBalanceId = useMemo(() => {
+    const map = new Map<string, BalancePayment[]>();
+    for (const p of balancePayments) {
+      const arr = map.get(p.outstanding_balance_id) || [];
+      arr.push(p);
+      map.set(p.outstanding_balance_id, arr);
+    }
+    return map;
+  }, [balancePayments]);
+
+  const selectedPatientBalancesInClinic = useMemo(() => {
+    if (!patientId || !activeClinic?.id) return [];
+    return outstandingBalances
+      .filter((b) => b.patient_id === patientId && b.clinic_id === activeClinic.id)
+      .map((b) => ({ balance: b, payments: balancePaymentsByBalanceId.get(b.id) || [] }))
+      .map(({ balance, payments }) => ({ balance, payments, rollup: rollupBalance(balance, payments) }))
+      .filter(({ rollup }) => rollup.remaining > 0.0049)
+      .sort((a, b) => (a.balance.original_date < b.balance.original_date ? 1 : -1));
+  }, [outstandingBalances, balancePaymentsByBalanceId, patientId, activeClinic]);
+
   function handlePatientNameChange(e: string) {
     setPatientName(e);
     if (patientId) {
@@ -513,6 +537,7 @@ export default function ReceiptsPage() {
       setShowNationalitySuggestions(false);
       setPatientEmiratesIdInput("");
       setPatientPassportInput("");
+      setPatientMrnInput("");
       setSelectedPatientInfo(null);
     }
     if (e.trim()) {
@@ -538,12 +563,14 @@ export default function ReceiptsPage() {
     setPatientFileNumberInput(patient.patient_number != null ? String(patient.patient_number) : "");
     setPatientEmiratesIdInput(patient.emirates_id || "");
     setPatientPassportInput(patient.passport_number || "");
+    setPatientMrnInput(patient.mrn || "");
     setSelectedPatientInfo({
       date_of_birth: patient.date_of_birth,
       sex: patient.sex,
       nationality: patient.nationality,
       emirates_id: patient.emirates_id,
       passport_number: patient.passport_number,
+      mrn: patient.mrn,
       email: patient.email,
     });
     setShowPatientSuggestions(false);
@@ -714,12 +741,14 @@ export default function ReceiptsPage() {
     setShowNationalitySuggestions(false);
     setPatientEmiratesIdInput("");
     setPatientPassportInput("");
+    setPatientMrnInput("");
     setSelectedPatientInfo(null);
     setTransactionPatientId("");
     setDoctorId("");
     setSelectedPaymentMethod("");
     setTabbyReferenceInput("");
     setTamaraReferenceInput("");
+    setPayTodayInput("");
     setNotes("");
     setSelectedServices([]);
     setDiscountInput("");
@@ -736,19 +765,35 @@ export default function ReceiptsPage() {
       return 0;
     }
 
-    const { data, error } = await supabase
-      .from("receipts")
-      .select("total")
-      .eq("receptionist_id", activeReceptionistId)
-      .ilike("payment_method", "Cash%")
-      .gte("created_at", registerOpenedAt);
+    const [receiptsRes, balancePaymentsRes] = await Promise.all([
+      supabase
+        .from("receipts")
+        .select("total, amount_paid")
+        .eq("receptionist_id", activeReceptionistId)
+        .ilike("payment_method", "Cash%")
+        .gte("created_at", registerOpenedAt),
+      supabase
+        .from("balance_payments")
+        .select("amount")
+        .eq("receptionist_id", activeReceptionistId)
+        .ilike("payment_method", "Cash%")
+        .gte("created_at", registerOpenedAt),
+    ]);
 
-    if (error) {
-      console.warn("Failed loading cash sales summary", error);
-      return 0;
+    if (receiptsRes.error) {
+      console.warn("Failed loading cash sales summary", receiptsRes.error);
+    }
+    if (balancePaymentsRes.error && balancePaymentsRes.error.code !== "42P01") {
+      console.warn("Failed loading balance payments for shift", balancePaymentsRes.error);
     }
 
-    return (data || []).reduce((sum, row) => sum + Number(row.total || 0), 0);
+    // amount_paid is what actually entered the drawer; NULL means paid in full.
+    const receiptsTotal = (receiptsRes.data || []).reduce(
+      (sum, row) => sum + Number(row.amount_paid ?? row.total ?? 0),
+      0
+    );
+    const balancePaymentsTotal = (balancePaymentsRes.data || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    return receiptsTotal + balancePaymentsTotal;
   }
 
   async function openCloseRegisterModal() {
@@ -792,7 +837,7 @@ export default function ReceiptsPage() {
 
     const { data: receiptsData, error: receiptsError } = await supabase
       .from("receipts")
-      .select("id, receipt_number, created_at, patient_id, doctor_id, receptionist_id, payment_method, subtotal, discount_amount, total")
+      .select("id, receipt_number, created_at, patient_id, doctor_id, receptionist_id, payment_method, subtotal, discount_amount, total, amount_paid")
       .in("receptionist_id", receptionistIds)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -916,6 +961,21 @@ export default function ReceiptsPage() {
       }
     }
 
+    // Payments collected today against old outstanding balances — reported
+    // separately from treatment revenue.
+    let balanceCollectionsTotal = 0;
+    const { data: balancePaymentsData, error: balancePaymentsError } = await supabase
+      .from("balance_payments")
+      .select("amount")
+      .in("receptionist_id", receptionistIds)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso);
+    if (balancePaymentsError) {
+      console.warn("Failed loading balance payments for report", balancePaymentsError);
+    } else {
+      balanceCollectionsTotal = (balancePaymentsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
+    }
+
     const detailHeaders = [
       "Time",
       "Receipt Number",
@@ -938,6 +998,8 @@ export default function ReceiptsPage() {
       "Insurance",
       "Refund Amount",
       "Payment Method",
+      "Paid Today",
+      "Outstanding",
     ];
 
     const detailRows: Array<(string | number)[]> = [];
@@ -946,6 +1008,8 @@ export default function ReceiptsPage() {
     let totalDiscounts = 0;
     let netRevenue = 0;
     let totalRefunds = 0;
+    let collectedTodayTotal = 0;
+    let outstandingCreatedTotal = 0;
 
     let cashTotal = 0;
     let cardTotal = 0;
@@ -964,12 +1028,17 @@ export default function ReceiptsPage() {
       const netTotal = Number(receipt.total || 0);
       const grossTotal = Number(receipt.subtotal || 0) + discountAmount;
       const refundAmount = Number(refundMap.get(receiptId) || 0);
-      const breakdown = getPaymentBreakdown(paymentMethodRaw, netTotal);
+      // NULL amount_paid = paid in full; the breakdown reflects money actually received.
+      const paidToday = Number(receipt.amount_paid ?? receipt.total ?? 0);
+      const outstandingCreated = Math.max(0, Math.round((netTotal - paidToday) * 100) / 100);
+      const breakdown = getPaymentBreakdown(paymentMethodRaw, paidToday);
 
       grossRevenue += grossTotal;
       totalDiscounts += discountAmount;
       netRevenue += netTotal;
       totalRefunds += refundAmount;
+      collectedTodayTotal += paidToday;
+      outstandingCreatedTotal += outstandingCreated;
 
       cashTotal += breakdown.cash;
       cardTotal += breakdown.card;
@@ -1007,10 +1076,12 @@ export default function ReceiptsPage() {
         breakdown.insurance,
         refundAmount,
         paymentMethodRaw,
+        paidToday,
+        outstandingCreated,
       ]);
     });
 
-    const totalCollected = cashTotal + cardTotal + tabbyTotal + tamaraTotal + insuranceTotal + bankTransferTotal;
+    const totalCollected = cashTotal + cardTotal + tabbyTotal + tamaraTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal;
     const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
 
     const workbook = XLSX.utils.book_new();
@@ -1057,6 +1128,9 @@ export default function ReceiptsPage() {
       ["Total Discounts (Promo)", totalDiscounts],
       ["Net Revenue", netRevenue],
       ["Total Refunds", totalRefunds],
+      ["Collected Today (Treatments)", collectedTodayTotal],
+      ["Outstanding Created Today", outstandingCreatedTotal],
+      ["Balance Collections (Old Balances)", balanceCollectionsTotal],
       ["", ""],
       ["Payment Summary", "Amount (AED)"],
       ["Cash", cashTotal],
@@ -1065,6 +1139,7 @@ export default function ReceiptsPage() {
       ["Tamara", tamaraTotal],
       ["Insurance", insuranceTotal],
       ["Bank Transfer", bankTransferTotal],
+      ["Balance Collections", balanceCollectionsTotal],
       ["Total Collected", totalCollected],
     ];
 
@@ -1074,7 +1149,7 @@ export default function ReceiptsPage() {
       { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
       { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } },
       { s: { r: 8, c: 0 }, e: { r: 8, c: 1 } },
-      { s: { r: 16, c: 0 }, e: { r: 16, c: 1 } },
+      { s: { r: 19, c: 0 }, e: { r: 19, c: 1 } },
     ];
 
     const styleSummaryCell = (row: number, col: number, style: Record<string, unknown>) => {
@@ -1094,7 +1169,7 @@ export default function ReceiptsPage() {
       }
     }
 
-    [3, 9, 17].forEach((row) => {
+    [3, 9, 20].forEach((row) => {
       styleSummaryCell(row, 1, {
         fill: { fgColor: { rgb: "1F4E78" } },
         font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
@@ -1115,24 +1190,24 @@ export default function ReceiptsPage() {
       fill: { fgColor: { rgb: "0B132B" } },
     });
 
-    for (let row = 12; row <= 15; row++) {
+    for (let row = 12; row <= 18; row++) {
       styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
     }
-    for (let row = 18; row <= 24; row++) {
+    for (let row = 21; row <= 28; row++) {
       styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
     }
 
-    styleSummaryCell(24, 1, {
+    styleSummaryCell(28, 1, {
       fill: { fgColor: { rgb: "FFF2CC" } },
       font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
     });
-    styleSummaryCell(24, 2, {
+    styleSummaryCell(28, 2, {
       fill: { fgColor: { rgb: "FFF2CC" } },
       font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
     });
 
-    // Formula for Total Collected in summary payment section.
-    (summarySheet as any)["B24"] = { t: "n", f: "SUM(B18:B23)", s: (summarySheet as any)["B24"]?.s };
+    // Formula for Total Collected in summary payment section (Cash..Balance Collections).
+    (summarySheet as any)["B28"] = { t: "n", f: "SUM(B21:B27)", s: (summarySheet as any)["B28"]?.s };
 
     const detailsData: (string | number)[][] = [detailHeaders, ...detailRows, new Array(detailHeaders.length).fill("") as string[]];
     const detailsSheet = XLSX.utils.aoa_to_sheet(detailsData);
@@ -1151,11 +1226,11 @@ export default function ReceiptsPage() {
 
     writeCell(`A${totalsRow}`, "TOTALS");
 
-    ["I", "J", "K", "L", "M", "O", "Q", "S", "T"].forEach((col) => {
+    ["I", "J", "K", "L", "M", "O", "Q", "S", "T", "V", "W"].forEach((col) => {
       writeCell(`${col}${totalsRow}`, { t: "n", f: `SUM(${col}${detailsDataStart}:${col}${formulaEnd})` });
     });
 
-    detailsSheet["!autofilter"] = { ref: `A1:U${totalsRow}` };
+    detailsSheet["!autofilter"] = { ref: `A1:W${totalsRow}` };
     detailsSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
 
     const autoWidths = detailHeaders.map((header, index) => {
@@ -1197,7 +1272,7 @@ export default function ReceiptsPage() {
       });
     }
 
-    const currencyCols = new Set([9, 10, 11, 12, 13, 15, 17, 19, 20]);
+    const currencyCols = new Set([9, 10, 11, 12, 13, 15, 17, 19, 20, 22, 23]);
     for (let row = 2; row <= totalsRow; row++) {
       const isTotalsRow = row === totalsRow;
       const isEvenDataRow = row % 2 === 0;
@@ -1262,6 +1337,7 @@ export default function ReceiptsPage() {
           nationality: patientNationalityInput.trim() || null,
           emirates_id: patientEmiratesIdInput.trim() || null,
           passport_number: patientPassportInput.trim() || null,
+          mrn: patientMrnInput.trim() || null,
           ...(patientFileNumberInput.trim() ? { patient_number: parseInt(patientFileNumberInput.trim(), 10) } : {}),
         })
         .eq("id", patientId);
@@ -1298,6 +1374,7 @@ export default function ReceiptsPage() {
               nationality: patientNationalityInput.trim() || null,
               emirates_id: patientEmiratesIdInput.trim() || null,
               passport_number: patientPassportInput.trim() || null,
+              mrn: patientMrnInput.trim() || null,
               patient_number: patientNumber,
             },
           ])
@@ -1326,6 +1403,7 @@ export default function ReceiptsPage() {
 
     // Set the transaction patient ID to use throughout the payment/print flow
     setTransactionPatientId(finalPatientId);
+    setPayTodayInput("");
     setShowPaymentModal(true);
     } finally {
       isProceedingRef.current = false;
@@ -1350,14 +1428,27 @@ export default function ReceiptsPage() {
 
   function getCashReceivedAmount() {
     if (!cashReceivedInput.trim()) {
-      return total;
+      return getAmountDueToday();
     }
     return getNumericInput(cashReceivedInput);
   }
 
   function getCashChangeAmount() {
     const received = getCashReceivedAmount();
-    return Math.max(received - total, 0);
+    return Math.max(received - getAmountDueToday(), 0);
+  }
+
+  // Amount the patient pays at checkout. Empty input = full total (default flow).
+  function getAmountDueToday() {
+    if (!payTodayInput.trim()) return total;
+    const amt = getNumericInput(payTodayInput);
+    if (!Number.isFinite(amt) || amt <= 0) return 0;
+    return Math.min(amt, total);
+  }
+
+  // Remainder that becomes an outstanding balance when > 0.
+  function getOutstandingAfterPayment() {
+    return Math.max(0, Math.round((total - getAmountDueToday()) * 100) / 100);
   }
 
   function getMixedCashAmount() {
@@ -1424,10 +1515,23 @@ export default function ReceiptsPage() {
       return;
     }
 
+    const dueToday = getAmountDueToday();
+    const outstanding = getOutstandingAfterPayment();
+
+    if (dueToday <= 0) {
+      alert("Amount to pay today must be greater than 0.");
+      return;
+    }
+
+    if (outstanding > 0.0049 && !activeClinic?.id) {
+      alert("Partial payments need an active clinic. Open the register for a clinic first.");
+      return;
+    }
+
     if (selectedPaymentMethod === "Cash") {
       const cash = getCashReceivedAmount();
-      if (cash < total) {
-        alert("Cash received cannot be less than total amount.");
+      if (cash < dueToday) {
+        alert("Cash received cannot be less than the amount to pay today.");
         return;
       }
     }
@@ -1440,8 +1544,8 @@ export default function ReceiptsPage() {
         alert("Please enter both cash and second payment amounts for split payment.");
         return;
       }
-      if (Math.abs(mixedTotal - total) > 0.01) {
-        alert(`Split payment amounts must equal total AED ${total.toFixed(2)}.`);
+      if (Math.abs(mixedTotal - dueToday) > 0.01) {
+        alert(`Split payment amounts must equal the amount to pay today AED ${dueToday.toFixed(2)}.`);
         return;
       }
 
@@ -1485,6 +1589,16 @@ export default function ReceiptsPage() {
 
     setIsSavingReceipt(true);
 
+    const amountPaidToday = getAmountDueToday();
+    const outstandingRemainder = getOutstandingAfterPayment();
+    const isPartialPayment = outstandingRemainder > 0.0049;
+
+    if (isPartialPayment && !activeClinic?.id) {
+      alert("Partial payments need an active clinic. Open the register for a clinic first.");
+      setIsSavingReceipt(false);
+      return false;
+    }
+
     try {
     if (patientId) {
       const updates: Record<string, string> = {};
@@ -1492,6 +1606,8 @@ export default function ReceiptsPage() {
         updates.emirates_id = patientEmiratesIdInput.trim();
       if (patientPassportInput.trim() && !selectedPatientInfo?.passport_number)
         updates.passport_number = patientPassportInput.trim();
+      if (patientMrnInput.trim() && !selectedPatientInfo?.mrn)
+        updates.mrn = patientMrnInput.trim();
       if (patientDobInput && !selectedPatientInfo?.date_of_birth)
         updates.date_of_birth = patientDobInput;
       if (patientSexInput && !selectedPatientInfo?.sex)
@@ -1523,6 +1639,10 @@ export default function ReceiptsPage() {
           })(),
           notes: notes,
           payment_method: getPaymentSummaryForSave(),
+          // Only set on partial payments so the insert keeps working on databases
+          // that haven't run supabase-partial-payments-migration.sql yet.
+          // NULL amount_paid = paid in full.
+          ...(isPartialPayment ? { amount_paid: amountPaidToday } : {}),
         },
       ])
       .select()
@@ -1554,6 +1674,37 @@ export default function ReceiptsPage() {
     }
 
     setCurrentReceipt(receiptData);
+
+    if (isPartialPayment) {
+      const receiptRef = receiptData.receipt_number
+        ? `#${String(receiptData.receipt_number).padStart(5, "0")}`
+        : `#${String(receiptData.id).slice(0, 8).toUpperCase()}`;
+      const { data: balanceData, error: balanceError } = await supabase
+        .from("outstanding_balances")
+        .insert([
+          {
+            patient_id: transactionPatientId,
+            clinic_id: activeClinic!.id,
+            original_date: new Date().toLocaleDateString("en-CA"),
+            original_amount: outstandingRemainder,
+            reason: `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} of AED ${total.toFixed(2)}`,
+            reference_number: receiptRef,
+            created_by: activeReceptionistId,
+            receipt_id: receiptData.id,
+          },
+        ])
+        .select()
+        .single();
+
+      if (balanceError || !balanceData) {
+        console.error("Outstanding balance insert error", balanceError);
+        alert(
+          `Receipt saved, but recording the outstanding balance of AED ${outstandingRemainder.toFixed(2)} failed: ${balanceError?.message || "unknown error"}. Add it manually from the Backend page.`
+        );
+      } else {
+        setOutstandingBalances((prev) => [balanceData as OutstandingBalance, ...prev]);
+      }
+    }
 
     if (notes.trim()) {
       const { error: noteError } = await supabase.from("patient_notes").insert({
@@ -2336,9 +2487,19 @@ export default function ReceiptsPage() {
       })
       .join("");
 
+    const paidTodayForReceipt = getAmountDueToday();
+    const outstandingForReceipt = getOutstandingAfterPayment();
+    const isPartialForReceipt = outstandingForReceipt > 0.0049;
+    const paymentStatusRows = `
+      ${isPartialForReceipt ? `
+      <div class="row"><span>Paid Today / المدفوع اليوم</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
+      <div class="row"><span>Outstanding / المبلغ المتبقي</span><span>: AED ${outstandingForReceipt.toFixed(2)}</span></div>` : ""}
+      <div class="row" style="font-weight:700;"><span>Payment Status / حالة الدفع</span><span>: ${isPartialForReceipt ? "PARTIAL PAYMENT" : "PAID"}</span></div>
+    `;
+
     let paymentSection = `
       <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${(selectedPaymentMethod || "-").toUpperCase()}</span></div>
-      <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${total.toFixed(2)}</span></div>
+      <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
     `;
 
     if (selectedPaymentMethod === "Cash") {
@@ -2368,7 +2529,7 @@ export default function ReceiptsPage() {
       paymentSection = `
         <div class="row"><span>Payment Method / طريقة الدفع</span><span>: TABBY</span></div>
         <div class="row"><span>Tabby Reference</span><span>: ${tabbyReferenceInput.trim() || "-"}</span></div>
-        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${total.toFixed(2)}</span></div>
+        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
       `;
     }
 
@@ -2376,7 +2537,7 @@ export default function ReceiptsPage() {
       paymentSection = `
         <div class="row"><span>Payment Method / طريقة الدفع</span><span>: TAMARA</span></div>
         <div class="row"><span>Tamara Reference</span><span>: ${tamaraReferenceInput.trim() || "-"}</span></div>
-        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${total.toFixed(2)}</span></div>
+        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
       `;
     }
 
@@ -2486,6 +2647,7 @@ export default function ReceiptsPage() {
         <div class="hr"></div>
 
         ${paymentSection}
+        ${paymentStatusRows}
 
         ${notes ? `<div style="margin-top:4px;">Note / ملاحظة: ${notes}</div>` : ""}
 
@@ -2734,6 +2896,21 @@ export default function ReceiptsPage() {
                 />
               </div>
 
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-slate-700">
+                  MRN <span className="font-normal text-slate-400">(Medical Record No. — optional)</span>
+                  {patientId && selectedPatientInfo?.mrn && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
+                </label>
+                <input
+                  type="text"
+                  value={patientMrnInput}
+                  onChange={(e) => !(patientId && selectedPatientInfo?.mrn) && setPatientMrnInput(e.target.value)}
+                  readOnly={!!(patientId && selectedPatientInfo?.mrn)}
+                  placeholder="e.g. H24-3164"
+                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId && selectedPatientInfo?.mrn ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
+                />
+              </div>
+
               {patientId && selectedPatientInfo && (
                 <div className="rounded-xl border border-cyan-100 bg-cyan-50 px-3 py-2">
                   <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-600">
@@ -2747,6 +2924,47 @@ export default function ReceiptsPage() {
                       <span><span className="font-medium">Nationality:</span> {selectedPatientInfo.nationality}</span>
                     )}
                   </div>
+                </div>
+              )}
+
+              {patientId && selectedPatientBalancesInClinic.length > 0 && (
+                <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-wide text-amber-800">
+                        Outstanding Balance
+                      </p>
+                      <p className="mt-1 text-sm text-amber-900">
+                        This patient has {selectedPatientBalancesInClinic.length} unpaid balance{selectedPatientBalancesInClinic.length > 1 ? "s" : ""} totalling{" "}
+                        <span className="font-bold">
+                          AED {selectedPatientBalancesInClinic.reduce((s, x) => s + x.rollup.remaining, 0).toFixed(2)}
+                        </span>
+                        .
+                      </p>
+                    </div>
+                  </div>
+                  <ul className="mt-2 space-y-1">
+                    {selectedPatientBalancesInClinic.map(({ balance, payments, rollup }) => (
+                      <li key={balance.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-xs">
+                        <span className="text-slate-700">
+                          {new Date(balance.original_date).toLocaleDateString("en-GB")} · {formatBalanceReference(balance)} · AED {rollup.remaining.toFixed(2)}
+                        </span>
+                        <button
+                          onClick={() => {
+                            if (!receptionistId) { alert("Open the register first."); return; }
+                            setCollectBalanceContext({
+                              balance,
+                              payments,
+                              patient: patients.find((p) => p.id === patientId) || selectedPatientInfo,
+                            });
+                          }}
+                          className="rounded-xl bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500"
+                        >
+                          Collect Payment
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
 
@@ -3159,6 +3377,34 @@ export default function ReceiptsPage() {
                 <div className="rounded-3xl bg-white p-6 shadow-2xl max-w-md w-full mx-4">
                   <h3 className="text-lg font-semibold text-slate-900 mb-4">Select Payment Method</h3>
 
+                  <div className="mb-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="flex items-center justify-between text-sm text-slate-700">
+                      <span>Treatment Total</span>
+                      <span className="font-semibold">AED {total.toFixed(2)}</span>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600">Amount to Pay Today (AED)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        max={total}
+                        value={payTodayInput}
+                        onChange={(e) => setPayTodayInput(e.target.value)}
+                        placeholder={total.toFixed(2)}
+                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                      />
+                    </div>
+                    {getOutstandingAfterPayment() > 0.0049 ? (
+                      <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">
+                        <span>Outstanding Balance</span>
+                        <span>AED {getOutstandingAfterPayment().toFixed(2)}</span>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">Paying in full — no outstanding balance.</p>
+                    )}
+                  </div>
+
                   <div className="grid gap-3">
                     {paymentOptions.map((method) => (
                       <button
@@ -3260,7 +3506,7 @@ export default function ReceiptsPage() {
                           />
                         </div>
                       )}
-                      <p className="text-xs text-slate-600">Entered total: AED {(getMixedCashAmount() + getMixedOtherAmount()).toFixed(2)} / AED {total.toFixed(2)}</p>
+                      <p className="text-xs text-slate-600">Entered total: AED {(getMixedCashAmount() + getMixedOtherAmount()).toFixed(2)} / AED {getAmountDueToday().toFixed(2)}</p>
                     </div>
                   )}
 
@@ -3332,12 +3578,14 @@ export default function ReceiptsPage() {
                         setShowNationalitySuggestions(false);
                         setPatientEmiratesIdInput("");
                         setPatientPassportInput("");
+                        setPatientMrnInput("");
                         setSelectedPatientInfo(null);
                         setTransactionPatientId("");
                         setDoctorId("");
                         setSelectedPaymentMethod("");
                         setTabbyReferenceInput("");
                         setTamaraReferenceInput("");
+                        setPayTodayInput("");
                         setNotes("");
                         setSelectedServices([]);
                         setDiscountInput("");
@@ -3432,9 +3680,47 @@ export default function ReceiptsPage() {
           setShowSearchPatientModal(false);
         }}
         patients={patients}
+        clinicId={activeClinic?.id ?? null}
+        outstandingBalances={outstandingBalances}
+        balancePayments={balancePayments}
+        clinicsList={clinics}
+        onCollectBalance={({ balance, payments, patient }) => {
+          if (!receptionistId) { alert("Open the register first."); return; }
+          setShowSearchPatientModal(false);
+          setCollectBalanceContext({ balance, payments, patient });
+        }}
       />
       <ReceiptHistoryModal isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} clinicId={activeClinic?.id} clinic={activeClinic ?? null} />
-      <TreatmentHistoryModal isOpen={showTreatmentHistoryModal} onClose={() => setShowTreatmentHistoryModal(false)} />
+      <TreatmentHistoryModal isOpen={showTreatmentHistoryModal} onClose={() => setShowTreatmentHistoryModal(false)} clinicId={activeClinic?.id ?? null} />
+      <CollectBalancePaymentModal
+        isOpen={collectBalanceContext !== null}
+        onClose={() => setCollectBalanceContext(null)}
+        balance={collectBalanceContext?.balance ?? null}
+        patient={collectBalanceContext?.patient ?? null}
+        clinic={activeClinic ?? null}
+        existingPayments={collectBalanceContext?.payments ?? []}
+        receptionistId={receptionistId || null}
+        registerSessionId={registerSessionId || null}
+        onCollected={(payment, ctx) => {
+          setBalancePayments((prev) => [payment, ...prev]);
+          const cashierName =
+            receptionists.find((p: any) => p.id === (receptionistId || loginReceptionistId))?.name || "Reception";
+          const totalPaidBefore = (collectBalanceContext?.payments || []).reduce(
+            (s, p) => s + Number(p.amount || 0),
+            0
+          );
+          printPaymentReceipt({
+            balance: ctx.balance,
+            payment,
+            patient: ctx.patient,
+            clinic: ctx.clinic,
+            cashierName,
+            totalPaidBefore,
+            remainingAfter: ctx.remainingAfter,
+          });
+          refetchBalancePayments();
+        }}
+      />
     </AppFrame>
   );
 }

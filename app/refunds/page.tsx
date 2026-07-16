@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
+import { receptionistIdsForClinic } from "../../lib/clinic-scope";
 
 const BOSS_PIN = "0404";
 
@@ -10,6 +11,10 @@ export default function RefundsPage() {
   const [pinInput, setPinInput] = useState("");
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [pinError, setPinError] = useState("");
+
+  const [clinics, setClinics] = useState<any[]>([]);
+  const [receptionists, setReceptionists] = useState<any[]>([]);
+  const [selectedClinicId, setSelectedClinicId] = useState<string>("");
 
   const [receiptSearch, setReceiptSearch] = useState("");
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -32,19 +37,44 @@ export default function RefundsPage() {
   }
 
   useEffect(() => {
+    if (!isUnlocked) return;
+    (async () => {
+      const [clinicsRes, receptionistsRes] = await Promise.all([
+        supabase.from("clinics").select("id, name").order("name"),
+        supabase.from("receptionist").select("id, clinic_id"),
+      ]);
+      const clinicRows = clinicsRes.data || [];
+      setClinics(clinicRows);
+      setReceptionists(receptionistsRes.data || []);
+      setSelectedClinicId((prev) => {
+        if (prev && clinicRows.some((c: any) => c.id === prev)) return prev;
+        return clinicRows[0]?.id ?? "";
+      });
+    })();
+  }, [isUnlocked]);
+
+  useEffect(() => {
     const timer = setTimeout(() => {
       searchReceipts();
     }, 300);
     return () => clearTimeout(timer);
-  }, [receiptSearch]);
+  }, [receiptSearch, selectedClinicId]);
 
   async function searchReceipts() {
-    if (!receiptSearch.trim()) {
+    if (!receiptSearch.trim() || !selectedClinicId) {
       setSearchResults([]);
       return;
     }
     const query = receiptSearch.trim().toLowerCase();
-    const { data } = await supabase.from("receipts").select("*, patients(name), receptionist(name)");
+    const ids = receptionistIdsForClinic(receptionists, selectedClinicId);
+    if (ids.length === 0) {
+      setSearchResults([]);
+      return;
+    }
+    const { data } = await supabase
+      .from("receipts")
+      .select("*, patients(name), receptionist(name)")
+      .in("receptionist_id", ids);
     if (data) {
       const filtered = data.filter((r: any) =>
         String(r.id || "").toLowerCase().includes(query) ||
@@ -290,7 +320,16 @@ export default function RefundsPage() {
   return (
     <AppFrame title="Refunds" description="Process refunds with boss authorization.">
       <div className="space-y-6">
-        <div className="flex justify-end">
+        <div className="flex justify-between items-center gap-3">
+          <select
+            value={selectedClinicId}
+            onChange={(e) => setSelectedClinicId(e.target.value)}
+            className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium outline-none transition focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
+          >
+            {clinics.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
           <button
             onClick={() => setIsUnlocked(false)}
             className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-500 transition hover:bg-slate-50"

@@ -3,8 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic } from "../../lib/types";
+import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic, OutstandingBalance, BalancePayment } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
+import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
+import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
 
 const BACKEND_PIN = "0404";
 
@@ -18,7 +20,7 @@ export default function BackendPage() {
   const [receptionists, setReceptionists] = useState<Receptionist[]>([]);
   const [cashRegisterSessions, setCashRegisterSessions] = useState<CashRegisterSession[]>([]);
   const [clinics, setClinics] = useState<Clinic[]>([]);
-  const [selectedClinicId, setSelectedClinicId] = useState<string>("all");
+  const [selectedClinicId, setSelectedClinicId] = useState<string>("");
   const [isRegisterTableReady, setIsRegisterTableReady] = useState(true);
   const [activeSessions, setActiveSessions] = useState<{ token: string; ip: string; user_agent: string; created_at: string }[]>([]);
   const [loginLogs, setLoginLogs] = useState<{ id: string; ip: string; user_agent: string; success: boolean; created_at: string }[]>([]);
@@ -33,6 +35,7 @@ export default function BackendPage() {
   const [patientNationality, setPatientNationality] = useState("");
   const [patientEmiratesId, setPatientEmiratesId] = useState("");
   const [patientPassportNumber, setPatientPassportNumber] = useState("");
+  const [patientMrn, setPatientMrn] = useState("");
 
   const [editingPatientId, setEditingPatientId] = useState("");
   const [editingPatientName, setEditingPatientName] = useState("");
@@ -44,8 +47,12 @@ export default function BackendPage() {
   const [editingPatientNationality, setEditingPatientNationality] = useState("");
   const [editingPatientEmiratesId, setEditingPatientEmiratesId] = useState("");
   const [editingPatientPassportNumber, setEditingPatientPassportNumber] = useState("");
+  const [editingPatientMrn, setEditingPatientMrn] = useState("");
   const [patientPage, setPatientPage] = useState(1);
   const [expandedPatientId, setExpandedPatientId] = useState<string | null>(null);
+  const [outstandingBalances, setOutstandingBalances] = useState<OutstandingBalance[]>([]);
+  const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
+  const [addBalancePatient, setAddBalancePatient] = useState<Patient | null>(null);
 
   const [doctorName, setDoctorName] = useState("");
   const [doctorSpecialty, setDoctorSpecialty] = useState("");
@@ -108,13 +115,50 @@ export default function BackendPage() {
 
   useEffect(() => { setPatientPage(1); }, [patientSearch]);
 
+  const balancesByPatient = useMemo(() => {
+    const map = new Map<string, OutstandingBalance[]>();
+    for (const b of outstandingBalances) {
+      const arr = map.get(b.patient_id) || [];
+      arr.push(b);
+      map.set(b.patient_id, arr);
+    }
+    return map;
+  }, [outstandingBalances]);
+
+  const paymentsByBalance = useMemo(() => {
+    const map = new Map<string, BalancePayment[]>();
+    for (const p of balancePayments) {
+      const arr = map.get(p.outstanding_balance_id) || [];
+      arr.push(p);
+      map.set(p.outstanding_balance_id, arr);
+    }
+    return map;
+  }, [balancePayments]);
+
+  const clinicNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const c of clinics) map.set(c.id, c.name);
+    return map;
+  }, [clinics]);
+
+  async function deleteBalance(id: string) {
+    if (!confirm("Delete this outstanding balance? Any recorded payments will also be removed.")) return;
+    const { error } = await supabase.from("outstanding_balances").delete().eq("id", id);
+    if (error) {
+      alert(`Delete failed: ${error.message || error.code || "Unknown error"}`);
+      return;
+    }
+    setOutstandingBalances((prev) => prev.filter((b) => b.id !== id));
+    setBalancePayments((prev) => prev.filter((p) => p.outstanding_balance_id !== id));
+  }
+
   const displayedDoctors = useMemo(() =>
-    selectedClinicId === "all" ? doctors : doctors.filter(d => d.clinic_id === selectedClinicId),
+    selectedClinicId ? doctors.filter(d => d.clinic_id === selectedClinicId) : [],
     [doctors, selectedClinicId]
   );
 
   const displayedServices = useMemo(() =>
-    selectedClinicId === "all" ? services : services.filter(s => s.clinic_id === selectedClinicId),
+    selectedClinicId ? services.filter(s => s.clinic_id === selectedClinicId) : [],
     [services, selectedClinicId]
   );
 
@@ -127,9 +171,15 @@ export default function BackendPage() {
   useEffect(() => { setServicePage(1); }, [selectedClinicId]);
 
   const displayedReceptionists = useMemo(() =>
-    selectedClinicId === "all" ? receptionists : receptionists.filter(r => r.clinic_id === selectedClinicId),
+    selectedClinicId ? receptionists.filter(r => r.clinic_id === selectedClinicId) : [],
     [receptionists, selectedClinicId]
   );
+
+  const displayedCashSessions = useMemo(() => {
+    if (!selectedClinicId) return [] as CashRegisterSession[];
+    const ids = new Set(receptionists.filter(r => r.clinic_id === selectedClinicId).map(r => r.id));
+    return cashRegisterSessions.filter(s => s.receptionist_id != null && ids.has(s.receptionist_id));
+  }, [cashRegisterSessions, receptionists, selectedClinicId]);
 
   useEffect(() => {
     if (isUnlocked) {
@@ -155,6 +205,8 @@ export default function BackendPage() {
       clinicsResult,
       sessionsResult,
       logsResult,
+      balancesResult,
+      balancePaymentsResult,
     ] = await Promise.all([
       supabase.from("patients").select("*"),
       supabase.from("doctors").select("*"),
@@ -168,15 +220,40 @@ export default function BackendPage() {
       supabase.from("clinics").select("*").order("name"),
       supabase.from("active_sessions").select("*").order("created_at", { ascending: false }),
       supabase.from("login_logs").select("*").order("created_at", { ascending: false }).limit(20),
+      supabase.from("outstanding_balances").select("*").order("original_date", { ascending: false }),
+      supabase.from("balance_payments").select("*").order("created_at", { ascending: false }),
     ]);
 
     setPatients((patientsResult.data || []) as Patient[]);
     setDoctors((doctorsResult.data || []) as Doctor[]);
     setServices((servicesResult.data || []) as Service[]);
     setReceptionists((receptionistsResult.data || []) as Receptionist[]);
-    setClinics((clinicsResult.data || []) as Clinic[]);
+    const clinicRows = (clinicsResult.data || []) as Clinic[];
+    setClinics(clinicRows);
+    setSelectedClinicId((prev) => {
+      if (prev && prev !== "all" && clinicRows.some((c) => c.id === prev)) return prev;
+      return clinicRows[0]?.id ?? "";
+    });
     setActiveSessions((sessionsResult.data || []) as typeof activeSessions);
     setLoginLogs((logsResult.data || []) as typeof loginLogs);
+
+    if (balancesResult.error) {
+      if (balancesResult.error.code !== "42P01") {
+        console.warn("Failed loading outstanding balances", balancesResult.error);
+      }
+      setOutstandingBalances([]);
+    } else {
+      setOutstandingBalances((balancesResult.data || []) as OutstandingBalance[]);
+    }
+
+    if (balancePaymentsResult.error) {
+      if (balancePaymentsResult.error.code !== "42P01") {
+        console.warn("Failed loading balance payments", balancePaymentsResult.error);
+      }
+      setBalancePayments([]);
+    } else {
+      setBalancePayments((balancePaymentsResult.data || []) as BalancePayment[]);
+    }
 
     if (cashSessionsResult.error) {
       setCashRegisterSessions([]);
@@ -215,8 +292,8 @@ export default function BackendPage() {
       .select("id, receipt_number, created_at, patient_id, receptionist_id, payment_method, subtotal, discount_amount, total");
 
     const allReceipts = receipts || [];
-    const filteredReceipts = selectedClinicId === "all"
-      ? allReceipts
+    const filteredReceipts = !selectedClinicId
+      ? []
       : allReceipts.filter((r) => {
           const rec = receptionists.find((p) => p.id === r.receptionist_id);
           return rec?.clinic_id === selectedClinicId;
@@ -243,7 +320,7 @@ export default function BackendPage() {
 
     // Patients CSV — always all patients
     const patientRows: string[][] = [
-      ["Name", "Phone", "Email", "Date of Birth", "Sex", "Nationality", "Emirates ID", "Passport No.", "Notes", "Clinics Visited", "Last Visit", "Days Since Last Visit"],
+      ["Name", "Phone", "Email", "Date of Birth", "Sex", "Nationality", "Emirates ID", "Passport No.", "MRN", "Notes", "Clinics Visited", "Last Visit", "Days Since Last Visit"],
     ];
     for (const p of patients) {
       const clinicsVisited = [...(patientClinicMap[p.id] || [])].join(", ");
@@ -261,6 +338,7 @@ export default function BackendPage() {
         p.nationality || "",
         p.emirates_id || "",
         p.passport_number || "",
+        p.mrn || "",
         p.notes || "",
         clinicsVisited,
         lastVisitStr,
@@ -292,7 +370,7 @@ export default function BackendPage() {
     }
 
     const dateStr = new Date().toISOString().split("T")[0];
-    const clinicLabel = selectedClinicId === "all" ? "all-clinics" : (clinics.find((c) => c.id === selectedClinicId)?.name || "clinic").replace(/\s+/g, "-").toLowerCase();
+    const clinicLabel = !selectedClinicId ? "clinic" : (clinics.find((c) => c.id === selectedClinicId)?.name || "clinic").replace(/\s+/g, "-").toLowerCase();
     downloadCSV(`patients_${dateStr}.csv`, patientRows);
     setTimeout(() => downloadCSV(`receipts_${clinicLabel}_${dateStr}.csv`, receiptRows), 400);
   }
@@ -322,6 +400,7 @@ export default function BackendPage() {
         nationality: patientNationality || null,
         emirates_id: patientEmiratesId || null,
         passport_number: patientPassportNumber || null,
+        mrn: patientMrn || null,
       },
     ]);
 
@@ -339,6 +418,7 @@ export default function BackendPage() {
     setPatientNationality("");
     setPatientEmiratesId("");
     setPatientPassportNumber("");
+    setPatientMrn("");
     loadAll();
   }
 
@@ -360,6 +440,7 @@ export default function BackendPage() {
         nationality: editingPatientNationality || null,
         emirates_id: editingPatientEmiratesId || null,
         passport_number: editingPatientPassportNumber || null,
+        mrn: editingPatientMrn || null,
       })
       .eq("id", id);
 
@@ -378,6 +459,7 @@ export default function BackendPage() {
     setEditingPatientNationality("");
     setEditingPatientEmiratesId("");
     setEditingPatientPassportNumber("");
+    setEditingPatientMrn("");
     loadAll();
   }
 
@@ -413,7 +495,7 @@ export default function BackendPage() {
       alert("Doctor name is required.");
       return;
     }
-    if (selectedClinicId === "all") {
+    if (!selectedClinicId) {
       alert("Please select a specific clinic before adding a doctor.");
       return;
     }
@@ -490,7 +572,7 @@ export default function BackendPage() {
       return;
     }
 
-    if (selectedClinicId === "all") {
+    if (!selectedClinicId) {
       alert("Please select a specific clinic before adding a service.");
       return;
     }
@@ -583,7 +665,7 @@ export default function BackendPage() {
       return;
     }
 
-    if (selectedClinicId === "all") {
+    if (!selectedClinicId) {
       alert("Please select a specific clinic before adding a receptionist.");
       return;
     }
@@ -721,12 +803,11 @@ export default function BackendPage() {
           onChange={(e) => setSelectedClinicId(e.target.value)}
           className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
         >
-          <option value="all">All Clinics</option>
           {clinics.map((c) => (
             <option key={c.id} value={c.id}>{c.name}</option>
           ))}
         </select>
-        {selectedClinicId !== "all" && (
+        {selectedClinicId && (
           <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700">
             {clinics.find(c => c.id === selectedClinicId)?.room}
           </span>
@@ -815,6 +896,12 @@ export default function BackendPage() {
               placeholder="Passport Number"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
+            <input
+              value={patientMrn}
+              onChange={(e) => setPatientMrn(e.target.value)}
+              placeholder="MRN (Medical Record No.)"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
           </div>
           <button
             onClick={addPatient}
@@ -893,6 +980,12 @@ export default function BackendPage() {
                       placeholder="Passport Number"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
+                    <input
+                      value={editingPatientMrn}
+                      onChange={(e) => setEditingPatientMrn(e.target.value)}
+                      placeholder="MRN (Medical Record No.)"
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
                     <div className="flex gap-2">
                       <button
                         onClick={() => updatePatient(patient.id)}
@@ -940,10 +1033,54 @@ export default function BackendPage() {
                         {patient.passport_number && (
                           <p className="text-xs text-slate-400">Passport: {patient.passport_number}</p>
                         )}
+                        {patient.mrn && (
+                          <p className="text-xs text-slate-400">MRN: {patient.mrn}</p>
+                        )}
                         {patient.notes && (
                           <p className="text-xs italic text-slate-400">{patient.notes}</p>
                         )}
-                        <div className="flex gap-2 pt-2">
+                        {(() => {
+                          const patientBalances = balancesByPatient.get(patient.id) || [];
+                          if (patientBalances.length === 0) return null;
+                          return (
+                            <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-2">
+                              <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                                Outstanding Balances
+                              </p>
+                              <ul className="mt-1 space-y-1">
+                                {patientBalances.map((bal) => {
+                                  const roll = rollupBalance(bal, paymentsByBalance.get(bal.id) || []);
+                                  return (
+                                    <li key={bal.id} className="flex items-center justify-between gap-2 text-xs">
+                                      <span className="min-w-0 truncate text-slate-700">
+                                        {clinicNameById.get(bal.clinic_id) || "—"} · {new Date(bal.original_date).toLocaleDateString("en-GB")} · {formatBalanceReference(bal)}
+                                      </span>
+                                      <span className="flex items-center gap-2 shrink-0">
+                                        <span className={
+                                          roll.status === "Paid"
+                                            ? "text-emerald-700"
+                                            : roll.status === "Partial"
+                                            ? "text-amber-700"
+                                            : "text-rose-700"
+                                        }>
+                                          AED {roll.remaining.toFixed(2)} · {roll.status}
+                                        </span>
+                                        <button
+                                          onClick={() => deleteBalance(bal.id)}
+                                          className="text-[10px] font-semibold text-rose-600 hover:underline"
+                                          title="Delete balance"
+                                        >
+                                          ×
+                                        </button>
+                                      </span>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          );
+                        })()}
+                        <div className="flex flex-wrap gap-2 pt-2">
                           <button
                             onClick={() => {
                               setEditingPatientId(patient.id);
@@ -956,11 +1093,18 @@ export default function BackendPage() {
                               setEditingPatientNationality(patient.nationality || "");
                               setEditingPatientEmiratesId(patient.emirates_id || "");
                               setEditingPatientPassportNumber(patient.passport_number || "");
+                              setEditingPatientMrn(patient.mrn || "");
                               setExpandedPatientId(null);
                             }}
                             className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600"
                           >
                             Edit
+                          </button>
+                          <button
+                            onClick={() => setAddBalancePatient(patient)}
+                            className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100"
+                          >
+                            + Add Balance
                           </button>
                           <button
                             onClick={() => deletePatient(patient.id)}
@@ -1387,7 +1531,7 @@ export default function BackendPage() {
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
             Cashier sessions table is not set up yet. Create table <strong>cash_register_sessions</strong> in Supabase to enable this report.
           </div>
-        ) : cashRegisterSessions.length === 0 ? (
+        ) : displayedCashSessions.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500">
             No cashier sessions recorded today.
           </div>
@@ -1406,7 +1550,7 @@ export default function BackendPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white">
-                {cashRegisterSessions.map((session) => {
+                {displayedCashSessions.map((session) => {
                   const isOpen = !session.closed_at;
                   return (
                     <tr key={session.id}>
@@ -1520,6 +1664,16 @@ export default function BackendPage() {
           )}
         </div>
       </div>
+      <AddOutstandingBalanceModal
+        isOpen={addBalancePatient !== null}
+        onClose={() => setAddBalancePatient(null)}
+        patient={addBalancePatient}
+        clinics={clinics}
+        createdBy={null}
+        onSaved={(bal) => {
+          setOutstandingBalances((prev) => [bal, ...prev]);
+        }}
+      />
     </AppFrame>
   );
 }

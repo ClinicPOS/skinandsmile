@@ -20,7 +20,7 @@ export default function ReceiptLogPage() {
   const [allRefunds, setAllRefunds] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [selectedClinicId, setSelectedClinicId] = useState("all");
+  const [selectedClinicId, setSelectedClinicId] = useState("");
   const [page, setPage] = useState(1);
 
   const [selectedReceipt, setSelectedReceipt] = useState<any | null>(null);
@@ -36,6 +36,7 @@ export default function ReceiptLogPage() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [lastRefund, setLastRefund] = useState<any | null>(null);
   const [refundedItems, setRefundedItems] = useState<any[]>([]);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -64,7 +65,14 @@ export default function ReceiptLogPage() {
     if (receiptsRes.status === "fulfilled") setReceipts(receiptsRes.value.data || []);
     if (patientsRes.status === "fulfilled") setPatients(patientsRes.value.data || []);
     if (receptionistsRes.status === "fulfilled") setReceptionists(receptionistsRes.value.data || []);
-    if (clinicsRes.status === "fulfilled") setClinics(clinicsRes.value.data || []);
+    if (clinicsRes.status === "fulfilled") {
+      const clinicRows = clinicsRes.value.data || [];
+      setClinics(clinicRows);
+      setSelectedClinicId((prev) => {
+        if (prev && clinicRows.some((c: any) => c.id === prev)) return prev;
+        return clinicRows[0]?.id ?? "";
+      });
+    }
     if (doctorsRes.status === "fulfilled") setDoctors(doctorsRes.value.data || []);
     if (servicesRes.status === "fulfilled") setServices(servicesRes.value.data || []);
     if (refundsRes.status === "fulfilled") setAllRefunds(refundsRes.value.data || []);
@@ -73,11 +81,13 @@ export default function ReceiptLogPage() {
 
   const filteredReceipts = useMemo(() => {
     let result = receipts;
-    if (selectedClinicId !== "all") {
+    if (selectedClinicId) {
       const clinicReceptionistIds = new Set(
         receptionists.filter((r) => r.clinic_id === selectedClinicId).map((r) => r.id)
       );
       result = result.filter((r) => clinicReceptionistIds.has(r.receptionist_id));
+    } else {
+      result = [];
     }
     if (search.trim()) {
       const q = search.trim().toLowerCase();
@@ -368,6 +378,47 @@ export default function ReceiptLogPage() {
     w.focus(); setTimeout(() => w.print(), 500);
   }
 
+  async function deleteReceipt(receipt: any) {
+    const receiptLabel = receipt.receipt_number
+      ? `#${String(receipt.receipt_number).padStart(5, "0")}`
+      : `#${String(receipt.id).slice(0, 8)}`;
+    const patientName = patients.find((p) => p.id === receipt.patient_id)?.name || "Unknown Patient";
+    const confirmed = confirm(
+      `Permanently delete receipt ${receiptLabel} for ${patientName} (AED ${Number(receipt.total || 0).toFixed(2)})?\n\nThis also deletes its items, refunds, and any outstanding balance created by it. This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setIsDeleting(true);
+    try {
+      // Remove any outstanding balance auto-created by this receipt first
+      // (its collected payments cascade). receipt_id may not exist on databases
+      // that haven't run the partial-payments migration — ignore that error.
+      const { error: balanceError } = await supabase
+        .from("outstanding_balances")
+        .delete()
+        .eq("receipt_id", receipt.id);
+      if (balanceError && balanceError.code !== "42703") {
+        console.error("Delete linked outstanding balance failed:", balanceError);
+        alert(`Error deleting the receipt's outstanding balance: ${balanceError.message}`);
+        return;
+      }
+
+      // receipt_items and refunds cascade in the database.
+      const { error } = await supabase.from("receipts").delete().eq("id", receipt.id);
+      if (error) {
+        console.error("Delete receipt failed:", error);
+        alert(`Error deleting receipt: ${error.message}`);
+        return;
+      }
+
+      setReceipts((prev) => prev.filter((r) => r.id !== receipt.id));
+      setAllRefunds((prev) => prev.filter((r) => r.receipt_id !== receipt.id));
+      setSelectedReceipt(null);
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
   if (!isUnlocked) {
     return (
       <AppFrame title="Receipt History" description="View and manage past receipts.">
@@ -414,7 +465,6 @@ export default function ReceiptLogPage() {
             onChange={(e) => setSelectedClinicId(e.target.value)}
             className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
           >
-            <option value="all">All Clinics</option>
             {clinics.map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
@@ -560,10 +610,11 @@ export default function ReceiptLogPage() {
 
                             <div className="mt-4 flex gap-2">
                               <button
-                                onClick={reprintReceipt}
-                                className="flex-1 rounded-2xl border border-teal-300 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 transition hover:bg-teal-100"
+                                onClick={() => deleteReceipt(receipt)}
+                                disabled={isDeleting}
+                                className="flex-1 rounded-2xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60"
                               >
-                                Reprint
+                                {isDeleting ? "Deleting…" : "Delete"}
                               </button>
                               <button
                                 onClick={() => {

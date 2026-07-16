@@ -21,6 +21,7 @@ export type Patient = {
   nationality?: string | null;
   emirates_id?: string | null;
   passport_number?: string | null;
+  mrn?: string | null;
 };
 
 export type Doctor = {
@@ -65,5 +66,29 @@ export type PatientNote = {
   doctor_id: string | null;
   receptionist_id: string | null;
   clinic_id: string | null;
+  created_at: string;
+};
+
+export type OutstandingBalance = {
+  id: string;
+  patient_id: string;
+  clinic_id: string;
+  original_date: string;
+  original_amount: number;
+  reason: string | null;
+  reference_number: string | null;
+  created_by: string | null;
+  receipt_id?: string | null;
+  created_at: string;
+};
+
+export type BalancePayment = {
+  id: string;
+  outstanding_balance_id: string;
+  amount: number;
+  payment_method: string;
+  receptionist_id: string;
+  register_session_id: string | null;
+  notes: string | null;
   created_at: string;
 };

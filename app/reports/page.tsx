@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import type { Clinic, Patient, Receptionist, Service } from "../../lib/types";
+import type { Clinic, Patient, Receptionist, Service, BalancePayment } from "../../lib/types";
 
 const BOSS_PIN = "doctorsafarreport";
 
@@ -57,10 +57,16 @@ type Receipt = {
   receptionist_id: string;
   patient_id: string | null;
   total: number;
+  amount_paid?: number | null;
   payment_method: string | null;
   notes?: string | null;
   created_at: string;
 };
+
+// Money actually received for a receipt; NULL amount_paid = paid in full.
+function receiptPaidAmount(r: Receipt): number {
+  return r.amount_paid != null ? Number(r.amount_paid) : Number(r.total || 0);
+}
 
 type ReceiptItem = {
   id: string;
@@ -109,6 +115,7 @@ export default function ReportsPage() {
   const [receiptItems, setReceiptItems] = useState<ReceiptItem[]>([]);
   const [services, setServices] = useState<Service[]>([]);
   const [refunds, setRefunds] = useState<Refund[]>([]);
+  const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
 
   const [isLoading, setIsLoading] = useState(false);
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
@@ -172,10 +179,11 @@ export default function ReportsPage() {
     const from = new Date(year, month, 1).toISOString();
     const to = new Date(year, month + 1, 1).toISOString();
 
-    const [receiptsRes, itemsRes, servicesRes] = await Promise.allSettled([
+    const [receiptsRes, itemsRes, servicesRes, balPayRes] = await Promise.allSettled([
       supabase.from("receipts").select("*").gte("created_at", from).lt("created_at", to),
       supabase.from("receipt_items").select("*, services(name)").gte("created_at", from).lt("created_at", to),
       supabase.from("services").select("*"),
+      supabase.from("balance_payments").select("*").gte("created_at", from).lt("created_at", to),
     ]);
 
     const loadedReceipts: Receipt[] = receiptsRes.status === "fulfilled" ? ((receiptsRes.value.data || []) as Receipt[]) : [];
@@ -190,15 +198,21 @@ export default function ReportsPage() {
     if (itemsRes.status === "fulfilled") setReceiptItems((itemsRes.value.data || []) as ReceiptItem[]);
     if (servicesRes.status === "fulfilled") setServices((servicesRes.value.data || []) as Service[]);
     setRefunds(loadedRefunds);
+    if (balPayRes.status === "fulfilled" && !balPayRes.value.error) {
+      setBalancePayments((balPayRes.value.data || []) as BalancePayment[]);
+    } else {
+      setBalancePayments([]);
+    }
     setIsLoading(false);
   }
 
   async function loadAllReceipts() {
     setIsLoading(true);
-    const [receiptsRes, itemsRes, servicesRes] = await Promise.allSettled([
+    const [receiptsRes, itemsRes, servicesRes, balPayRes] = await Promise.allSettled([
       supabase.from("receipts").select("*"),
       supabase.from("receipt_items").select("*, services(name)"),
       supabase.from("services").select("*"),
+      supabase.from("balance_payments").select("*"),
     ]);
 
     const loadedReceipts: Receipt[] = receiptsRes.status === "fulfilled" ? ((receiptsRes.value.data || []) as Receipt[]) : [];
@@ -213,6 +227,11 @@ export default function ReportsPage() {
     if (itemsRes.status === "fulfilled") setReceiptItems((itemsRes.value.data || []) as ReceiptItem[]);
     if (servicesRes.status === "fulfilled") setServices((servicesRes.value.data || []) as Service[]);
     setRefunds(loadedRefunds);
+    if (balPayRes.status === "fulfilled" && !balPayRes.value.error) {
+      setBalancePayments((balPayRes.value.data || []) as BalancePayment[]);
+    } else {
+      setBalancePayments([]);
+    }
     setIsLoading(false);
   }
 
@@ -322,6 +341,14 @@ export default function ReportsPage() {
     });
   }, [getFilterRange]);
 
+  const getFilteredBalancePayments = useCallback(() => {
+    const { from, to } = getFilterRange();
+    return balancePayments.filter((p) => {
+      const d = new Date(p.created_at || new Date());
+      return d >= from && d < to;
+    });
+  }, [balancePayments, getFilterRange]);
+
   const receptionistStats = useMemo(() => {
     if (role !== "receptionist") return null;
     const clinicReceptionistIds = new Set(
@@ -330,13 +357,26 @@ export default function ReportsPage() {
     const filteredReceipts = getFilteredReceipts(receipts);
     const mine = filteredReceipts.filter((r) => clinicReceptionistIds.has(r.receptionist_id));
     const cashReceipts = mine.filter((r) => (r.payment_method || "").toLowerCase().startsWith("cash"));
-    const cashTotal = cashReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
-    const totalRevenue = mine.reduce((s, r) => s + Number(r.total || 0), 0);
+    const cashTotal = cashReceipts.reduce((s, r) => s + receiptPaidAmount(r), 0);
+    const totalRevenue = mine.reduce((s, r) => s + receiptPaidAmount(r), 0);
 
     const paymentBreakdown: Record<string, number> = {};
     for (const r of mine) {
       const cat = getPaymentCategory(r.payment_method || "");
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
+      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + receiptPaidAmount(r);
+    }
+
+    const myBalancePayments = getFilteredBalancePayments().filter((p) =>
+      clinicReceptionistIds.has(p.receptionist_id)
+    );
+    const collectionsTotal = myBalancePayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const collectionsCash = myBalancePayments
+      .filter((p) => (p.payment_method || "").toLowerCase().startsWith("cash"))
+      .reduce((s, p) => s + Number(p.amount || 0), 0);
+    const collectionsBreakdown: Record<string, number> = {};
+    for (const p of myBalancePayments) {
+      const cat = getPaymentCategory(p.payment_method || "");
+      collectionsBreakdown[cat] = (collectionsBreakdown[cat] || 0) + Number(p.amount || 0);
     }
 
     const myRefunds = refunds.filter((refund) => {
@@ -346,8 +386,20 @@ export default function ReportsPage() {
     const totalRefunded = myRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
     const netRevenue = totalRevenue - totalRefunded;
 
-    return { totalTransactions: mine.length, cashTotal, cashCount: cashReceipts.length, totalRevenue: netRevenue, paymentBreakdown, totalRefunded, grossRevenue: totalRevenue };
-  }, [role, receipts, refunds, receptionists, activeClinicId, getFilteredReceipts]);
+    return {
+      totalTransactions: mine.length,
+      cashTotal,
+      cashCount: cashReceipts.length,
+      totalRevenue: netRevenue,
+      paymentBreakdown,
+      totalRefunded,
+      grossRevenue: totalRevenue,
+      collectionsTotal,
+      collectionsCash,
+      collectionsCount: myBalancePayments.length,
+      collectionsBreakdown,
+    };
+  }, [role, receipts, refunds, receptionists, activeClinicId, getFilteredReceipts, getFilteredBalancePayments]);
 
   const bossStats = useMemo(() => {
     if (role !== "boss") return null;
@@ -362,7 +414,7 @@ export default function ReportsPage() {
       });
     }
     
-    const totalRevenue = filteredReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
+    const totalRevenue = filteredReceipts.reduce((s, r) => s + receiptPaidAmount(r), 0);
     const totalPatients = new Set(filteredReceipts.filter((r) => r.patient_id).map((r) => r.patient_id)).size;
 
     const clinicMap: Record<string, { name: string; revenue: number; refunded: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
@@ -376,11 +428,11 @@ export default function ReportsPage() {
       if (!clinicId || !clinicMap[clinicId]) continue;
 
       const entry = clinicMap[clinicId];
-      entry.revenue += Number(receipt.total || 0);
+      entry.revenue += receiptPaidAmount(receipt);
       if (receipt.patient_id) entry.patients.add(receipt.patient_id);
 
       const cat = getPaymentCategory(receipt.payment_method || "");
-      entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Number(receipt.total || 0);
+      entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + receiptPaidAmount(receipt);
     }
 
     for (const refund of refunds) {
@@ -394,7 +446,7 @@ export default function ReportsPage() {
     const paymentBreakdown: Record<string, number> = {};
     for (const r of filteredReceipts) {
       const cat = getPaymentCategory(r.payment_method || "");
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Number(r.total || 0);
+      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + receiptPaidAmount(r);
     }
 
     const filteredRefunds = refunds.filter((refund) => {
@@ -404,6 +456,23 @@ export default function ReportsPage() {
     });
     const totalRefunded = filteredRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
     const netRevenue = totalRevenue - totalRefunded;
+
+    let bossBalancePayments = getFilteredBalancePayments();
+    if (selectedClinic) {
+      const clinicRecIds = new Set(
+        receptionists.filter((r) => r.clinic_id === selectedClinic).map((r) => r.id)
+      );
+      bossBalancePayments = bossBalancePayments.filter((p) => clinicRecIds.has(p.receptionist_id));
+    }
+    const collectionsTotal = bossBalancePayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const collectionsCash = bossBalancePayments
+      .filter((p) => (p.payment_method || "").toLowerCase().startsWith("cash"))
+      .reduce((s, p) => s + Number(p.amount || 0), 0);
+    const collectionsBreakdown: Record<string, number> = {};
+    for (const p of bossBalancePayments) {
+      const cat = getPaymentCategory(p.payment_method || "");
+      collectionsBreakdown[cat] = (collectionsBreakdown[cat] || 0) + Number(p.amount || 0);
+    }
 
     const serviceMap: Record<string, { name: string; count: number; revenue: number }> = {};
     const filteredReceiptIds = new Set(filteredReceipts.map((r) => r.id));
@@ -419,8 +488,8 @@ export default function ReportsPage() {
       .sort((a, b) => b.revenue - a.revenue)
       .slice(0, 10);
 
-    return { totalRevenue: netRevenue, totalPatients, totalTransactions: filteredReceipts.length, clinicMap, paymentBreakdown, topServices, totalRefunded, grossRevenue: totalRevenue };
-  }, [role, receipts, refunds, receiptItems, services, clinics, receptionists, selectedClinic, getFilteredReceipts]);
+    return { totalRevenue: netRevenue, totalPatients, totalTransactions: filteredReceipts.length, clinicMap, paymentBreakdown, topServices, totalRefunded, grossRevenue: totalRevenue, collectionsTotal, collectionsCash, collectionsCount: bossBalancePayments.length, collectionsBreakdown };
+  }, [role, receipts, refunds, receiptItems, services, clinics, receptionists, selectedClinic, getFilteredReceipts, getFilteredBalancePayments]);
 
   const clinicLabel = useMemo(() => {
     if (!selectedClinic) return "All Clinics";
@@ -584,7 +653,7 @@ export default function ReportsPage() {
         });
       }
 
-      const dayRevenue = dayReceipts.reduce((s, r) => s + Number(r.total || 0), 0);
+      const dayRevenue = dayReceipts.reduce((s, r) => s + receiptPaidAmount(r), 0);
       const dayPatients = new Set(
         dayReceipts.map((r) => r.patient_id).filter((patientId): patientId is string => Boolean(patientId))
       );
@@ -1249,6 +1318,40 @@ export default function ReportsPage() {
               </div>
             </div>
 
+            {bossStats && bossStats.collectionsCount > 0 && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
+                <div className="mb-4 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-amber-900">Collections (Previous Balances)</h3>
+                  <span className="rounded-full bg-amber-200 px-3 py-0.5 text-xs font-semibold text-amber-900">
+                    {bossStats.collectionsCount} payment{bossStats.collectionsCount > 1 ? "s" : ""}
+                  </span>
+                </div>
+                <div className="mb-4 grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-amber-700">Total Collected</p>
+                    <p className="mt-1 text-2xl font-bold text-amber-900">AED {bossStats.collectionsTotal.toFixed(2)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-amber-700">Cash Collected</p>
+                    <p className="mt-1 text-2xl font-bold text-amber-900">AED {bossStats.collectionsCash.toFixed(2)}</p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {Object.entries(bossStats.collectionsBreakdown)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([method, amount]) => (
+                      <div key={method} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm">
+                        <span className="font-medium text-slate-700">{method}</span>
+                        <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
+                      </div>
+                    ))}
+                </div>
+                <p className="mt-3 text-[11px] italic text-amber-700">
+                  Collections are payments against outstanding balances (old-system debts and POS partial payments). They are tracked separately from treatment revenue.
+                </p>
+              </div>
+            )}
+
             {/* ── ANALYTICS SECTION ── */}
             <div className="grid gap-4 sm:grid-cols-2">
               {/* Top Services */}
@@ -1504,6 +1607,40 @@ export default function ReportsPage() {
                         );
                       })}
                   </div>
+                </div>
+              )}
+
+              {receptionistStats.collectionsCount > 0 && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
+                  <div className="mb-4 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-amber-900">Collections (Previous Balances)</h3>
+                    <span className="rounded-full bg-amber-200 px-3 py-0.5 text-xs font-semibold text-amber-900">
+                      {receptionistStats.collectionsCount} payment{receptionistStats.collectionsCount > 1 ? "s" : ""}
+                    </span>
+                  </div>
+                  <div className="mb-4 grid grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-amber-700">Total Collected</p>
+                      <p className="mt-1 text-xl font-bold text-amber-900">AED {receptionistStats.collectionsTotal.toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-amber-700">Cash Collected</p>
+                      <p className="mt-1 text-xl font-bold text-amber-900">AED {receptionistStats.collectionsCash.toFixed(2)}</p>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    {Object.entries(receptionistStats.collectionsBreakdown)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([method, amount]) => (
+                        <div key={method} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm">
+                          <span className="font-medium text-slate-700">{method}</span>
+                          <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
+                        </div>
+                      ))}
+                  </div>
+                  <p className="mt-3 text-[11px] italic text-amber-700">
+                    Migrated balance collections — separate from treatment sales.
+                  </p>
                 </div>
               )}
             </div>
