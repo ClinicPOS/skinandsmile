@@ -27,6 +27,7 @@ type Receipt = {
   vat: number;
   total: number;
   amount_paid?: number | null;
+  credit_applied?: number | null;
   discount_amount?: number | null;
   notes: string | null;
   created_at?: string;
@@ -1106,7 +1107,8 @@ export function ReceiptHistoryModal({
     const total = Number(receipt.total || 0);
     const discountAmount = Number(receipt.discount_amount || 0);
     const paidAtSale = receipt.amount_paid != null ? Number(receipt.amount_paid) : total;
-    const wasPartial = receipt.amount_paid != null && total - paidAtSale > 0.0049;
+    const creditAtSale = Number(receipt.credit_applied || 0);
+    const wasPartial = receipt.amount_paid != null && total - paidAtSale - creditAtSale > 0.0049;
 
     const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Reprint</title><style>
       *{box-sizing:border-box;}
@@ -1152,8 +1154,9 @@ export function ReceiptHistoryModal({
       <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${total.toFixed(2)}</span></div>
       <div class="hr"></div>
       <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${(receipt.payment_method || "-").toUpperCase()}</span></div>
+      ${creditAtSale > 0.0049 ? `<div class="row"><span>Patient Credit Used / الرصيد المستخدم</span><span>: - AED ${creditAtSale.toFixed(2)}</span></div>` : ""}
       <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidAtSale.toFixed(2)}</span></div>
-      ${wasPartial ? `<div class="row"><span>Outstanding at Sale / المتبقي</span><span>: AED ${(total - paidAtSale).toFixed(2)}</span></div>` : ""}
+      ${wasPartial ? `<div class="row"><span>Outstanding at Sale / المتبقي</span><span>: AED ${(total - paidAtSale - creditAtSale).toFixed(2)}</span></div>` : ""}
       <div class="row" style="font-weight:700;"><span>Payment Status / حالة الدفع</span><span>: ${wasPartial ? "PARTIAL PAYMENT" : "PAID"}</span></div>
       ${receipt.notes ? `<div style="margin-top:4px;">Note / ملاحظة: ${receipt.notes}</div>` : ""}
       <div class="hr"></div>
@@ -1233,7 +1236,8 @@ export function ReceiptHistoryModal({
                           {hasRefund && (
                             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">Refunded</span>
                           )}
-                          {receipt.amount_paid != null && Number(receipt.total || 0) - Number(receipt.amount_paid) > 0.0049 && (
+                          {receipt.amount_paid != null &&
+                            Number(receipt.total || 0) - Number(receipt.amount_paid) - Number(receipt.credit_applied || 0) > 0.0049 && (
                             <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700">Partial</span>
                           )}
                         </div>
