@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Skin & Smile Dental Clinic",
+  title: "Skin and Smile Dental Clinic (Al Satwa)",
   description: "Office POS application for patients, staff, services, and receipts.",
 };
 
