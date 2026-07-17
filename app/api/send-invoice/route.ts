@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
     console.log('Mailgun config:', { domain: mailgunDomain, keyLength: mailgunApiKey?.length });
 
     const params = new URLSearchParams();
-    params.append('from', `Skin & Smile Dental Clinic <noreply@${mailgunDomain}>`);
+    params.append('from', `Skin and Smile Dental Clinic (Al Satwa) <noreply@${mailgunDomain}>`);
     params.append('to', to);
     params.append('subject', subject);
     params.append('html', html);

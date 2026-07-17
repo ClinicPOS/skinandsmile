@@ -22,7 +22,10 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
     remainingAfter,
   } = ctx;
 
-  const clinicName = clinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
+  const clinicName = (clinic?.name || "Skin and Smile Dental Clinic")
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
   const clinicAddress = clinic?.address || "";
   const clinicPhone = clinic?.phone || "";
   const clinicTrn = clinic?.trn || "";

@@ -313,11 +313,19 @@ export default function ReceiptLogPage() {
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id);
     const doctor = doctors.find((d) => d.id === selectedReceipt.doctor_id);
     const logoPath = clinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo6.jpg";
-    const clinicDisplayName = clinic?.name?.toUpperCase() || "SKIN & SMILE DENTAL CLINIC";
-    const clinicAddress = clinic?.address || "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station";
+    const clinicDisplayName = (clinic?.name || "Skin and Smile Dental Clinic")
+      .replace(/\s*\([^)]*\)\s*/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+    const isAlDanaClinic = (clinic?.name || "").toLowerCase().includes("al dana");
+    const clinicAddress = clinic?.address || (
+      isAlDanaClinic
+        ? "Al Dana Center - 4th Floor room 408 - Al Maktoum Rd - Al Muraqqabat - Deira - Dubai"
+        : "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station"
+    );
     const clinicRoom = clinic?.room ? `2nd Floor, Room ${clinic.room.replace(/^Room\s+/i, "")}` : "";
     const clinicTrn = clinic?.trn || "";
-    const clinicPhone = clinic?.phone || "";
+    const clinicPhone = clinic?.phone || (isAlDanaClinic ? "054 460 1011" : "");
     const clinicWhatsapp = clinic?.whatsapp || "";
     const isSkinAndSmile = !clinic || clinic.logo !== "altamuze";
     const receiptDate = new Date(selectedReceipt.created_at || new Date());

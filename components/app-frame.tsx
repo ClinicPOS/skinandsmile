@@ -37,7 +37,7 @@ export function AppFrame({
           <div className="flex items-center justify-between gap-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
               <p className="text-xs font-semibold uppercase tracking-[0.35em] text-teal-700">
-                Skin & Smile Dental Clinic
+                Skin and Smile Dental Clinic (Al Satwa)
               </p>
               <div className="flex gap-2 overflow-x-auto pb-1 sm:pb-0">
                 {navigation.map((item) => (

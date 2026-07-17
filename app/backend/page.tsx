@@ -82,6 +82,13 @@ export default function BackendPage() {
   const [editingReceptionistShift, setEditingReceptionistShift] = useState("");
   const [editingReceptionistPin, setEditingReceptionistPin] = useState("");
   const [editingReceptionistClinicId, setEditingReceptionistClinicId] = useState("");
+  const [receiptDraftClinicId, setReceiptDraftClinicId] = useState("");
+  const [receiptAddress, setReceiptAddress] = useState("");
+  const [receiptRoom, setReceiptRoom] = useState("");
+  const [receiptPhone, setReceiptPhone] = useState("");
+  const [receiptWhatsapp, setReceiptWhatsapp] = useState("");
+  const [receiptTrn, setReceiptTrn] = useState("");
+  const [receiptLogo, setReceiptLogo] = useState("");
 
   // Refunds state - removed
 
@@ -143,6 +150,33 @@ export default function BackendPage() {
     for (const c of clinics) map.set(c.id, c.name);
     return map;
   }, [clinics]);
+
+  const selectedClinic = useMemo(
+    () => clinics.find((c) => c.id === selectedClinicId) || null,
+    [clinics, selectedClinicId]
+  );
+  const isReceiptDraftForSelectedClinic = receiptDraftClinicId === selectedClinicId;
+  const receiptAddressValue = isReceiptDraftForSelectedClinic ? receiptAddress : (selectedClinic?.address || "");
+  const receiptRoomValue = isReceiptDraftForSelectedClinic ? receiptRoom : (selectedClinic?.room || "");
+  const receiptPhoneValue = isReceiptDraftForSelectedClinic ? receiptPhone : (selectedClinic?.phone || "");
+  const receiptWhatsappValue = isReceiptDraftForSelectedClinic ? receiptWhatsapp : (selectedClinic?.whatsapp || "");
+  const receiptTrnValue = isReceiptDraftForSelectedClinic ? receiptTrn : (selectedClinic?.trn || "");
+  const receiptLogoValue = isReceiptDraftForSelectedClinic ? receiptLogo : (selectedClinic?.logo || "");
+
+  function startReceiptDraft(clinic: Clinic | null) {
+    setReceiptDraftClinicId(clinic?.id || "");
+    setReceiptAddress(clinic?.address || "");
+    setReceiptRoom(clinic?.room || "");
+    setReceiptPhone(clinic?.phone || "");
+    setReceiptWhatsapp(clinic?.whatsapp || "");
+    setReceiptTrn(clinic?.trn || "");
+    setReceiptLogo(clinic?.logo || "");
+  }
+
+  function ensureReceiptDraftForSelectedClinic() {
+    if (isReceiptDraftForSelectedClinic) return;
+    startReceiptDraft(selectedClinic);
+  }
 
   async function deleteBalance(id: string) {
     if (!confirm("Delete this outstanding balance? Any recorded payments will also be removed.")) return;
@@ -790,6 +824,44 @@ export default function BackendPage() {
     loadAll();
   }
 
+  async function saveReceiptPrintSettings() {
+    if (!selectedClinicId) {
+      alert("Please select a clinic first.");
+      return;
+    }
+
+    const payload = {
+      address: receiptAddressValue.trim() || null,
+      room: receiptRoomValue.trim() || null,
+      phone: receiptPhoneValue.trim() || null,
+      whatsapp: receiptWhatsappValue.trim() || null,
+      trn: receiptTrnValue.trim() || null,
+      logo: receiptLogoValue.trim() || null,
+    };
+
+    const { error } = await supabase
+      .from("clinics")
+      .update(payload)
+      .eq("id", selectedClinicId);
+
+    if (error) {
+      alert(`Error updating clinic receipt settings: ${error.message || error.code || "Unknown error"}`);
+      return;
+    }
+
+    setClinics((prev) =>
+      prev.map((clinic) => (clinic.id === selectedClinicId ? { ...clinic, ...payload } : clinic))
+    );
+    setReceiptDraftClinicId(selectedClinicId);
+    setReceiptAddress(payload.address || "");
+    setReceiptRoom(payload.room || "");
+    setReceiptPhone(payload.phone || "");
+    setReceiptWhatsapp(payload.whatsapp || "");
+    setReceiptTrn(payload.trn || "");
+    setReceiptLogo(payload.logo || "");
+    alert("Clinic receipt print settings updated.");
+  }
+
   if (!isUnlocked) {
     return (
       <AppFrame
@@ -840,7 +912,11 @@ export default function BackendPage() {
         <span className="text-sm font-semibold text-slate-700">Viewing clinic:</span>
         <select
           value={selectedClinicId}
-          onChange={(e) => setSelectedClinicId(e.target.value)}
+          onChange={(e) => {
+            const nextClinicId = e.target.value;
+            setSelectedClinicId(nextClinicId);
+            startReceiptDraft(clinics.find((c) => c.id === nextClinicId) || null);
+          }}
           className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
         >
           {clinics.map((c) => (
@@ -866,6 +942,101 @@ export default function BackendPage() {
             <p className="mt-2 text-2xl font-semibold text-slate-900">{item.value}</p>
           </div>
         ))}
+      </div>
+
+      <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-5">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Receipt Printout Settings</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Edit what prints on the thermal receipt for the selected clinic.
+            </p>
+          </div>
+          <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700">
+            Printed clinic name: {(selectedClinic?.name || "Skin and Smile Dental Clinic").replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s{2,}/g, " ").trim()}
+          </span>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <input
+            value={receiptPhoneValue}
+            onChange={(e) => {
+              ensureReceiptDraftForSelectedClinic();
+              setReceiptPhone(e.target.value);
+            }}
+            placeholder="Phone"
+            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+          />
+          <input
+            value={receiptWhatsappValue}
+            onChange={(e) => {
+              ensureReceiptDraftForSelectedClinic();
+              setReceiptWhatsapp(e.target.value);
+            }}
+            placeholder="WhatsApp"
+            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+          />
+          <input
+            value={receiptTrnValue}
+            onChange={(e) => {
+              ensureReceiptDraftForSelectedClinic();
+              setReceiptTrn(e.target.value);
+            }}
+            placeholder="TRN"
+            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+          />
+          <input
+            value={receiptRoomValue}
+            onChange={(e) => {
+              ensureReceiptDraftForSelectedClinic();
+              setReceiptRoom(e.target.value);
+            }}
+            placeholder="Room (e.g. 408)"
+            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+          />
+          <input
+            value={receiptLogoValue}
+            onChange={(e) => {
+              ensureReceiptDraftForSelectedClinic();
+              setReceiptLogo(e.target.value);
+            }}
+            placeholder="Logo key (default / altamuze)"
+            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+          />
+          <input
+            value={selectedClinic?.name || ""}
+            disabled
+            className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500 outline-none"
+          />
+        </div>
+
+        <textarea
+          value={receiptAddressValue}
+          onChange={(e) => {
+            ensureReceiptDraftForSelectedClinic();
+            setReceiptAddress(e.target.value);
+          }}
+          placeholder="Clinic address (supports multiple lines)"
+          rows={3}
+          className="mt-3 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+        />
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            onClick={saveReceiptPrintSettings}
+            className="rounded-2xl bg-cyan-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-cyan-500"
+          >
+            Save Receipt Settings
+          </button>
+          <button
+            onClick={() => {
+              startReceiptDraft(selectedClinic);
+            }}
+            className="rounded-2xl border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            Reset Changes
+          </button>
+        </div>
       </div>
 
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
