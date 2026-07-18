@@ -16,5 +16,5 @@ export function getInstallmentFeeProvider(method: string | null | undefined): In
 export function calculateInstallmentFee(amount: number): number {
   const baseAmount = Number(amount) || 0;
   if (baseAmount <= 0) return 0;
-  return roundMoney(baseAmount / (1 - INSTALLMENT_FEE_RATE) - baseAmount);
+  return roundMoney(baseAmount * INSTALLMENT_FEE_RATE);
 }
