@@ -14,6 +14,8 @@ type Receipt = {
   subtotal: number;
   vat: number;
   total: number;
+  gateway_fee?: number | null;
+  gateway_fee_provider?: string | null;
   notes: string | null;
   created_at?: string;
 };
@@ -39,6 +41,14 @@ type Clinic = {
   trn?: string | null;
   phone?: string | null;
   whatsapp?: string | null;
+  instagram?: string | null;
+  facebook?: string | null;
+  tiktok?: string | null;
+  receipt_print_name?: string | null;
+  receipt_title?: string | null;
+  receipt_vat_note?: string | null;
+  receipt_thank_you?: string | null;
+  receipt_final_message?: string | null;
   logo?: string | null;
 };
 
@@ -119,10 +129,11 @@ export default function ReceiptHistoryPage() {
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
     const logoPath = clinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo6.jpg";
-    const clinicDisplayName = (clinic?.name || "Skin and Smile Dental Clinic")
+    const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
       .replace(/\s*\([^)]*\)\s*/g, " ")
       .replace(/\s{2,}/g, " ")
       .trim();
+    const receiptTitle = clinic?.receipt_title || "TAX INVOICE";
     const isAlDanaClinic = (clinic?.name || "").toLowerCase().includes("al dana");
     const clinicAddress = clinic?.address || (
       isAlDanaClinic
@@ -134,6 +145,18 @@ export default function ReceiptHistoryPage() {
     const clinicPhone = clinic?.phone || (isAlDanaClinic ? "054 460 1011" : "");
     const clinicWhatsapp = clinic?.whatsapp || "";
     const isSkinAndSmile = !clinic || clinic.logo !== "altamuze";
+    const clinicInstagram = clinic?.instagram || (isSkinAndSmile ? "@skinandsmiledentalclinic" : "");
+    const clinicFacebook = clinic?.facebook || "";
+    const clinicTiktok = clinic?.tiktok || (isSkinAndSmile ? "@skinandsmile" : "");
+    const receiptVatNote = clinic?.receipt_vat_note || "VAT Included in Above Amount / \u0627\u0644\u0636\u0631\u064a\u0628\u0629 \u0645\u0634\u0645\u0648\u0644\u0629 \u0641\u064a \u0627\u0644\u0645\u0628\u0644\u063a \u0623\u0639\u0644\u0627\u0647";
+    const receiptThankYou = clinic?.receipt_thank_you || "Thank you for visiting us / \u0634\u0643\u0631\u0627\u064b \u0644\u0632\u064a\u0627\u0631\u062a\u0643 \u0644\u0646\u0627";
+    const receiptFinalMessage = clinic?.receipt_final_message || "Thank you for Visiting US!";
+    const socialHtml = clinicInstagram || clinicFacebook || clinicTiktok ? `
+      <div class="footer-center" style="margin-top:6px;">Follow us:</div>
+      ${clinicInstagram ? `<div class="footer-center">Instagram: ${clinicInstagram}</div>` : ""}
+      ${clinicFacebook ? `<div class="footer-center">Facebook: ${clinicFacebook}</div>` : ""}
+      ${clinicTiktok ? `<div class="footer-center">TikTok: ${clinicTiktok}</div>` : ""}
+      ` : "";
     const createdAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
     const invoiceNo = selectedReceipt.receipt_number
       ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
@@ -193,7 +216,7 @@ export default function ReceiptHistoryPage() {
         <div class="logo-wrap" id="logo-wrap">
           <img src="${logoPath}" alt="Clinic logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'" />
         </div>
-        <div class="double">TAX INVOICE</div>
+        <div class="double">${receiptTitle}</div>
         <div class="clinic-name">${clinicDisplayName}</div>
         <div class="address">
           ${clinicAddress.split("\n").map((line: string) => `<div>${line}</div>`).join("")}
@@ -216,24 +239,21 @@ export default function ReceiptHistoryPage() {
         <div class="hr"></div>
         <div class="row"><span>Subtotal / \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0627\u0644\u062c\u0632\u0626\u064a</span><span>AED ${Number(selectedReceipt.subtotal).toFixed(2)}</span></div>
         <div class="row"><span>VAT / \u0627\u0644\u0636\u0631\u064a\u0628\u0629</span><span>AED ${Number(selectedReceipt.vat).toFixed(2)}</span></div>
+        ${Number(selectedReceipt.gateway_fee || 0) > 0 ? `<div class="row"><span>${selectedReceipt.gateway_fee_provider || "Installment"} Fee</span><span>AED ${Number(selectedReceipt.gateway_fee || 0).toFixed(2)}</span></div>` : ""}
         <div class="hr" style="margin:4px 0;"></div>
         <div class="row" style="font-weight:700;"><span>TOTAL / \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a</span><span>AED ${Number(selectedReceipt.total).toFixed(2)}</span></div>
         <div class="hr"></div>
         ${paymentSection}
         ${selectedReceipt.notes ? `<div style="margin-top:4px;">Note / \u0645\u0644\u0627\u062d\u0638\u0629: ${selectedReceipt.notes}</div>` : ""}
         <div class="hr"></div>
-        <div class="footer-center">VAT Included in Above Amount / \u0627\u0644\u0636\u0631\u064a\u0628\u0629 \u0645\u0634\u0645\u0648\u0644\u0629 \u0641\u064a \u0627\u0644\u0645\u0628\u0644\u063a \u0623\u0639\u0644\u0627\u0647</div>
-        <div class="footer-center">Thank you for visiting us / \u0634\u0643\u0631\u0627\u064b \u0644\u0632\u064a\u0627\u0631\u062a\u0643 \u0644\u0646\u0627</div>
-        ${isSkinAndSmile ? `
-        <div class="footer-center" style="margin-top:6px;">Follow us:</div>
-        <div class="footer-center">Instagram: @skinandsmiledentalclinic</div>
-        <div class="footer-center">TikTok: @skinandsmile</div>
-        ` : ""}
+        <div class="footer-center">${receiptVatNote}</div>
+        <div class="footer-center">${receiptThankYou}</div>
+        ${socialHtml}
         <div class="hr"></div>
         ${clinicPhone ? `<div class="row"><span>For appointments - Number</span><span>: ${clinicPhone}</span></div>` : ""}
         ${clinicWhatsapp ? `<div class="row"><span>WhatsApp</span><span>: ${clinicWhatsapp}</span></div>` : ""}
         <div class="hr"></div>
-        <div class="double">Thank you for Visiting US!</div>
+        <div class="double">${receiptFinalMessage}</div>
       </body>
     </html>`;
 

@@ -7,6 +7,7 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { calculateAge } from "../../lib/utils";
 import type { Clinic, Patient, Receptionist, Service, BalancePayment } from "../../lib/types";
+import { getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 
 const BOSS_PIN = "doctorsafarreport";
 
@@ -62,6 +63,8 @@ type Receipt = {
   patient_id: string | null;
   total: number;
   amount_paid?: number | null;
+  gateway_fee?: number | null;
+  gateway_fee_provider?: string | null;
   payment_method: string | null;
   notes?: string | null;
   created_at: string;
@@ -70,6 +73,13 @@ type Receipt = {
 // Money actually received for a receipt; NULL amount_paid = paid in full.
 function receiptPaidAmount(r: Receipt): number {
   return r.amount_paid != null ? Number(r.amount_paid) : Number(r.total || 0);
+}
+
+function receiptGatewayFee(r: Receipt): { label: string; amount: number } | null {
+  const amount = Number(r.gateway_fee || 0);
+  if (amount <= 0) return null;
+  const provider = r.gateway_fee_provider || getInstallmentFeeProvider(r.payment_method) || "Installment";
+  return { label: `${provider} Fee`, amount };
 }
 
 // PostgREST caps responses at 1000 rows; page through so exports stay complete
@@ -607,7 +617,11 @@ export default function ReportsPage() {
     const paymentBreakdown: Record<string, number> = {};
     for (const r of mine) {
       const cat = getPaymentCategory(r.payment_method || "");
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + receiptPaidAmount(r);
+      const gatewayFee = receiptGatewayFee(r);
+      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Math.max(0, receiptPaidAmount(r) - (gatewayFee?.amount || 0));
+      if (gatewayFee) {
+        paymentBreakdown[gatewayFee.label] = (paymentBreakdown[gatewayFee.label] || 0) + gatewayFee.amount;
+      }
     }
 
     const myBalancePayments = getFilteredBalancePayments().filter((p) =>
@@ -675,8 +689,12 @@ export default function ReportsPage() {
       entry.revenue += receiptPaidAmount(receipt);
       if (receipt.patient_id) entry.patients.add(receipt.patient_id);
 
+      const gatewayFee = receiptGatewayFee(receipt);
       const cat = getPaymentCategory(receipt.payment_method || "");
-      entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + receiptPaidAmount(receipt);
+      entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Math.max(0, receiptPaidAmount(receipt) - (gatewayFee?.amount || 0));
+      if (gatewayFee) {
+        entry.paymentMethods[gatewayFee.label] = (entry.paymentMethods[gatewayFee.label] || 0) + gatewayFee.amount;
+      }
     }
 
     for (const refund of refunds) {
@@ -690,7 +708,11 @@ export default function ReportsPage() {
     const paymentBreakdown: Record<string, number> = {};
     for (const r of filteredReceipts) {
       const cat = getPaymentCategory(r.payment_method || "");
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + receiptPaidAmount(r);
+      const gatewayFee = receiptGatewayFee(r);
+      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Math.max(0, receiptPaidAmount(r) - (gatewayFee?.amount || 0));
+      if (gatewayFee) {
+        paymentBreakdown[gatewayFee.label] = (paymentBreakdown[gatewayFee.label] || 0) + gatewayFee.amount;
+      }
     }
 
     const filteredRefunds = refunds.filter((refund) => {

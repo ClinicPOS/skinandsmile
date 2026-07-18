@@ -29,6 +29,8 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
   const clinicAddress = clinic?.address || "";
   const clinicPhone = clinic?.phone || "";
   const clinicTrn = clinic?.trn || "";
+  const clinicInstagram = clinic?.instagram || "";
+  const clinicFacebook = clinic?.facebook || "";
   const now = new Date(payment.created_at || Date.now());
   const dateStr = now.toLocaleDateString("en-GB");
   const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
@@ -102,6 +104,7 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
   ${payment.notes ? `<div class="meta">${payment.notes}</div>` : ""}
 
   <div class="footer">Thank you for your payment.</div>
+  ${clinicInstagram || clinicFacebook ? `<div class="footer">Follow us${clinicInstagram ? `<br/>Instagram: ${clinicInstagram}` : ""}${clinicFacebook ? `<br/>Facebook: ${clinicFacebook}` : ""}</div>` : ""}
 </body>
 </html>`;
 }

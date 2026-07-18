@@ -87,6 +87,14 @@ export default function BackendPage() {
   const [receiptRoom, setReceiptRoom] = useState("");
   const [receiptPhone, setReceiptPhone] = useState("");
   const [receiptWhatsapp, setReceiptWhatsapp] = useState("");
+  const [receiptInstagram, setReceiptInstagram] = useState("");
+  const [receiptFacebook, setReceiptFacebook] = useState("");
+  const [receiptTiktok, setReceiptTiktok] = useState("");
+  const [receiptPrintName, setReceiptPrintName] = useState("");
+  const [receiptTitle, setReceiptTitle] = useState("");
+  const [receiptVatNote, setReceiptVatNote] = useState("");
+  const [receiptThankYou, setReceiptThankYou] = useState("");
+  const [receiptFinalMessage, setReceiptFinalMessage] = useState("");
   const [receiptTrn, setReceiptTrn] = useState("");
   const [receiptLogo, setReceiptLogo] = useState("");
 
@@ -156,10 +164,20 @@ export default function BackendPage() {
     [clinics, selectedClinicId]
   );
   const isReceiptDraftForSelectedClinic = receiptDraftClinicId === selectedClinicId;
+  const defaultReceiptPrintName = (selectedClinic?.name || "Skin and Smile Dental Clinic").replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s{2,}/g, " ").trim();
+  const isSkinAndSmileReceipt = !selectedClinic || selectedClinic.logo !== "altamuze";
   const receiptAddressValue = isReceiptDraftForSelectedClinic ? receiptAddress : (selectedClinic?.address || "");
   const receiptRoomValue = isReceiptDraftForSelectedClinic ? receiptRoom : (selectedClinic?.room || "");
   const receiptPhoneValue = isReceiptDraftForSelectedClinic ? receiptPhone : (selectedClinic?.phone || "");
   const receiptWhatsappValue = isReceiptDraftForSelectedClinic ? receiptWhatsapp : (selectedClinic?.whatsapp || "");
+  const receiptInstagramValue = isReceiptDraftForSelectedClinic ? receiptInstagram : (selectedClinic?.instagram || "");
+  const receiptFacebookValue = isReceiptDraftForSelectedClinic ? receiptFacebook : (selectedClinic?.facebook || "");
+  const receiptTiktokValue = isReceiptDraftForSelectedClinic ? receiptTiktok : (selectedClinic?.tiktok || (isSkinAndSmileReceipt ? "@skinandsmile" : ""));
+  const receiptPrintNameValue = isReceiptDraftForSelectedClinic ? receiptPrintName : (selectedClinic?.receipt_print_name || defaultReceiptPrintName);
+  const receiptTitleValue = isReceiptDraftForSelectedClinic ? receiptTitle : (selectedClinic?.receipt_title || "TAX INVOICE");
+  const receiptVatNoteValue = isReceiptDraftForSelectedClinic ? receiptVatNote : (selectedClinic?.receipt_vat_note || "VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه");
+  const receiptThankYouValue = isReceiptDraftForSelectedClinic ? receiptThankYou : (selectedClinic?.receipt_thank_you || "Thank you for visiting us / شكراً لزيارتك لنا");
+  const receiptFinalMessageValue = isReceiptDraftForSelectedClinic ? receiptFinalMessage : (selectedClinic?.receipt_final_message || "Thank you for Visiting US!");
   const receiptTrnValue = isReceiptDraftForSelectedClinic ? receiptTrn : (selectedClinic?.trn || "");
   const receiptLogoValue = isReceiptDraftForSelectedClinic ? receiptLogo : (selectedClinic?.logo || "");
 
@@ -169,6 +187,14 @@ export default function BackendPage() {
     setReceiptRoom(clinic?.room || "");
     setReceiptPhone(clinic?.phone || "");
     setReceiptWhatsapp(clinic?.whatsapp || "");
+    setReceiptInstagram(clinic?.instagram || "");
+    setReceiptFacebook(clinic?.facebook || "");
+    setReceiptTiktok(clinic?.tiktok || (clinic?.logo !== "altamuze" ? "@skinandsmile" : ""));
+    setReceiptPrintName(clinic?.receipt_print_name || (clinic?.name || "Skin and Smile Dental Clinic").replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s{2,}/g, " ").trim());
+    setReceiptTitle(clinic?.receipt_title || "TAX INVOICE");
+    setReceiptVatNote(clinic?.receipt_vat_note || "VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه");
+    setReceiptThankYou(clinic?.receipt_thank_you || "Thank you for visiting us / شكراً لزيارتك لنا");
+    setReceiptFinalMessage(clinic?.receipt_final_message || "Thank you for Visiting US!");
     setReceiptTrn(clinic?.trn || "");
     setReceiptLogo(clinic?.logo || "");
   }
@@ -835,6 +861,14 @@ export default function BackendPage() {
       room: receiptRoomValue.trim() || null,
       phone: receiptPhoneValue.trim() || null,
       whatsapp: receiptWhatsappValue.trim() || null,
+      instagram: receiptInstagramValue.trim() || null,
+      facebook: receiptFacebookValue.trim() || null,
+      tiktok: receiptTiktokValue.trim() || null,
+      receipt_print_name: receiptPrintNameValue.trim() || null,
+      receipt_title: receiptTitleValue.trim() || null,
+      receipt_vat_note: receiptVatNoteValue.trim() || null,
+      receipt_thank_you: receiptThankYouValue.trim() || null,
+      receipt_final_message: receiptFinalMessageValue.trim() || null,
       trn: receiptTrnValue.trim() || null,
       logo: receiptLogoValue.trim() || null,
     };
@@ -857,6 +891,14 @@ export default function BackendPage() {
     setReceiptRoom(payload.room || "");
     setReceiptPhone(payload.phone || "");
     setReceiptWhatsapp(payload.whatsapp || "");
+    setReceiptInstagram(payload.instagram || "");
+    setReceiptFacebook(payload.facebook || "");
+    setReceiptTiktok(payload.tiktok || "");
+    setReceiptPrintName(payload.receipt_print_name || "");
+    setReceiptTitle(payload.receipt_title || "");
+    setReceiptVatNote(payload.receipt_vat_note || "");
+    setReceiptThankYou(payload.receipt_thank_you || "");
+    setReceiptFinalMessage(payload.receipt_final_message || "");
     setReceiptTrn(payload.trn || "");
     setReceiptLogo(payload.logo || "");
     alert("Clinic receipt print settings updated.");
@@ -953,73 +995,199 @@ export default function BackendPage() {
             </p>
           </div>
           <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700">
-            Printed clinic name: {(selectedClinic?.name || "Skin and Smile Dental Clinic").replace(/\s*\([^)]*\)\s*/g, " ").replace(/\s{2,}/g, " ").trim()}
+            Printed clinic name: {receiptPrintNameValue || defaultReceiptPrintName}
           </span>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          <input
-            value={receiptPhoneValue}
-            onChange={(e) => {
-              ensureReceiptDraftForSelectedClinic();
-              setReceiptPhone(e.target.value);
-            }}
-            placeholder="Phone"
-            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-          />
-          <input
-            value={receiptWhatsappValue}
-            onChange={(e) => {
-              ensureReceiptDraftForSelectedClinic();
-              setReceiptWhatsapp(e.target.value);
-            }}
-            placeholder="WhatsApp"
-            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-          />
-          <input
-            value={receiptTrnValue}
-            onChange={(e) => {
-              ensureReceiptDraftForSelectedClinic();
-              setReceiptTrn(e.target.value);
-            }}
-            placeholder="TRN"
-            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-          />
-          <input
-            value={receiptRoomValue}
-            onChange={(e) => {
-              ensureReceiptDraftForSelectedClinic();
-              setReceiptRoom(e.target.value);
-            }}
-            placeholder="Room (e.g. 408)"
-            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-          />
-          <input
-            value={receiptLogoValue}
-            onChange={(e) => {
-              ensureReceiptDraftForSelectedClinic();
-              setReceiptLogo(e.target.value);
-            }}
-            placeholder="Logo key (default / altamuze)"
-            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-          />
-          <input
-            value={selectedClinic?.name || ""}
-            disabled
-            className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500 outline-none"
-          />
-        </div>
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_280px]">
+          <div>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <input
+                value={receiptPrintNameValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptPrintName(e.target.value);
+                }}
+                placeholder="Printed clinic name"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptTitleValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptTitle(e.target.value);
+                }}
+                placeholder="Receipt title"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptPhoneValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptPhone(e.target.value);
+                }}
+                placeholder="Phone"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptWhatsappValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptWhatsapp(e.target.value);
+                }}
+                placeholder="WhatsApp"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptTrnValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptTrn(e.target.value);
+                }}
+                placeholder="TRN"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptRoomValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptRoom(e.target.value);
+                }}
+                placeholder="Room (e.g. 408)"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptInstagramValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptInstagram(e.target.value);
+                }}
+                placeholder="Instagram (e.g. @skinandsmile)"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptFacebookValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptFacebook(e.target.value);
+                }}
+                placeholder="Facebook (page name or URL)"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptTiktokValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptTiktok(e.target.value);
+                }}
+                placeholder="TikTok (optional)"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptLogoValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptLogo(e.target.value);
+                }}
+                placeholder="Logo key (default / altamuze)"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={selectedClinic?.name || ""}
+                disabled
+                className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500 outline-none"
+              />
+            </div>
 
-        <textarea
-          value={receiptAddressValue}
-          onChange={(e) => {
-            ensureReceiptDraftForSelectedClinic();
-            setReceiptAddress(e.target.value);
-          }}
-          placeholder="Clinic address (supports multiple lines)"
-          rows={3}
-          className="mt-3 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-        />
+            <textarea
+              value={receiptAddressValue}
+              onChange={(e) => {
+                ensureReceiptDraftForSelectedClinic();
+                setReceiptAddress(e.target.value);
+              }}
+              placeholder="Clinic address (supports multiple lines)"
+              rows={3}
+              className="mt-3 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <textarea
+                value={receiptVatNoteValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptVatNote(e.target.value);
+                }}
+                placeholder="VAT note"
+                rows={2}
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <textarea
+                value={receiptThankYouValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptThankYou(e.target.value);
+                }}
+                placeholder="Thank-you line"
+                rows={2}
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <textarea
+                value={receiptFinalMessageValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptFinalMessage(e.target.value);
+                }}
+                placeholder="Final receipt message"
+                rows={2}
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
+              />
+            </div>
+          </div>
+
+          <div className="mx-auto w-[240px] rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <p className="mb-2 text-center text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Thermal Preview</p>
+            <div className="bg-white px-2 py-3 text-[9px] leading-tight text-slate-950 shadow-sm">
+              <div className="mb-1 text-center text-[11px] font-bold">{receiptTitleValue || "TAX INVOICE"}</div>
+              <div className="text-center text-[12px] font-bold leading-tight">{receiptPrintNameValue || defaultReceiptPrintName}</div>
+              <div className="mt-1 text-center text-[8px] leading-snug">
+                {(receiptAddressValue || "Clinic address").split(/\n/).map((line, index) => <div key={`${line}-${index}`}>{line}</div>)}
+                {receiptRoomValue && <div>{receiptRoomValue}</div>}
+                {receiptTrnValue && <div className="font-bold">TRN: {receiptTrnValue}</div>}
+              </div>
+              <div className="my-2 border-t border-dashed border-slate-500" />
+              {[
+                ["Invoice No", "#00001"],
+                ["Date", new Date().toLocaleDateString("en-GB")],
+                ["Cashier", "Reception"],
+                ["Patient", "Sample Patient"],
+              ].map(([label, value]) => (
+                <div key={label} className="flex justify-between gap-2"><span>{label}</span><span>: {value}</span></div>
+              ))}
+              <div className="my-2 border-t border-dashed border-slate-500" />
+              <div className="flex justify-between gap-2 font-bold"><span>DESCRIPTION</span><span>AMOUNT</span></div>
+              <div className="flex justify-between gap-2"><span>Consultation</span><span>AED 100.00</span></div>
+              <div className="my-2 border-t border-dashed border-slate-500" />
+              <div className="flex justify-between gap-2"><span>VAT</span><span>AED 0.00</span></div>
+              <div className="flex justify-between gap-2 font-bold"><span>TOTAL</span><span>AED 100.00</span></div>
+              <div className="my-2 border-t border-dashed border-slate-500" />
+              <div className="text-center">{receiptVatNoteValue}</div>
+              <div className="text-center">{receiptThankYouValue}</div>
+              {(receiptInstagramValue || receiptFacebookValue || receiptTiktokValue) && (
+                <div className="mt-1 text-center">
+                  <div>Follow us:</div>
+                  {receiptInstagramValue && <div>Instagram: {receiptInstagramValue}</div>}
+                  {receiptFacebookValue && <div>Facebook: {receiptFacebookValue}</div>}
+                  {receiptTiktokValue && <div>TikTok: {receiptTiktokValue}</div>}
+                </div>
+              )}
+              <div className="my-2 border-t border-dashed border-slate-500" />
+              <div className="text-center">
+                {receiptPhoneValue && <div>Phone: {receiptPhoneValue}</div>}
+                {receiptWhatsappValue && <div>WhatsApp: {receiptWhatsappValue}</div>}
+              </div>
+              <div className="mt-2 border-y-2 border-slate-900 py-1 text-center font-bold">{receiptFinalMessageValue}</div>
+            </div>
+          </div>
+        </div>
 
         <div className="mt-3 flex flex-wrap gap-2">
           <button

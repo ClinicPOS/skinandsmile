@@ -18,6 +18,8 @@ export function buildDepositReceiptHtml(ctx: DepositReceiptContext): string {
   const clinicAddress = clinic?.address || "";
   const clinicPhone = clinic?.phone || "";
   const clinicTrn = clinic?.trn || "";
+  const clinicInstagram = clinic?.instagram || "";
+  const clinicFacebook = clinic?.facebook || "";
   const now = new Date(credit.created_at || Date.now());
   const dateStr = now.toLocaleDateString("en-GB");
   const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
@@ -92,6 +94,7 @@ export function buildDepositReceiptHtml(ctx: DepositReceiptContext): string {
 
   <div class="footer">This deposit is held on the patient's account and can be used for future treatments.</div>
   <div class="footer">Thank you.</div>
+  ${clinicInstagram || clinicFacebook ? `<div class="footer">Follow us${clinicInstagram ? `<br/>Instagram: ${clinicInstagram}` : ""}${clinicFacebook ? `<br/>Facebook: ${clinicFacebook}` : ""}</div>` : ""}
 </body>
 </html>`;
 }

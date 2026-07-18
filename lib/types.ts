@@ -5,6 +5,14 @@ export type Clinic = {
   address: string | null;
   phone: string | null;
   whatsapp: string | null;
+  instagram: string | null;
+  facebook: string | null;
+  tiktok: string | null;
+  receipt_print_name: string | null;
+  receipt_title: string | null;
+  receipt_vat_note: string | null;
+  receipt_thank_you: string | null;
+  receipt_final_message: string | null;
   trn: string | null;
   logo: string | null;
 };
@@ -107,5 +115,44 @@ export type PatientCredit = {
   receipt_id: string | null;
   receptionist_id: string | null;
   register_session_id: string | null;
+  created_at: string;
+};
+
+export type TreatmentPlan = {
+  id: string;
+  patient_id: string;
+  clinic_id: string;
+  service_id: string | null;
+  title: string;
+  total_amount: number;
+  planned_visits: number;
+  status: "Active" | "Completed" | "Cancelled";
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type TreatmentPlanVisit = {
+  id: string;
+  treatment_plan_id: string;
+  visit_number: number;
+  visit_date: string;
+  doctor_id: string | null;
+  receptionist_id: string | null;
+  notes: string | null;
+  created_at: string;
+};
+
+export type TreatmentPlanPayment = {
+  id: string;
+  treatment_plan_id: string;
+  patient_id: string;
+  clinic_id: string;
+  amount: number;
+  payment_method: string;
+  receptionist_id: string;
+  register_session_id: string | null;
+  notes: string | null;
   created_at: string;
 };

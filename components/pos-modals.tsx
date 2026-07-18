@@ -3,7 +3,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { receptionistIdsForClinic } from "../lib/clinic-scope";
-import type { OutstandingBalance, BalancePayment, PatientCredit, Clinic as ClinicRecord, Patient as PatientRecord } from "../lib/types";
+import type {
+  OutstandingBalance,
+  BalancePayment,
+  PatientCredit,
+  TreatmentPlan,
+  TreatmentPlanPayment,
+  TreatmentPlanVisit,
+  Clinic as ClinicRecord,
+  Patient as PatientRecord,
+} from "../lib/types";
 import { rollupBalance, formatBalanceReference } from "../lib/outstanding-balances";
 import { availableCredit } from "../lib/patient-credits";
 import { ReceiveDepositModal } from "./patient-credit-modals";
@@ -28,14 +37,20 @@ type Receipt = {
   total: number;
   amount_paid?: number | null;
   credit_applied?: number | null;
+  gateway_fee?: number | null;
+  gateway_fee_provider?: string | null;
   discount_amount?: number | null;
   notes: string | null;
   created_at?: string;
 };
 
+const TREATMENT_PLAN_PAYMENT_METHODS = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Bank Transfer"];
+
 type LookupItem = {
   id: string;
   name: string;
+  price?: number | null;
+  clinic_id?: string | null;
 };
 
 type FullPatient = {
@@ -65,6 +80,8 @@ type PatientNote = {
   created_at: string;
 };
 
+type ProfileSectionKey = "plans" | "outstanding" | "credits" | "clinical" | "treatment";
+
 type Clinic = {
   id: string;
   name: string;
@@ -73,6 +90,14 @@ type Clinic = {
   trn?: string | null;
   phone?: string | null;
   whatsapp?: string | null;
+  instagram?: string | null;
+  facebook?: string | null;
+  tiktok?: string | null;
+  receipt_print_name?: string | null;
+  receipt_title?: string | null;
+  receipt_vat_note?: string | null;
+  receipt_thank_you?: string | null;
+  receipt_final_message?: string | null;
   logo?: string | null;
 };
 
@@ -145,6 +170,12 @@ export function SearchPatientModal({
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [notes, setNotes] = useState<PatientNote[]>([]);
+  const [profileReceipts, setProfileReceipts] = useState<Receipt[]>([]);
+  const [profileReceiptItems, setProfileReceiptItems] = useState<ReceiptItem[]>([]);
+  const [profileServices, setProfileServices] = useState<LookupItem[]>([]);
+  const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
+  const [treatmentPlanVisits, setTreatmentPlanVisits] = useState<TreatmentPlanVisit[]>([]);
+  const [treatmentPlanPayments, setTreatmentPlanPayments] = useState<TreatmentPlanPayment[]>([]);
   const [doctors, setDoctors] = useState<LookupItem[]>([]);
   const [receptionists, setReceptionists] = useState<LookupItem[]>([]);
   const [clinics, setClinics] = useState<LookupItem[]>([]);
@@ -156,6 +187,23 @@ export function SearchPatientModal({
   const [isSavingNote, setIsSavingNote] = useState(false);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editingNoteText, setEditingNoteText] = useState("");
+  const [expandedProfileSections, setExpandedProfileSections] = useState<Set<ProfileSectionKey>>(new Set());
+  const [showNewTreatmentPlan, setShowNewTreatmentPlan] = useState(false);
+  const [newPlanServiceId, setNewPlanServiceId] = useState("");
+  const [newPlanTitle, setNewPlanTitle] = useState("");
+  const [newPlanAmount, setNewPlanAmount] = useState("");
+  const [newPlanVisits, setNewPlanVisits] = useState("5");
+  const [newPlanNotes, setNewPlanNotes] = useState("");
+  const [savingTreatmentPlan, setSavingTreatmentPlan] = useState(false);
+  const [visitPlanId, setVisitPlanId] = useState<string | null>(null);
+  const [visitDoctorId, setVisitDoctorId] = useState("");
+  const [visitNotes, setVisitNotes] = useState("");
+  const [savingTreatmentVisit, setSavingTreatmentVisit] = useState(false);
+  const [paymentPlanId, setPaymentPlanId] = useState<string | null>(null);
+  const [planPaymentAmount, setPlanPaymentAmount] = useState("");
+  const [planPaymentMethod, setPlanPaymentMethod] = useState("Cash");
+  const [planPaymentNotes, setPlanPaymentNotes] = useState("");
+  const [savingTreatmentPayment, setSavingTreatmentPayment] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -167,6 +215,8 @@ export function SearchPatientModal({
       setNewNoteText("");
       setShowDepositModal(false);
       setShowEditModal(false);
+      setExpandedProfileSections(new Set());
+      resetTreatmentPlanForms();
     }
   }, [isOpen]);
 
@@ -242,17 +292,119 @@ export function SearchPatientModal({
     return map;
   }, [clinicsList]);
 
+  const clinicServiceOptions = useMemo(() => {
+    return profileServices
+      .filter((service) => !clinicId || !service.clinic_id || service.clinic_id === clinicId)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [profileServices, clinicId]);
+
+  const treatmentPlanPaymentsByPlanId = useMemo(() => {
+    const map = new Map<string, TreatmentPlanPayment[]>();
+    for (const payment of treatmentPlanPayments) {
+      const list = map.get(payment.treatment_plan_id) || [];
+      list.push(payment);
+      map.set(payment.treatment_plan_id, list);
+    }
+    return map;
+  }, [treatmentPlanPayments]);
+
+  const treatmentPlanVisitsByPlanId = useMemo(() => {
+    const map = new Map<string, TreatmentPlanVisit[]>();
+    for (const visit of treatmentPlanVisits) {
+      const list = map.get(visit.treatment_plan_id) || [];
+      list.push(visit);
+      map.set(visit.treatment_plan_id, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => b.visit_number - a.visit_number);
+    }
+    return map;
+  }, [treatmentPlanVisits]);
+
+  const treatmentPlanSummary = useMemo(() => {
+    return treatmentPlans.reduce(
+      (summary, plan) => {
+        const paid = (treatmentPlanPaymentsByPlanId.get(plan.id) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+        const remaining = Math.max(0, Number(plan.total_amount || 0) - paid);
+        const visits = treatmentPlanVisitsByPlanId.get(plan.id)?.length || 0;
+        summary.totalRemaining += remaining;
+        if (plan.status === "Active") summary.activeCount += 1;
+        summary.visits += visits;
+        return summary;
+      },
+      { activeCount: 0, totalRemaining: 0, visits: 0 }
+    );
+  }, [treatmentPlans, treatmentPlanPaymentsByPlanId, treatmentPlanVisitsByPlanId]);
+
+  function parseMoney(value: string) {
+    const amount = Number(value.replace(/,/g, ".").trim());
+    return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : 0;
+  }
+
+  function resetTreatmentPlanForms() {
+    setShowNewTreatmentPlan(false);
+    setNewPlanServiceId("");
+    setNewPlanTitle("");
+    setNewPlanAmount("");
+    setNewPlanVisits("5");
+    setNewPlanNotes("");
+    setVisitPlanId(null);
+    setVisitDoctorId("");
+    setVisitNotes("");
+    setPaymentPlanId(null);
+    setPlanPaymentAmount("");
+    setPlanPaymentMethod("Cash");
+    setPlanPaymentNotes("");
+  }
+
+  function planPaid(planId: string) {
+    return (treatmentPlanPaymentsByPlanId.get(planId) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  }
+
+  function planRemaining(plan: TreatmentPlan) {
+    return Math.max(0, Number(plan.total_amount || 0) - planPaid(plan.id));
+  }
+
+  function planVisitsCount(planId: string) {
+    return treatmentPlanVisitsByPlanId.get(planId)?.length || 0;
+  }
+
+  function startPlanPayment(plan: TreatmentPlan) {
+    if (!receptionistId) { alert("Open the register first."); return; }
+    const remaining = planRemaining(plan);
+    setPaymentPlanId(plan.id);
+    setPlanPaymentAmount(remaining > 0 ? remaining.toFixed(2) : "");
+    setPlanPaymentMethod("Cash");
+    setPlanPaymentNotes("");
+    setVisitPlanId(null);
+  }
+
+  function startPlanVisit(plan: TreatmentPlan) {
+    setVisitPlanId(plan.id);
+    setVisitDoctorId("");
+    setVisitNotes("");
+    setPaymentPlanId(null);
+  }
+
   async function openProfile(patient: FullPatient) {
     setSelectedPatient(patient);
     setView("profile");
     setIsLoadingProfile(true);
     setNotes([]);
+    setProfileReceipts([]);
+    setProfileReceiptItems([]);
+    setProfileServices([]);
+    setTreatmentPlans([]);
+    setTreatmentPlanVisits([]);
+    setTreatmentPlanPayments([]);
     setLastVisit(null);
     setShowAddNote(false);
     setNewNoteText("");
     setExpandedNoteIds(new Set());
     setEditingNoteId(null);
     setEditingNoteText("");
+    setExpandedProfileSections(new Set());
+    resetTreatmentPlanForms();
 
     let notesQuery = supabase
       .from("patient_notes")
@@ -261,7 +413,14 @@ export function SearchPatientModal({
       .order("created_at", { ascending: false });
     if (clinicId) notesQuery = notesQuery.eq("clinic_id", clinicId);
 
-    const [notesResult, doctorsResult, receptionistsResult, clinicsResult, allReceptionistsResult] = await Promise.all([
+    let plansQuery = supabase
+      .from("treatment_plans")
+      .select("*")
+      .eq("patient_id", patient.id)
+      .order("created_at", { ascending: false });
+    if (clinicId) plansQuery = plansQuery.eq("clinic_id", clinicId);
+
+    const [notesResult, doctorsResult, receptionistsResult, clinicsResult, allReceptionistsResult, receiptsResult, servicesResult, plansResult] = await Promise.all([
       notesQuery,
       supabase.from("doctors").select("id, name"),
       supabase.from("receptionist").select("id, name"),
@@ -269,6 +428,9 @@ export function SearchPatientModal({
       clinicId
         ? supabase.from("receptionist").select("id, clinic_id")
         : Promise.resolve({ data: [] as { id: string; clinic_id: string | null }[] }),
+      supabase.from("receipts").select("*").eq("patient_id", patient.id).order("created_at", { ascending: false }),
+      supabase.from("services").select("id, name, price, clinic_id"),
+      plansQuery,
     ]);
 
     let receiptsQuery = supabase
@@ -295,7 +457,57 @@ export function SearchPatientModal({
       ? { data: [] as { created_at: string }[] }
       : await receiptsQuery;
 
+    let scopedProfileReceipts = (receiptsResult.data as Receipt[]) || [];
+    if (clinicId) {
+      const ids = new Set(
+        receptionistIdsForClinic(
+          (allReceptionistsResult.data as { id: string; clinic_id: string | null }[]) || [],
+          clinicId
+        )
+      );
+      scopedProfileReceipts = ids.size === 0
+        ? []
+        : scopedProfileReceipts.filter((receipt) => receipt.receptionist_id != null && ids.has(receipt.receptionist_id));
+    }
+
+    let profileItemsData: ReceiptItem[] = [];
+    const profileReceiptIds = scopedProfileReceipts.map((receipt) => receipt.id);
+    if (profileReceiptIds.length > 0) {
+      const { data: itemsData } = await supabase
+        .from("receipt_items")
+        .select("receipt_id, service_id, quantity, price, total")
+        .in("receipt_id", profileReceiptIds);
+      profileItemsData = (itemsData as ReceiptItem[]) || [];
+    }
+
+    const plansData = (plansResult.data as TreatmentPlan[]) || [];
+    let visitsData: TreatmentPlanVisit[] = [];
+    let paymentsData: TreatmentPlanPayment[] = [];
+    const planIds = plansData.map((plan) => plan.id);
+    if (planIds.length > 0) {
+      const [visitsResult, paymentsResult] = await Promise.all([
+        supabase
+          .from("treatment_plan_visits")
+          .select("*")
+          .in("treatment_plan_id", planIds)
+          .order("visit_number", { ascending: false }),
+        supabase
+          .from("treatment_plan_payments")
+          .select("*")
+          .in("treatment_plan_id", planIds)
+          .order("created_at", { ascending: false }),
+      ]);
+      visitsData = (visitsResult.data as TreatmentPlanVisit[]) || [];
+      paymentsData = (paymentsResult.data as TreatmentPlanPayment[]) || [];
+    }
+
     setNotes((notesResult.data as PatientNote[]) || []);
+    setProfileReceipts(scopedProfileReceipts);
+    setProfileReceiptItems(profileItemsData);
+    setProfileServices((servicesResult.data as LookupItem[]) || []);
+    setTreatmentPlans(plansData);
+    setTreatmentPlanVisits(visitsData);
+    setTreatmentPlanPayments(paymentsData);
     setDoctors((doctorsResult.data as LookupItem[]) || []);
     setReceptionists((receptionistsResult.data as LookupItem[]) || []);
     setClinics((clinicsResult.data as LookupItem[]) || []);
@@ -310,6 +522,19 @@ export function SearchPatientModal({
       else next.add(id);
       return next;
     });
+  }
+
+  function toggleProfileSection(section: ProfileSectionKey) {
+    setExpandedProfileSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(section)) next.delete(section);
+      else next.add(section);
+      return next;
+    });
+  }
+
+  function isProfileSectionOpen(section: ProfileSectionKey) {
+    return expandedProfileSections.has(section);
   }
 
   async function saveNewNote() {
@@ -333,6 +558,152 @@ export function SearchPatientModal({
       setShowAddNote(false);
     }
     setIsSavingNote(false);
+  }
+
+  async function saveTreatmentPlan() {
+    if (!selectedPatient) return;
+    if (!clinic?.id) { alert("Treatment plans need an active clinic. Open the register for a clinic first."); return; }
+    const selectedService = clinicServiceOptions.find((service) => service.id === newPlanServiceId);
+    const title = (newPlanTitle.trim() || selectedService?.name || "").trim();
+    const amount = parseMoney(newPlanAmount);
+    const plannedVisits = Math.max(1, Math.round(Number(newPlanVisits) || 0));
+    if (!title) { alert("Enter a treatment name."); return; }
+    if (amount <= 0) { alert("Treatment amount must be greater than 0."); return; }
+
+    setSavingTreatmentPlan(true);
+    try {
+      const { data, error } = await supabase
+        .from("treatment_plans")
+        .insert([
+          {
+            patient_id: selectedPatient.id,
+            clinic_id: clinic.id,
+            service_id: selectedService?.id || null,
+            title,
+            total_amount: amount,
+            planned_visits: plannedVisits,
+            notes: newPlanNotes.trim() || null,
+            created_by: receptionistId,
+          },
+        ])
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Create treatment plan failed:", error);
+        alert(`Error: ${error.message || "Unknown error"}`);
+        return;
+      }
+
+      setTreatmentPlans((prev) => [data as TreatmentPlan, ...prev]);
+      setShowNewTreatmentPlan(false);
+      setNewPlanServiceId("");
+      setNewPlanTitle("");
+      setNewPlanAmount("");
+      setNewPlanVisits("5");
+      setNewPlanNotes("");
+    } finally {
+      setSavingTreatmentPlan(false);
+    }
+  }
+
+  async function saveTreatmentVisit(plan: TreatmentPlan) {
+    if (!selectedPatient) return;
+    const nextVisitNumber = planVisitsCount(plan.id) + 1;
+    if (nextVisitNumber > Number(plan.planned_visits || 1) + 20) {
+      alert("This visit count looks too high. Check the treatment plan first.");
+      return;
+    }
+
+    setSavingTreatmentVisit(true);
+    try {
+      const { data, error } = await supabase
+        .from("treatment_plan_visits")
+        .insert([
+          {
+            treatment_plan_id: plan.id,
+            visit_number: nextVisitNumber,
+            doctor_id: visitDoctorId || null,
+            receptionist_id: receptionistId || null,
+            notes: visitNotes.trim() || null,
+          },
+        ])
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Record treatment visit failed:", error);
+        alert(`Error: ${error.message || "Unknown error"}`);
+        return;
+      }
+
+      const visit = data as TreatmentPlanVisit;
+      setTreatmentPlanVisits((prev) => [visit, ...prev]);
+      setVisitPlanId(null);
+      setVisitDoctorId("");
+      setVisitNotes("");
+
+      if (nextVisitNumber >= Number(plan.planned_visits || 1) && planRemaining(plan) <= 0.0049 && plan.status === "Active") {
+        const { data: updatedPlan } = await supabase
+          .from("treatment_plans")
+          .update({ status: "Completed", completed_at: new Date().toISOString() })
+          .eq("id", plan.id)
+          .select()
+          .single();
+        if (updatedPlan) {
+          setTreatmentPlans((prev) => prev.map((item) => item.id === plan.id ? updatedPlan as TreatmentPlan : item));
+        }
+      }
+    } finally {
+      setSavingTreatmentVisit(false);
+    }
+  }
+
+  async function saveTreatmentPayment(plan: TreatmentPlan) {
+    if (!selectedPatient) return;
+    if (!clinic?.id) { alert("Treatment plan payments need an active clinic."); return; }
+    if (!receptionistId) { alert("Open the register first."); return; }
+    const amount = parseMoney(planPaymentAmount);
+    const remaining = planRemaining(plan);
+    if (amount <= 0) { alert("Payment amount must be greater than 0."); return; }
+    if (amount > remaining + 0.0049) {
+      alert(`Amount exceeds remaining balance (AED ${remaining.toFixed(2)}).`);
+      return;
+    }
+
+    setSavingTreatmentPayment(true);
+    try {
+      const { data, error } = await supabase
+        .from("treatment_plan_payments")
+        .insert([
+          {
+            treatment_plan_id: plan.id,
+            patient_id: selectedPatient.id,
+            clinic_id: clinic.id,
+            amount,
+            payment_method: planPaymentMethod,
+            receptionist_id: receptionistId,
+            register_session_id: registerSessionId,
+            notes: planPaymentNotes.trim() || null,
+          },
+        ])
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Collect treatment plan payment failed:", error);
+        alert(`Error: ${error.message || "Unknown error"}`);
+        return;
+      }
+
+      setTreatmentPlanPayments((prev) => [data as TreatmentPlanPayment, ...prev]);
+      setPaymentPlanId(null);
+      setPlanPaymentAmount("");
+      setPlanPaymentMethod("Cash");
+      setPlanPaymentNotes("");
+    } finally {
+      setSavingTreatmentPayment(false);
+    }
   }
 
   async function refetchNotes(patientId: string) {
@@ -456,6 +827,7 @@ export function SearchPatientModal({
                   );
                 })}
               </div>
+
             </div>
           )}
 
@@ -568,9 +940,329 @@ export function SearchPatientModal({
                 </div>
               )}
 
-              {selectedPatientBalances.length > 0 && (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-                  <p className="mb-2 text-xs font-bold uppercase tracking-wide text-amber-700">Outstanding Balances</p>
+              <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleProfileSection("plans")}
+                    className="flex flex-1 items-center justify-between text-left"
+                  >
+                    <span className="text-xs font-bold uppercase tracking-wide text-cyan-700">Active Treatment Plans</span>
+                    <span className="text-xs font-semibold text-cyan-800">
+                      {treatmentPlanSummary.activeCount} active · AED {treatmentPlanSummary.totalRemaining.toFixed(2)} due {isProfileSectionOpen("plans") ? "▲" : "▼"}
+                    </span>
+                  </button>
+                  {isProfileSectionOpen("plans") && !showNewTreatmentPlan && (
+                    <button
+                      onClick={() => setShowNewTreatmentPlan(true)}
+                      className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500"
+                    >
+                      + New Plan
+                    </button>
+                  )}
+                </div>
+
+                {isProfileSectionOpen("plans") && showNewTreatmentPlan && (
+                  <div className="mt-3 space-y-3 rounded-2xl border border-cyan-200 bg-white p-4">
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Service / Treatment</label>
+                      <select
+                        value={newPlanServiceId}
+                        onChange={(e) => {
+                          const serviceId = e.target.value;
+                          const service = clinicServiceOptions.find((item) => item.id === serviceId);
+                          setNewPlanServiceId(serviceId);
+                          if (service) {
+                            setNewPlanTitle(service.name);
+                            if (!newPlanAmount && service.price != null) setNewPlanAmount(String(Number(service.price || 0)));
+                          }
+                        }}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                      >
+                        <option value="">Custom treatment…</option>
+                        {clinicServiceOptions.map((service) => (
+                          <option key={service.id} value={service.id}>{service.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      <div className="sm:col-span-3">
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Plan Name</label>
+                        <input
+                          value={newPlanTitle}
+                          onChange={(e) => setNewPlanTitle(e.target.value)}
+                          placeholder="e.g. Denture"
+                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Total AED</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={newPlanAmount}
+                          onChange={(e) => setNewPlanAmount(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Visits</label>
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={newPlanVisits}
+                          onChange={(e) => setNewPlanVisits(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Status</label>
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-600">Active</div>
+                      </div>
+                    </div>
+                    <textarea
+                      value={newPlanNotes}
+                      onChange={(e) => setNewPlanNotes(e.target.value)}
+                      placeholder="Plan notes or stages, optional"
+                      rows={2}
+                      className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={saveTreatmentPlan}
+                        disabled={savingTreatmentPlan}
+                        className="rounded-xl bg-cyan-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50"
+                      >
+                        {savingTreatmentPlan ? "Saving…" : "Save Plan"}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setShowNewTreatmentPlan(false);
+                          setNewPlanServiceId("");
+                          setNewPlanTitle("");
+                          setNewPlanAmount("");
+                          setNewPlanVisits("5");
+                          setNewPlanNotes("");
+                        }}
+                        className="rounded-xl border border-slate-200 px-4 py-1.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {isProfileSectionOpen("plans") && (isLoadingProfile ? (
+                  <p className="py-4 text-center text-sm text-cyan-700">Loading…</p>
+                ) : treatmentPlans.length === 0 ? (
+                  <p className="mt-3 text-sm text-cyan-700">No treatment plans yet.</p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {treatmentPlans.map((plan) => {
+                      const paid = planPaid(plan.id);
+                      const remaining = planRemaining(plan);
+                      const visits = treatmentPlanVisitsByPlanId.get(plan.id) || [];
+                      const payments = treatmentPlanPaymentsByPlanId.get(plan.id) || [];
+                      const completedVisits = visits.length;
+                      const isFullyPaid = remaining <= 0.0049;
+                      return (
+                        <div key={plan.id} className="rounded-2xl border border-cyan-200 bg-white p-4">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-sm font-bold text-slate-900">{plan.title}</p>
+                              <p className="mt-1 text-xs text-slate-500">
+                                Visits {completedVisits} / {plan.planned_visits} · {isFullyPaid ? "Fully paid" : `AED ${remaining.toFixed(2)} remaining`}
+                              </p>
+                              {plan.notes && <p className="mt-1 text-xs text-slate-500">{plan.notes}</p>}
+                            </div>
+                            <div className="text-right text-xs">
+                              <p className="font-semibold text-slate-500">Total</p>
+                              <p className="text-base font-bold text-slate-900">AED {Number(plan.total_amount || 0).toFixed(2)}</p>
+                              <p className="font-semibold text-emerald-700">Paid AED {paid.toFixed(2)}</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                            <div className="rounded-xl bg-cyan-50 px-3 py-2">
+                              <p className="font-semibold uppercase text-cyan-700">Status</p>
+                              <p className="text-sm font-bold text-slate-800">{plan.status}</p>
+                            </div>
+                            <div className="rounded-xl bg-emerald-50 px-3 py-2">
+                              <p className="font-semibold uppercase text-emerald-700">Paid</p>
+                              <p className="text-sm font-bold text-slate-800">AED {paid.toFixed(2)}</p>
+                            </div>
+                            <div className="rounded-xl bg-amber-50 px-3 py-2">
+                              <p className="font-semibold uppercase text-amber-700">Balance</p>
+                              <p className="text-sm font-bold text-slate-800">AED {remaining.toFixed(2)}</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              onClick={() => startPlanVisit(plan)}
+                              className="rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-100"
+                            >
+                              Add Visit
+                            </button>
+                            {remaining > 0.0049 && (
+                              <button
+                                onClick={() => startPlanPayment(plan)}
+                                className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500"
+                              >
+                                Collect Payment
+                              </button>
+                            )}
+                          </div>
+
+                          {visitPlanId === plan.id && (
+                            <div className="mt-3 space-y-2 rounded-2xl border border-cyan-100 bg-cyan-50 p-3">
+                              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                <div>
+                                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Doctor</label>
+                                  <select
+                                    value={visitDoctorId}
+                                    onChange={(e) => setVisitDoctorId(e.target.value)}
+                                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                                  >
+                                    <option value="">Not selected</option>
+                                    {doctors.map((doctor) => (
+                                      <option key={doctor.id} value={doctor.id}>{doctor.name}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Visit Number</label>
+                                  <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700">
+                                    {completedVisits + 1} / {plan.planned_visits}
+                                  </div>
+                                </div>
+                              </div>
+                              <textarea
+                                value={visitNotes}
+                                onChange={(e) => setVisitNotes(e.target.value)}
+                                placeholder="Visit note, optional"
+                                rows={2}
+                                className="w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                              />
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => saveTreatmentVisit(plan)}
+                                  disabled={savingTreatmentVisit}
+                                  className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50"
+                                >
+                                  {savingTreatmentVisit ? "Saving…" : "Save Visit"}
+                                </button>
+                                <button
+                                  onClick={() => setVisitPlanId(null)}
+                                  className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {paymentPlanId === plan.id && (
+                            <div className="mt-3 space-y-2 rounded-2xl border border-emerald-100 bg-emerald-50 p-3">
+                              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                <div>
+                                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Amount Received</label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={planPaymentAmount}
+                                    onChange={(e) => setPlanPaymentAmount(e.target.value)}
+                                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Method</label>
+                                  <select
+                                    value={planPaymentMethod}
+                                    onChange={(e) => setPlanPaymentMethod(e.target.value)}
+                                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                                  >
+                                    {TREATMENT_PLAN_PAYMENT_METHODS.map((method) => (
+                                      <option key={method} value={method}>{method}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                              <input
+                                value={planPaymentNotes}
+                                onChange={(e) => setPlanPaymentNotes(e.target.value)}
+                                placeholder="Payment note, optional"
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+                              />
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => saveTreatmentPayment(plan)}
+                                  disabled={savingTreatmentPayment}
+                                  className="rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                                >
+                                  {savingTreatmentPayment ? "Saving…" : "Collect Payment"}
+                                </button>
+                                <button
+                                  onClick={() => setPaymentPlanId(null)}
+                                  className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {(visits.length > 0 || payments.length > 0) && (
+                            <div className="mt-3 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
+                              {visits.length > 0 && (
+                                <div>
+                                  <p className="mb-1 font-bold uppercase text-slate-500">Recent Visits</p>
+                                  <div className="space-y-1">
+                                    {visits.slice(0, 3).map((visit) => (
+                                      <p key={visit.id} className="rounded-lg bg-slate-50 px-2 py-1 text-slate-600">
+                                        Visit {visit.visit_number} · {new Date(visit.visit_date).toLocaleDateString("en-GB")}{visit.notes ? ` · ${visit.notes}` : ""}
+                                      </p>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              {payments.length > 0 && (
+                                <div>
+                                  <p className="mb-1 font-bold uppercase text-slate-500">Recent Payments</p>
+                                  <div className="space-y-1">
+                                    {payments.slice(0, 3).map((payment) => (
+                                      <p key={payment.id} className="rounded-lg bg-slate-50 px-2 py-1 text-slate-600">
+                                        AED {Number(payment.amount || 0).toFixed(2)} · {payment.payment_method} · {new Date(payment.created_at).toLocaleDateString("en-GB")}
+                                      </p>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                <button
+                  type="button"
+                  onClick={() => toggleProfileSection("outstanding")}
+                  className="flex w-full items-center justify-between text-left"
+                >
+                  <span className="text-xs font-bold uppercase tracking-wide text-amber-700">Outstanding Balances</span>
+                  <span className="text-xs font-semibold text-amber-700">
+                    AED {selectedPatientOutstandingTotal.toFixed(2)} {isProfileSectionOpen("outstanding") ? "▲" : "▼"}
+                  </span>
+                </button>
+                {isProfileSectionOpen("outstanding") && (
+                  selectedPatientBalances.length === 0 ? (
+                    <p className="mt-3 text-sm text-amber-700">No outstanding balances.</p>
+                  ) : (
                   <div className="space-y-2">
                     {selectedPatientBalances.map((bal) => {
                       const payments = paymentsByBalanceId.get(bal.id) || [];
@@ -627,17 +1319,25 @@ export function SearchPatientModal({
                       );
                     })}
                   </div>
-                </div>
-              )}
+                  )
+                )}
+              </div>
 
-              {selectedPatientCredits.length > 0 && (
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Patient Credit / Deposits</p>
-                    <p className="text-sm font-bold text-emerald-800">
-                      Available: AED {selectedPatientAvailableCredit.toFixed(2)}
-                    </p>
-                  </div>
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                <button
+                  type="button"
+                  onClick={() => toggleProfileSection("credits")}
+                  className="flex w-full items-center justify-between text-left"
+                >
+                  <span className="text-xs font-bold uppercase tracking-wide text-emerald-700">Patient Credit / Deposits</span>
+                  <span className="text-xs font-semibold text-emerald-800">
+                    Available: AED {selectedPatientAvailableCredit.toFixed(2)} {isProfileSectionOpen("credits") ? "▲" : "▼"}
+                  </span>
+                </button>
+                {isProfileSectionOpen("credits") && (
+                  selectedPatientCredits.length === 0 ? (
+                    <p className="mt-3 text-sm text-emerald-700">No deposits or credit activity.</p>
+                  ) : (
                   <div className="space-y-2">
                     {selectedPatientCredits.map((credit) => (
                       <div key={credit.id} className="rounded-xl border border-emerald-200 bg-white p-3">
@@ -674,14 +1374,24 @@ export function SearchPatientModal({
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
+                  )
+                )}
+              </div>
 
               {/* Clinical Notes */}
-              <div>
-                <div className="mb-3 flex items-center justify-between">
-                  <h4 className="text-sm font-bold uppercase tracking-wide text-slate-700">Clinical Notes</h4>
-                  {!showAddNote && (
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleProfileSection("clinical")}
+                    className="flex flex-1 items-center justify-between text-left"
+                  >
+                    <span className="text-sm font-bold uppercase tracking-wide text-slate-700">Clinical Notes</span>
+                    <span className="text-xs font-semibold text-slate-500">
+                      {notes.length} note{notes.length === 1 ? "" : "s"} {isProfileSectionOpen("clinical") ? "▲" : "▼"}
+                    </span>
+                  </button>
+                  {isProfileSectionOpen("clinical") && !showAddNote && (
                     <button
                       onClick={() => setShowAddNote(true)}
                       className="rounded-xl bg-teal-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-teal-400"
@@ -691,7 +1401,7 @@ export function SearchPatientModal({
                   )}
                 </div>
 
-                {showAddNote && (
+                {isProfileSectionOpen("clinical") && showAddNote && (
                   <div className="mb-4 space-y-3 rounded-2xl border border-teal-200 bg-teal-50 p-4">
                     <textarea
                       value={newNoteText}
@@ -719,7 +1429,7 @@ export function SearchPatientModal({
                   </div>
                 )}
 
-                {isLoadingProfile ? (
+                {isProfileSectionOpen("clinical") && (isLoadingProfile ? (
                   <p className="py-4 text-center text-sm text-slate-400">Loading…</p>
                 ) : notes.length === 0 ? (
                   <p className="py-4 text-center text-sm text-slate-400">No clinical notes yet</p>
@@ -808,7 +1518,68 @@ export function SearchPatientModal({
                       );
                     })}
                   </div>
-                )}
+                ))}
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <button
+                  type="button"
+                  onClick={() => toggleProfileSection("treatment")}
+                  className="flex w-full items-center justify-between text-left"
+                >
+                  <span className="text-sm font-bold uppercase tracking-wide text-slate-700">Treatment History</span>
+                  <span className="text-xs font-semibold text-slate-500">
+                    {profileReceipts.length} visit{profileReceipts.length === 1 ? "" : "s"} {isProfileSectionOpen("treatment") ? "▲" : "▼"}
+                  </span>
+                </button>
+
+                {isProfileSectionOpen("treatment") && (isLoadingProfile ? (
+                  <p className="py-4 text-center text-sm text-slate-400">Loading…</p>
+                ) : profileReceipts.length === 0 ? (
+                  <p className="py-4 text-center text-sm text-slate-400">No treatment history yet</p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {profileReceipts.map((visit) => {
+                      const visitItems = profileReceiptItems.filter((item) => item.receipt_id === visit.id);
+                      const doctor = doctors.find((d) => d.id === visit.doctor_id);
+                      const receptionist = receptionists.find((r) => r.id === visit.receptionist_id);
+                      return (
+                        <div key={visit.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                {visit.created_at ? new Date(visit.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "N/A"}
+                                {" · "}
+                                {visit.receipt_number ? `#${String(visit.receipt_number).padStart(5, "0")}` : visit.id.slice(0, 8)}
+                              </p>
+                              <p className="mt-1 text-xs text-slate-400">
+                                {[doctor ? `Dr. ${doctor.name}` : null, receptionist?.name].filter(Boolean).join(" · ") || "Treatment visit"}
+                              </p>
+                            </div>
+                            <span className="shrink-0 rounded-full bg-teal-100 px-2.5 py-1 text-xs font-bold text-teal-700">
+                              AED {Number(visit.total || 0).toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="mt-3 space-y-1">
+                            {visitItems.length === 0 ? (
+                              <p className="text-sm text-slate-500">No services recorded</p>
+                            ) : (
+                              visitItems.map((item, index) => {
+                                const service = profileServices.find((s) => s.id === item.service_id);
+                                return (
+                                  <div key={`${item.receipt_id}-${item.service_id}-${index}`} className="flex justify-between gap-3 text-sm text-slate-800">
+                                    <span>{service?.name || "Service"} x{item.quantity || 1}</span>
+                                    <span className="font-semibold">AED {Number(item.total || item.price || 0).toFixed(2)}</span>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -1072,10 +1843,11 @@ export function ReceiptHistoryModal({
 
   function reprintReceipt(receipt: Receipt) {
     const logoPath = clinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo6.jpg";
-    const clinicDisplayName = (clinic?.name || "Skin and Smile Dental Clinic")
+    const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
       .replace(/\s*\([^)]*\)\s*/g, " ")
       .replace(/\s{2,}/g, " ")
       .trim();
+    const receiptTitle = clinic?.receipt_title || "TAX INVOICE";
     const isAlDanaClinic = (clinic?.name || "").toLowerCase().includes("al dana");
     const clinicAddress = clinic?.address || (
       isAlDanaClinic
@@ -1087,6 +1859,15 @@ export function ReceiptHistoryModal({
     const clinicPhone = clinic?.phone || (isAlDanaClinic ? "054 460 1011" : "");
     const clinicWhatsapp = clinic?.whatsapp || "";
     const isSkinAndSmile = !clinic || clinic.logo !== "altamuze";
+    const clinicInstagram = clinic?.instagram || (isSkinAndSmile ? "@skinandsmiledentalclinic" : "");
+    const clinicFacebook = clinic?.facebook || "";
+    const clinicTiktok = clinic?.tiktok || (isSkinAndSmile ? "@skinandsmile" : "");
+    const receiptVatNote = clinic?.receipt_vat_note || "VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه";
+    const receiptThankYou = clinic?.receipt_thank_you || "Thank you for visiting us / شكراً لزيارتك لنا";
+    const receiptFinalMessage = clinic?.receipt_final_message || "Thank you for Visiting US!";
+    const socialHtml = clinicInstagram || clinicFacebook || clinicTiktok
+      ? `<div class="footer-center" style="margin-top:6px;">Follow us:</div>${clinicInstagram ? `<div class="footer-center">Instagram: ${clinicInstagram}</div>` : ""}${clinicFacebook ? `<div class="footer-center">Facebook: ${clinicFacebook}</div>` : ""}${clinicTiktok ? `<div class="footer-center">TikTok: ${clinicTiktok}</div>` : ""}`
+      : "";
 
     const receiptDate = receipt.created_at ? new Date(receipt.created_at) : new Date();
     const dateValue = receiptDate.toLocaleDateString("en-GB");
@@ -1133,7 +1914,7 @@ export function ReceiptHistoryModal({
       @media print{@page{size:80mm auto;margin:0;}body{width:72mm;}*{color:#000!important;border-color:#000!important;background-color:#fff!important;}.logo{width:100%;max-width:66mm;height:auto;}}
     </style></head><body>
       <div class="logo-wrap" id="logo-wrap"><img src="${logoPath}" alt="logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'"/></div>
-      <div class="double">TAX INVOICE</div>
+      <div class="double">${receiptTitle}</div>
       <div class="reprint-badge">*** REPRINT ***</div>
       <div class="clinic-name">${clinicDisplayName}</div>
       <div class="address">
@@ -1158,6 +1939,7 @@ export function ReceiptHistoryModal({
       <div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>
       ${discountAmount > 0 ? `<div class="row"><span>Discount / خصم</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
       <div class="row"><span>VAT</span><span>AED ${vatAmount.toFixed(2)}</span></div>
+      ${Number(receipt.gateway_fee || 0) > 0 ? `<div class="row"><span>${receipt.gateway_fee_provider || "Installment"} Fee</span><span>AED ${Number(receipt.gateway_fee || 0).toFixed(2)}</span></div>` : ""}
       <div class="hr" style="margin:4px 0;"></div>
       <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${total.toFixed(2)}</span></div>
       <div class="hr"></div>
@@ -1168,16 +1950,16 @@ export function ReceiptHistoryModal({
       <div class="row" style="font-weight:700;"><span>Payment Status / حالة الدفع</span><span>: ${wasPartial ? "PARTIAL PAYMENT" : "PAID"}</span></div>
       ${receipt.notes ? `<div style="margin-top:4px;">Note / ملاحظة: ${receipt.notes}</div>` : ""}
       <div class="hr"></div>
-      <div class="footer-center">VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه</div>
-      <div class="footer-center">Thank you for visiting us / شكراً لزيارتك لنا</div>
-      ${isSkinAndSmile ? `<div class="footer-center" style="margin-top:6px;">Follow us:</div><div class="footer-center">Instagram: @skinandsmiledentalclinic</div><div class="footer-center">TikTok: @skinandsmile</div>` : ""}
+      <div class="footer-center">${receiptVatNote}</div>
+      <div class="footer-center">${receiptThankYou}</div>
+      ${socialHtml}
       <div class="hr"></div>
       <div style="text-align:center;font-size:9px;line-height:1.4;">
         ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
         ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
       </div>
       <div class="hr"></div>
-      <div class="double">Thank you for Visiting US!</div>
+      <div class="double">${receiptFinalMessage}</div>
     </body></html>`;
 
     const w = window.open("", "_blank", "width=400,height=600");

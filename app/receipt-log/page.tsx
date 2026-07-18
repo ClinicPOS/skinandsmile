@@ -313,10 +313,11 @@ export default function ReceiptLogPage() {
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id);
     const doctor = doctors.find((d) => d.id === selectedReceipt.doctor_id);
     const logoPath = clinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo6.jpg";
-    const clinicDisplayName = (clinic?.name || "Skin and Smile Dental Clinic")
+    const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
       .replace(/\s*\([^)]*\)\s*/g, " ")
       .replace(/\s{2,}/g, " ")
       .trim();
+    const receiptTitle = clinic?.receipt_title || "TAX INVOICE";
     const isAlDanaClinic = (clinic?.name || "").toLowerCase().includes("al dana");
     const clinicAddress = clinic?.address || (
       isAlDanaClinic
@@ -328,6 +329,17 @@ export default function ReceiptLogPage() {
     const clinicPhone = clinic?.phone || (isAlDanaClinic ? "054 460 1011" : "");
     const clinicWhatsapp = clinic?.whatsapp || "";
     const isSkinAndSmile = !clinic || clinic.logo !== "altamuze";
+    const clinicInstagram = clinic?.instagram || (isSkinAndSmile ? "@skinandsmiledentalclinic" : "");
+    const clinicFacebook = clinic?.facebook || "";
+    const clinicTiktok = clinic?.tiktok || (isSkinAndSmile ? "@skinandsmile" : "");
+    const receiptVatNote = clinic?.receipt_vat_note || "VAT Included in Above Amount";
+    const receiptThankYou = clinic?.receipt_thank_you || "Thank you for visiting us!";
+    const receiptFinalMessage = clinic?.receipt_final_message || "Thank you for Visiting US!";
+    const socialHtml = clinicInstagram || clinicFacebook || clinicTiktok ? `
+  <div class="footer-center" style="margin-top:6px;">Follow us:</div>
+  ${clinicInstagram ? `<div class="footer-center">Instagram: ${clinicInstagram}</div>` : ""}
+  ${clinicFacebook ? `<div class="footer-center">Facebook: ${clinicFacebook}</div>` : ""}
+  ${clinicTiktok ? `<div class="footer-center">TikTok: ${clinicTiktok}</div>` : ""}` : "";
     const receiptDate = new Date(selectedReceipt.created_at || new Date());
     const dateValue = receiptDate.toLocaleDateString("en-GB");
     const timeValue = receiptDate.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
@@ -370,7 +382,7 @@ export default function ReceiptLogPage() {
   <div class="logo-wrap" id="lw">
     <img src="${logoPath}" alt="logo" class="logo" onerror="document.getElementById('lw').style.display='none'"/>
   </div>
-  <div class="double">TAX INVOICE (REPRINT)</div>
+  <div class="double">${receiptTitle} (REPRINT)</div>
   <div class="clinic-name">${clinicDisplayName}</div>
   <div class="address">
     ${clinicAddress.split(/\\n|\n/).map((line: string) => `<div>${line}</div>`).join("")}
@@ -394,25 +406,23 @@ export default function ReceiptLogPage() {
   <div class="row"><span>Subtotal</span><span>AED ${subtotal.toFixed(2)}</span></div>
   ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
   <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
+  ${Number(selectedReceipt.gateway_fee || 0) > 0 ? `<div class="row"><span>${selectedReceipt.gateway_fee_provider || "Installment"} Fee</span><span>AED ${Number(selectedReceipt.gateway_fee || 0).toFixed(2)}</span></div>` : ""}
   <div class="hr" style="margin:4px 0;"></div>
   <div class="row" style="font-weight:700;"><span>TOTAL</span><span>AED ${total.toFixed(2)}</span></div>
   <div class="hr"></div>
   <div class="row"><span>Payment Method</span><span>: ${(selectedReceipt.payment_method || "-").toUpperCase()}</span></div>
   ${selectedReceipt.notes ? `<div style="margin-top:4px;">Note: ${selectedReceipt.notes}</div>` : ""}
   <div class="hr"></div>
-  <div class="footer-center">VAT Included in Above Amount</div>
-  <div class="footer-center">Thank you for visiting us!</div>
-  ${isSkinAndSmile ? `
-  <div class="footer-center" style="margin-top:6px;">Follow us:</div>
-  <div class="footer-center">Instagram: @skinandsmiledentalclinic</div>
-  <div class="footer-center">TikTok: @skinandsmile</div>` : ""}
+  <div class="footer-center">${receiptVatNote}</div>
+  <div class="footer-center">${receiptThankYou}</div>
+  ${socialHtml}
   <div class="hr"></div>
   <div style="text-align:center;font-size:9px;line-height:1.4;">
     ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
     ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
   </div>
   <div class="hr"></div>
-  <div class="double">Thank you for Visiting US!</div>
+  <div class="double">${receiptFinalMessage}</div>
 </body></html>`;
   }
 

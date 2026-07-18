@@ -7,7 +7,7 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { Clinic, OutstandingBalance, BalancePayment, PatientCredit } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
-import { SearchPatientModal, ReceiptHistoryModal, TreatmentHistoryModal } from "../../components/pos-modals";
+import { SearchPatientModal, ReceiptHistoryModal } from "../../components/pos-modals";
 import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { printPaymentReceipt } from "../../lib/print-payment-receipt";
@@ -15,6 +15,7 @@ import { availableCredit } from "../../lib/patient-credits";
 import { COUNTRIES } from "../../lib/countries";
 import { getAestheticServiceCategory } from "../../lib/service-categories";
 import { nextAutoFileNumber } from "../../lib/patient-file-number";
+import { calculateInstallmentFee, getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Split Payment"];
 
@@ -308,7 +309,6 @@ export default function ReceiptsPage() {
   const [currentReceipt, setCurrentReceipt] = useState<any | null>(null);
   const [showSearchPatientModal, setShowSearchPatientModal] = useState(false);
   const [showReceiptHistoryModal, setShowReceiptHistoryModal] = useState(false);
-  const [showTreatmentHistoryModal, setShowTreatmentHistoryModal] = useState(false);
   const [outstandingBalances, setOutstandingBalances] = useState<OutstandingBalance[]>([]);
   const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
   const [patientCredits, setPatientCredits] = useState<PatientCredit[]>([]);
@@ -471,6 +471,16 @@ export default function ReceiptsPage() {
   const preVatTotal = subtotal - discountAmount;
   const vat = activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? Math.round(preVatTotal * 0.05 * 100) / 100 : 0;
   const total = preVatTotal + vat;
+  const installmentFeeProvider = selectedPaymentMethod === "Split Payment"
+    ? getInstallmentFeeProvider(mixedOtherMethod)
+    : getInstallmentFeeProvider(selectedPaymentMethod);
+  const installmentFeeBase = installmentFeeProvider
+    ? selectedPaymentMethod === "Split Payment"
+      ? getMixedOtherAmount()
+      : getAmountDueToday()
+    : 0;
+  const installmentFee = calculateInstallmentFee(installmentFeeBase);
+  const totalWithInstallmentFee = Math.round((total + installmentFee) * 100) / 100;
 
   const clinicServices = useMemo(() => {
     if (!activeClinic) return [];
@@ -1069,6 +1079,93 @@ export default function ReceiptsPage() {
       depositsReceivedTotal = (depositsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
     }
 
+    // Payments collected against multi-visit treatment plans today. These are
+    // real cash/card collections, but the full plan price must not be counted
+    // again on every visit.
+    let treatmentPlanPaymentsTotal = 0;
+    const { data: treatmentPlanPaymentsData, error: treatmentPlanPaymentsError } = await supabase
+      .from("treatment_plan_payments")
+      .select("amount")
+      .in("receptionist_id", receptionistIds)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso);
+    if (treatmentPlanPaymentsError) {
+      console.warn("Failed loading treatment plan payments for report", treatmentPlanPaymentsError);
+    } else {
+      treatmentPlanPaymentsTotal = (treatmentPlanPaymentsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
+    }
+
+    const treatmentPlanPaymentRows: Array<(string | number)[]> = [];
+    const { data: treatmentPlanPaymentDetailsData, error: treatmentPlanPaymentDetailsError } = await supabase
+      .from("treatment_plan_payments")
+      .select("id, treatment_plan_id, patient_id, amount, payment_method, notes, created_at, treatment_plans(title, total_amount, planned_visits, status), patients(name, patient_number)")
+      .in("receptionist_id", receptionistIds)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso)
+      .order("created_at", { ascending: true });
+    if (treatmentPlanPaymentDetailsError) {
+      console.warn("Failed loading treatment plan payment details for report", treatmentPlanPaymentDetailsError);
+    } else {
+      const planIds = [...new Set((treatmentPlanPaymentDetailsData || []).map((payment: any) => String(payment.treatment_plan_id || "")).filter(Boolean))];
+      const paidByPlanBeforeEnd = new Map<string, number>();
+      const visitsByPlan = new Map<string, number>();
+
+      if (planIds.length > 0) {
+        const [allPlanPaymentsResult, allPlanVisitsResult] = await Promise.all([
+          supabase
+            .from("treatment_plan_payments")
+            .select("treatment_plan_id, amount")
+            .in("treatment_plan_id", planIds)
+            .lte("created_at", endUtcIso),
+          supabase
+            .from("treatment_plan_visits")
+            .select("treatment_plan_id")
+            .in("treatment_plan_id", planIds),
+        ]);
+
+        if (!allPlanPaymentsResult.error) {
+          (allPlanPaymentsResult.data || []).forEach((payment: any) => {
+            const planId = String(payment.treatment_plan_id || "");
+            paidByPlanBeforeEnd.set(planId, (paidByPlanBeforeEnd.get(planId) || 0) + Number(payment.amount || 0));
+          });
+        }
+        if (!allPlanVisitsResult.error) {
+          (allPlanVisitsResult.data || []).forEach((visit: any) => {
+            const planId = String(visit.treatment_plan_id || "");
+            visitsByPlan.set(planId, (visitsByPlan.get(planId) || 0) + 1);
+          });
+        }
+      }
+
+      (treatmentPlanPaymentDetailsData || []).forEach((payment: any) => {
+        const plan = Array.isArray(payment.treatment_plans) ? payment.treatment_plans[0] : payment.treatment_plans;
+        const patient = Array.isArray(payment.patients) ? payment.patients[0] : payment.patients;
+        if (plan?.status !== "Active") return;
+        const planId = String(payment.treatment_plan_id || "");
+        const totalAmount = Number(plan?.total_amount || 0);
+        const paidAfterToday = paidByPlanBeforeEnd.get(planId) || Number(payment.amount || 0);
+        const remainingAfterToday = Math.max(0, totalAmount - paidAfterToday);
+        treatmentPlanPaymentRows.push([
+          new Date(payment.created_at || now).toLocaleTimeString("en-US", {
+            timeZone: "Asia/Dubai",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+          }),
+          patient?.name || "",
+          patient?.patient_number ? String(patient.patient_number) : "",
+          plan?.title || "Treatment Plan",
+          totalAmount,
+          Number(payment.amount || 0),
+          paidAfterToday,
+          remainingAfterToday,
+          `${visitsByPlan.get(planId) || 0} / ${Number(plan?.planned_visits || 1)}`,
+          payment.payment_method || "",
+          payment.notes || "",
+        ]);
+      });
+    }
+
     const detailHeaders = [
       "Time",
       "Receipt Number",
@@ -1088,9 +1185,11 @@ export default function ReceiptsPage() {
       "Tabby",
       "Tabby Transaction Reference",
       "Tabby Card",
+      "Tabby Fee",
       "Tamara",
       "Tamara Transaction Reference",
       "Tamara Card",
+      "Tamara Fee",
       "Insurance",
       "Refund Amount",
       "Payment Method",
@@ -1114,8 +1213,10 @@ export default function ReceiptsPage() {
     let cardTotal = 0;
     let tabbyTotal = 0;
     let tabbyCardTotal = 0;
+    let tabbyFeeTotal = 0;
     let tamaraTotal = 0;
     let tamaraCardTotal = 0;
+    let tamaraFeeTotal = 0;
     let insuranceTotal = 0;
     let bankTransferTotal = 0;
 
@@ -1132,11 +1233,13 @@ export default function ReceiptsPage() {
       const refundAmount = Number(refundMap.get(receiptId) || 0);
       // NULL amount_paid = paid in full; the breakdown reflects money actually received.
       const paidToday = Number(receipt.amount_paid ?? receipt.total ?? 0);
+      const gatewayFee = Number(receipt.gateway_fee || 0);
+      const gatewayProvider = String(receipt.gateway_fee_provider || getInstallmentFeeProvider(paymentMethodRaw) || "").toLowerCase();
       // Prepaid patient credit covering part of the invoice — not money
       // received today and not outstanding either.
       const creditUsed = Number(receipt.credit_applied || 0);
       const outstandingCreated = Math.max(0, Math.round((netTotal - paidToday - creditUsed) * 100) / 100);
-      const breakdown = getPaymentBreakdown(paymentMethodRaw, paidToday);
+      const breakdown = getPaymentBreakdown(paymentMethodRaw, Math.max(0, paidToday - gatewayFee));
 
       grossRevenue += grossTotal;
       totalDiscounts += discountAmount;
@@ -1151,8 +1254,10 @@ export default function ReceiptsPage() {
       cardTotal += breakdown.card;
       tabbyTotal += breakdown.tabby;
       tabbyCardTotal += breakdown.tabbyCard;
+      tabbyFeeTotal += gatewayProvider.includes("tabby") ? gatewayFee : 0;
       tamaraTotal += breakdown.tamara;
       tamaraCardTotal += breakdown.tamaraCard;
+      tamaraFeeTotal += gatewayProvider.includes("tamara") ? gatewayFee : 0;
       insuranceTotal += breakdown.insurance;
       bankTransferTotal += breakdown.bankTransfer;
 
@@ -1182,9 +1287,11 @@ export default function ReceiptsPage() {
         breakdown.tabby,
         extractTransactionReference(paymentMethodRaw, "tabby"),
         breakdown.tabbyCard,
+        gatewayProvider.includes("tabby") ? gatewayFee : 0,
         breakdown.tamara,
         extractTransactionReference(paymentMethodRaw, "tamara"),
         breakdown.tamaraCard,
+        gatewayProvider.includes("tamara") ? gatewayFee : 0,
         breakdown.insurance,
         refundAmount,
         paymentMethodRaw,
@@ -1194,7 +1301,7 @@ export default function ReceiptsPage() {
       ]);
     });
 
-    const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tamaraTotal + tamaraCardTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal + depositsReceivedTotal;
+    const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tabbyFeeTotal + tamaraTotal + tamaraCardTotal + tamaraFeeTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal + depositsReceivedTotal + treatmentPlanPaymentsTotal;
     const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
 
     const workbook = XLSX.utils.book_new();
@@ -1246,6 +1353,7 @@ export default function ReceiptsPage() {
       ["Outstanding Created Today", outstandingCreatedTotal],
       ["Balance Collections (Old Balances)", balanceCollectionsTotal],
       ["Deposits Received (Advance Payments)", depositsReceivedTotal],
+      ["Treatment Plan Payments", treatmentPlanPaymentsTotal],
       ["Patient Credit Used", creditUsedTotal],
       ["", ""],
       ["Payment Summary", "Amount (AED)"],
@@ -1253,12 +1361,15 @@ export default function ReceiptsPage() {
       ["Card", cardTotal],
       ["Tabby", tabbyTotal],
       ["Tabby Card", tabbyCardTotal],
+      ["Tabby Fee", tabbyFeeTotal],
       ["Tamara", tamaraTotal],
       ["Tamara Card", tamaraCardTotal],
+      ["Tamara Fee", tamaraFeeTotal],
       ["Insurance", insuranceTotal],
       ["Bank Transfer", bankTransferTotal],
       ["Balance Collections", balanceCollectionsTotal],
       ["Deposits Received", depositsReceivedTotal],
+      ["Treatment Plan Payments", treatmentPlanPaymentsTotal],
       ["Total Collected", totalCollected],
     ];
 
@@ -1268,7 +1379,7 @@ export default function ReceiptsPage() {
       { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
       { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } },
       { s: { r: 8, c: 0 }, e: { r: 8, c: 1 } },
-      { s: { r: 22, c: 0 }, e: { r: 22, c: 1 } },
+      { s: { r: 23, c: 0 }, e: { r: 23, c: 1 } },
     ];
 
     const styleSummaryCell = (row: number, col: number, style: Record<string, unknown>) => {
@@ -1288,7 +1399,7 @@ export default function ReceiptsPage() {
       }
     }
 
-    [3, 9, 23].forEach((row) => {
+    [3, 9, 24].forEach((row) => {
       styleSummaryCell(row, 1, {
         fill: { fgColor: { rgb: "1F4E78" } },
         font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
@@ -1309,67 +1420,59 @@ export default function ReceiptsPage() {
       fill: { fgColor: { rgb: "0B132B" } },
     });
 
-    for (let row = 12; row <= 21; row++) {
+    for (let row = 12; row <= 22; row++) {
       styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
     }
-    for (let row = 24; row <= 34; row++) {
+    for (let row = 25; row <= 38; row++) {
       styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
     }
 
-    styleSummaryCell(34, 1, {
+    styleSummaryCell(38, 1, {
       fill: { fgColor: { rgb: "FFF2CC" } },
       font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
     });
-    styleSummaryCell(34, 2, {
+    styleSummaryCell(38, 2, {
       fill: { fgColor: { rgb: "FFF2CC" } },
       font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
     });
 
     // Formula for Total Collected (Cash..Deposits Received) with a cached
     // value so viewers that don't recalculate formulas still show the number.
-    (summarySheet as any)["B34"] = {
+    (summarySheet as any)["B38"] = {
       t: "n",
-      f: "SUM(B24:B33)",
+      f: "SUM(B25:B37)",
       v: Math.round(totalCollected * 100) / 100,
-      s: (summarySheet as any)["B34"]?.s,
+      s: (summarySheet as any)["B38"]?.s,
     };
 
-    const detailsData: (string | number)[][] = [detailHeaders, ...detailRows, new Array(detailHeaders.length).fill("") as string[]];
+    const blankDetailRow = new Array(detailHeaders.length).fill("") as string[];
+    const visibleDetailRows = detailRows.length > 0 ? detailRows : [blankDetailRow];
+    const detailsData: (string | number)[][] = [detailHeaders, ...visibleDetailRows, new Array(detailHeaders.length).fill("") as string[]];
     const detailsSheet = XLSX.utils.aoa_to_sheet(detailsData);
-    const detailsDataStart = 2;
-    const detailsDataEnd = detailRows.length > 0 ? detailRows.length + 1 : 1;
-    const formulaEnd = Math.max(detailsDataStart, detailsDataEnd);
-    const totalsRow = detailRows.length + 2;
+    const totalsRow = visibleDetailRows.length + 2;
 
-    const writeCell = (address: string, value: string | number | { t: string; f: string; v?: number }) => {
-      if (typeof value === "object" && "f" in value) {
-        (detailsSheet as any)[address] = { ...(detailsSheet as any)[address], ...value };
-        return;
-      }
-      (detailsSheet as any)[address] = { ...(detailsSheet as any)[address], v: value };
+    const writeCell = (address: string, value: string | number) => {
+      const safeValue = typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) / 100 : value;
+      (detailsSheet as any)[address] = { ...(detailsSheet as any)[address], v: safeValue };
     };
 
     writeCell(`A${totalsRow}`, "TOTALS");
 
-    // Write both the formula AND a computed value: some viewers (Google Sheets
-    // import, phone previews, Protected View) don't recalculate formulas on
-    // open, which made totals show empty depending on where the file was opened.
+    // Store computed totals as values. Formula cells have caused Excel repairs
+    // when the report has no normal receipt rows but other EOD collections exist.
     ["I", "J", "K", "L", "M", "N", "P", "R", "S", "U", "V", "W", "Y", "Z", "AA"].forEach((col) => {
       const colIndex = XLSX.utils.decode_col(col);
       const computed = detailRows.reduce((s, row) => s + Number(row[colIndex] || 0), 0);
-      writeCell(`${col}${totalsRow}`, {
-        t: "n",
-        f: `SUM(${col}${detailsDataStart}:${col}${formulaEnd})`,
-        v: Math.round(computed * 100) / 100,
-      });
+      writeCell(`${col}${totalsRow}`, computed);
     });
 
-    detailsSheet["!autofilter"] = { ref: `A1:AA${totalsRow}` };
+    const lastDetailColumn = XLSX.utils.encode_col(detailHeaders.length - 1);
+    detailsSheet["!autofilter"] = { ref: `A1:${lastDetailColumn}${totalsRow}` };
     detailsSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
 
     const autoWidths = detailHeaders.map((header, index) => {
       let maxLength = String(header).length;
-      detailRows.forEach((row) => {
+      visibleDetailRows.forEach((row) => {
         const value = row[index] == null ? "" : String(row[index]);
         const longestLine = value
           .split("\n")
@@ -1406,7 +1509,7 @@ export default function ReceiptsPage() {
       });
     }
 
-    const currencyCols = new Set([9, 10, 11, 12, 13, 14, 16, 18, 19, 21, 22, 23, 25, 26, 27]);
+    const currencyCols = new Set([9, 10, 11, 12, 13, 14, 16, 18, 19, 21, 22, 23, 25, 27, 28, 29]);
     for (let row = 2; row <= totalsRow; row++) {
       const isTotalsRow = row === totalsRow;
       const isEvenDataRow = row % 2 === 0;
@@ -1436,6 +1539,75 @@ export default function ReceiptsPage() {
 
     XLSX.utils.book_append_sheet(workbook, summarySheet, "Daily Summary");
     XLSX.utils.book_append_sheet(workbook, detailsSheet, "Transaction Details");
+
+    const planPaymentHeaders = [
+      "Time",
+      "Patient Name",
+      "Patient ID Number",
+      "Active Plan",
+      "Plan Total",
+      "Paid Today",
+      "Paid To Date",
+      "Remaining",
+      "Visit Progress",
+      "Payment Method",
+      "Notes",
+    ];
+    const planPaymentData = [
+      planPaymentHeaders,
+      ...(treatmentPlanPaymentRows.length > 0
+        ? treatmentPlanPaymentRows
+        : [["", "No active treatment plan payments today", "", "", "", "", "", "", "", "", ""]]),
+    ];
+    const planPaymentSheet = XLSX.utils.aoa_to_sheet(planPaymentData);
+    planPaymentSheet["!autofilter"] = { ref: `A1:K${planPaymentData.length}` };
+    planPaymentSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+    planPaymentSheet["!cols"] = [
+      { wch: 12 },
+      { wch: 32 },
+      { wch: 16 },
+      { wch: 28 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 16 },
+      { wch: 18 },
+      { wch: 30 },
+    ];
+
+    const stylePlanPaymentCell = (row: number, col: number, style: Record<string, unknown>) => {
+      const ref = XLSX.utils.encode_cell({ r: row - 1, c: col - 1 });
+      const cell = (planPaymentSheet as any)[ref];
+      if (!cell) return;
+      cell.s = { ...(cell.s || {}), ...style };
+    };
+
+    for (let col = 1; col <= planPaymentHeaders.length; col++) {
+      stylePlanPaymentCell(1, col, {
+        fill: { fgColor: { rgb: "1F4E78" } },
+        font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FFFFFF" } },
+        alignment: { horizontal: "center", vertical: "center", wrapText: true },
+        border: thinBorder,
+      });
+    }
+    const planPaymentCurrencyCols = new Set([5, 6, 7, 8]);
+    for (let row = 2; row <= planPaymentData.length; row++) {
+      for (let col = 1; col <= planPaymentHeaders.length; col++) {
+        stylePlanPaymentCell(row, col, {
+          border: thinBorder,
+          font: { name: "Calibri", sz: 10, color: { rgb: "111827" } },
+          alignment: {
+            vertical: "top",
+            horizontal: planPaymentCurrencyCols.has(col) ? "right" : col === 2 || col === 11 ? "left" : "center",
+            wrapText: col === 2 || col === 11,
+          },
+          fill: row % 2 === 0 ? { fgColor: { rgb: "F8FAFC" } } : { fgColor: { rgb: "FFFFFF" } },
+          ...(planPaymentCurrencyCols.has(col) ? { numFmt: "#,##0.00" } : {}),
+        });
+      }
+    }
+    XLSX.utils.book_append_sheet(workbook, planPaymentSheet, "Treatment Plan Payments");
 
     const fileDate = formatDubaiFileDate(now);
     const fileName = `EOD RECONCILIATION ${activeClinic.name.toUpperCase()} ${fileDate.day} ${fileDate.month} ${fileDate.year}.xlsx`;
@@ -1768,7 +1940,7 @@ export default function ReceiptsPage() {
 
     setIsSavingReceipt(true);
 
-    const amountPaidToday = getAmountDueToday();
+    const amountPaidToday = Math.round((getAmountDueToday() + installmentFee) * 100) / 100;
     const outstandingRemainder = getOutstandingAfterPayment();
     const isPartialPayment = outstandingRemainder > 0.0049;
 
@@ -1810,13 +1982,16 @@ export default function ReceiptsPage() {
           receptionist_id: activeReceptionistId,
           subtotal: subtotal,
           vat: vat,
-          total: total,
+          total: totalWithInstallmentFee,
+          total_before_gateway_fee: total,
+          gateway_fee: installmentFee > 0 ? installmentFee : null,
+          gateway_fee_provider: installmentFeeProvider,
           discount_amount: (() => {
             const itemDiscount = selectedServices.reduce((sum, s) => s.originalPrice != null ? sum + Math.max(0, Number(s.originalPrice) - Number(s.price)) : sum, 0);
             const total = itemDiscount + discountAmount;
             return total > 0 ? total : null;
           })(),
-          notes: notes,
+          notes: null,
           payment_method: isFullyCoveredByCredit && creditApplied > 0.0049
             ? `Patient Credit (AED ${creditApplied.toFixed(2)})`
             : getPaymentSummaryForSave(),
@@ -1824,7 +1999,7 @@ export default function ReceiptsPage() {
           // that haven't run supabase-partial-payments-migration.sql yet.
           // NULL amount_paid = paid in full. When credit is used, amount_paid is
           // always set to the money actually received (credit excluded).
-          ...(isPartialPayment || creditApplied > 0.0049 ? { amount_paid: amountPaidToday } : {}),
+          ...(isPartialPayment || creditApplied > 0.0049 || installmentFee > 0 ? { amount_paid: amountPaidToday } : {}),
           // Portion covered by prepaid patient credit; only written when used so
           // databases without supabase-credit-applied-migration.sql keep working.
           ...(creditApplied > 0.0049 ? { credit_applied: creditApplied } : {}),
@@ -1902,8 +2077,8 @@ export default function ReceiptsPage() {
             original_date: new Date().toLocaleDateString("en-CA"),
             original_amount: outstandingRemainder,
             reason: creditApplied > 0.0049
-              ? `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} + credit AED ${creditApplied.toFixed(2)} of AED ${total.toFixed(2)}`
-              : `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} of AED ${total.toFixed(2)}`,
+              ? `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} + credit AED ${creditApplied.toFixed(2)} of AED ${totalWithInstallmentFee.toFixed(2)}`
+              : `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} of AED ${totalWithInstallmentFee.toFixed(2)}`,
             reference_number: receiptRef,
             created_by: activeReceptionistId,
             receipt_id: receiptData.id,
@@ -1923,13 +2098,17 @@ export default function ReceiptsPage() {
     }
 
     if (notes.trim()) {
+      if (!activeClinic?.id) {
+        alert("Receipt saved, but the clinical note was not saved because no clinic is active.");
+        return receiptData;
+      }
       const { error: noteError } = await supabase.from("patient_notes").insert({
         patient_id: transactionPatientId,
         receipt_id: receiptData.id,
         note: notes.trim(),
         doctor_id: doctorId || null,
         receptionist_id: activeReceptionistId,
-        clinic_id: activeClinic?.id || null,
+        clinic_id: activeClinic.id,
       });
       if (noteError) {
         console.error("Patient note save error", noteError.message, noteError.code, noteError.details, noteError.hint);
@@ -2690,10 +2869,11 @@ export default function ReceiptsPage() {
 
   function buildThermalReceiptHtml(title: string, savedReceipt?: any) {
     const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo6.jpg";
-    const clinicDisplayName = (activeClinic?.name || "Skin and Smile Dental Clinic")
+    const clinicDisplayName = (activeClinic?.receipt_print_name || activeClinic?.name || "Skin and Smile Dental Clinic")
       .replace(/\s*\([^)]*\)\s*/g, " ")
       .replace(/\s{2,}/g, " ")
       .trim();
+    const receiptTitle = activeClinic?.receipt_title || "TAX INVOICE";
     const isAlDanaClinic = (activeClinic?.name || "").toLowerCase().includes("al dana");
     const clinicAddress = activeClinic?.address || (
       isAlDanaClinic
@@ -2705,6 +2885,18 @@ export default function ReceiptsPage() {
     const clinicPhone = activeClinic?.phone || (isAlDanaClinic ? "054 460 1011" : "");
     const clinicWhatsapp = activeClinic?.whatsapp || "";
     const isSkinAndSmile = !activeClinic || activeClinic.logo !== "altamuze";
+    const clinicInstagram = activeClinic?.instagram || (isSkinAndSmile ? "@skinandsmiledentalclinic" : "");
+    const clinicFacebook = activeClinic?.facebook || "";
+    const clinicTiktok = activeClinic?.tiktok || (isSkinAndSmile ? "@skinandsmile" : "");
+    const receiptVatNote = activeClinic?.receipt_vat_note || "VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه";
+    const receiptThankYou = activeClinic?.receipt_thank_you || "Thank you for visiting us / شكراً لزيارتك لنا";
+    const receiptFinalMessage = activeClinic?.receipt_final_message || "Thank you for Visiting US!";
+    const socialHtml = clinicInstagram || clinicFacebook || clinicTiktok ? `
+      <div class="footer-center" style="margin-top:6px;">Follow us:</div>
+      ${clinicInstagram ? `<div class="footer-center">Instagram: ${clinicInstagram}</div>` : ""}
+      ${clinicFacebook ? `<div class="footer-center">Facebook: ${clinicFacebook}</div>` : ""}
+      ${clinicTiktok ? `<div class="footer-center">TikTok: ${clinicTiktok}</div>` : ""}
+      ` : "";
     const now = new Date();
     const receiptForDisplay = savedReceipt ?? currentReceipt;
     const invoiceNo = receiptForDisplay?.receipt_number
@@ -2747,7 +2939,7 @@ export default function ReceiptsPage() {
       })
       .join("");
 
-    const paidTodayForReceipt = getAmountDueToday();
+    const paidTodayForReceipt = Math.round((getAmountDueToday() + installmentFee) * 100) / 100;
     const creditUsedForReceipt = getCreditApplied();
     const remainingForReceipt = getRemainingAfterCredit();
     const outstandingForReceipt = getOutstandingAfterPayment();
@@ -2768,6 +2960,7 @@ export default function ReceiptsPage() {
           ? "PATIENT CREDIT"
           : (selectedPaymentMethod || "-").toUpperCase()
       }</span></div>
+      ${installmentFee > 0 ? `<div class="row"><span>${installmentFeeProvider} Fee / رسوم ${installmentFeeProvider}</span><span>: AED ${installmentFee.toFixed(2)}</span></div>` : ""}
       <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
     `;
 
@@ -2790,6 +2983,7 @@ export default function ReceiptsPage() {
         <div class="row"><span>Payment Method / طريقة الدفع</span><span>: SPLIT PAYMENT</span></div>
         <div class="row"><span>Cash / نقداً</span><span>: AED ${getMixedCashAmount().toFixed(2)}</span></div>
         <div class="row"><span>${mixedOtherMethod}</span><span>: AED ${getMixedOtherAmount().toFixed(2)}</span></div>
+        ${installmentFee > 0 ? `<div class="row"><span>${installmentFeeProvider} Fee / رسوم ${installmentFeeProvider}</span><span>: AED ${installmentFee.toFixed(2)}</span></div>` : ""}
         ${splitReference ? `<div class="row"><span>${mixedOtherMethod} Reference</span><span>: ${splitReference}</span></div>` : ""}
       `;
     }
@@ -2798,6 +2992,7 @@ export default function ReceiptsPage() {
       paymentSection = `
         <div class="row"><span>Payment Method / طريقة الدفع</span><span>: TABBY</span></div>
         <div class="row"><span>Tabby Reference</span><span>: ${tabbyReferenceInput.trim() || "-"}</span></div>
+        ${installmentFee > 0 ? `<div class="row"><span>Tabby Fee / رسوم Tabby</span><span>: AED ${installmentFee.toFixed(2)}</span></div>` : ""}
         <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
       `;
     }
@@ -2806,6 +3001,7 @@ export default function ReceiptsPage() {
       paymentSection = `
         <div class="row"><span>Payment Method / طريقة الدفع</span><span>: TAMARA</span></div>
         <div class="row"><span>Tamara Reference</span><span>: ${tamaraReferenceInput.trim() || "-"}</span></div>
+        ${installmentFee > 0 ? `<div class="row"><span>Tamara Fee / رسوم Tamara</span><span>: AED ${installmentFee.toFixed(2)}</span></div>` : ""}
         <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
       `;
     }
@@ -2878,7 +3074,7 @@ export default function ReceiptsPage() {
           <img src="${logoPath}" alt="Clinic logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'" />
         </div>
 
-        <div class="double">TAX INVOICE</div>
+        <div class="double">${receiptTitle}</div>
 
         <div class="clinic-name">${clinicDisplayName}</div>
 
@@ -2910,25 +3106,20 @@ export default function ReceiptsPage() {
         <div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>
         ${discountAmount > 0 ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
         <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
+        ${installmentFee > 0 ? `<div class="row"><span>${installmentFeeProvider} Fee</span><span>AED ${installmentFee.toFixed(2)}</span></div>` : ""}
         <div class="hr" style="margin:4px 0;"></div>
-        <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${total.toFixed(2)}</span></div>
+        <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${totalWithInstallmentFee.toFixed(2)}</span></div>
 
         <div class="hr"></div>
 
         ${paymentSection}
         ${paymentStatusRows}
 
-        ${notes ? `<div style="margin-top:4px;">Note / ملاحظة: ${notes}</div>` : ""}
-
         <div class="hr"></div>
 
-        <div class="footer-center">VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه</div>
-        <div class="footer-center">Thank you for visiting us / شكراً لزيارتك لنا</div>
-        ${isSkinAndSmile ? `
-        <div class="footer-center" style="margin-top:6px;">Follow us:</div>
-        <div class="footer-center">Instagram: @skinandsmiledentalclinic</div>
-        <div class="footer-center">TikTok: @skinandsmile</div>
-        ` : ""}
+        <div class="footer-center">${receiptVatNote}</div>
+        <div class="footer-center">${receiptThankYou}</div>
+        ${socialHtml}
 
         <div class="hr"></div>
 
@@ -2939,7 +3130,7 @@ export default function ReceiptsPage() {
 
         <div class="hr"></div>
 
-        <div class="double">Thank you for Visiting US!</div>
+        <div class="double">${receiptFinalMessage}</div>
       </body>
     </html>`;
   }
@@ -3080,7 +3271,7 @@ export default function ReceiptsPage() {
               </div>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-3 mt-4">
+            <div className="grid gap-2 sm:grid-cols-2 mt-4">
               <button
                 onClick={() => setShowSearchPatientModal(true)}
                 className="rounded-2xl border border-teal-300 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 transition hover:bg-teal-100"
@@ -3092,12 +3283,6 @@ export default function ReceiptsPage() {
                 className="rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
               >
                 Receipt History
-              </button>
-              <button
-                onClick={() => setShowTreatmentHistoryModal(true)}
-                className="rounded-2xl border border-slate-300 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
-              >
-                Treatment History
               </button>
             </div>
 
@@ -3390,9 +3575,9 @@ export default function ReceiptsPage() {
             </div>
 
             <div className="mt-5">
-              <label className="block text-sm font-semibold text-slate-700">Notes</label>
+              <label className="block text-sm font-semibold text-slate-700">Clinical Notes</label>
               <textarea
-                placeholder="Optional note for the receipt"
+                placeholder="Saved to this patient's profile for the active clinic"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 className="mt-2 min-h-[120px] w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
@@ -3639,10 +3824,16 @@ export default function ReceiptsPage() {
                 <span>VAT</span>
                 <span>AED {vat.toFixed(2)}</span>
               </div>
+              {installmentFee > 0 && (
+                <div className="flex items-center justify-between text-cyan-300">
+                  <span>{installmentFeeProvider} Fee</span>
+                  <span>AED {installmentFee.toFixed(2)}</span>
+                </div>
+              )}
               <div className="border-t border-white/10 pt-4 text-base font-semibold text-white">
                 <div className="flex items-center justify-between">
                   <span>Total</span>
-                  <span>AED {total.toFixed(2)}</span>
+                  <span>AED {totalWithInstallmentFee.toFixed(2)}</span>
                 </div>
               </div>
             </div>
@@ -3723,6 +3914,18 @@ export default function ReceiptsPage() {
                     ) : (
                       <p className="text-xs text-slate-500">Paying in full — no outstanding balance.</p>
                     ))}
+                    {installmentFee > 0 && (
+                      <div className="rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm text-cyan-900">
+                        <div className="flex items-center justify-between">
+                          <span>{installmentFeeProvider} Fee (7.5%)</span>
+                          <span className="font-semibold">AED {installmentFee.toFixed(2)}</span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between border-t border-cyan-200 pt-1 font-bold">
+                          <span>Total to collect today</span>
+                          <span>AED {(getAmountDueToday() + installmentFee).toFixed(2)}</span>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {getRemainingAfterCredit() > 0.0049 && (
@@ -4002,7 +4205,6 @@ export default function ReceiptsPage() {
         }}
       />
       <ReceiptHistoryModal isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} clinicId={activeClinic?.id} clinic={activeClinic ?? null} />
-      <TreatmentHistoryModal isOpen={showTreatmentHistoryModal} onClose={() => setShowTreatmentHistoryModal(false)} clinicId={activeClinic?.id ?? null} />
       <CollectBalancePaymentModal
         isOpen={collectBalanceContext !== null}
         onClose={() => setCollectBalanceContext(null)}
