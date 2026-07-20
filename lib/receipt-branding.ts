@@ -87,8 +87,12 @@ export function buildReceiptQrHtml(options: ReceiptQrOptions) {
 
   return `
     <div class="receipt-qr" style="display:flex;flex-direction:column;align-items:center;margin:6px 0 4px;break-inside:avoid;">
+      <div style="font-size:10px;line-height:1.25;margin-bottom:3px;text-align:center;font-weight:700;">How did we do today?</div>
       ${svg}
-      <div style="font-size:8px;line-height:1.2;margin-top:2px;text-align:center;">Scan for appointments</div>
+      <div style="font-size:9px;line-height:1.3;margin-top:3px;text-align:center;">
+        <div>Scan the QR code<br/>to share your experience.</div>
+        <div style="margin-top:2px;">Your feedback helps us<br/>serve you better.</div>
+      </div>
     </div>`;
 }
 
