@@ -3143,6 +3143,14 @@ export default function ReceiptsPage() {
     const remainingForReceipt = getRemainingAfterCredit();
     const outstandingForReceipt = getOutstandingAfterPayment();
     const isPartialForReceipt = outstandingForReceipt > 0.0049;
+    const escapeReceiptText = (value: string) =>
+      value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    const notesForReceipt = escapeReceiptText(notes.trim());
     const paymentStatusRows = `
       ${creditUsedForReceipt > 0.0049 ? `
       <div class="row"><span>Patient Credit Used / الرصيد المستخدم</span><span>: - AED ${creditUsedForReceipt.toFixed(2)}</span></div>
@@ -3313,6 +3321,10 @@ export default function ReceiptsPage() {
 
         ${paymentSection}
         ${paymentStatusRows}
+  ${notesForReceipt ? `
+  <div class="hr"></div>
+  <div style="font-weight:700;">Notes / ملاحظات</div>
+  <div style="white-space:pre-wrap;overflow-wrap:anywhere;">${notesForReceipt}</div>` : ""}
 
         <div class="hr"></div>
 
