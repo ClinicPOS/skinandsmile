@@ -16,7 +16,7 @@ import { COUNTRIES } from "../../lib/countries";
 import { getAestheticServiceCategory } from "../../lib/service-categories";
 import { nextAutoFileNumber } from "../../lib/patient-file-number";
 import { calculateInstallmentFee, getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
-import { getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Split Payment"];
 
@@ -1080,6 +1080,43 @@ export default function ReceiptsPage() {
       depositsReceivedTotal = (depositsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
     }
 
+    const treatmentPlanRows: Array<(string | number)[]> = [];
+    const treatmentPlansById = new Map<string, any>();
+    const treatmentPlanVisitCounts = new Map<string, number>();
+    const treatmentPlanPaidToDate = new Map<string, number>();
+    const relevantTreatmentPlanIds = new Set<string>();
+
+    const { data: treatmentPlansCreatedData, error: treatmentPlansCreatedError } = await supabase
+      .from("treatment_plans")
+      .select("id, patient_id, title, total_amount, planned_visits, status, notes, created_at, completed_at, patients(name, patient_number)")
+      .eq("clinic_id", activeClinic.id)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso)
+      .order("created_at", { ascending: true });
+    if (treatmentPlansCreatedError) {
+      console.warn("Failed loading treatment plans created today", treatmentPlansCreatedError);
+    } else {
+      (treatmentPlansCreatedData || []).forEach((plan: any) => {
+        treatmentPlansById.set(String(plan.id), plan);
+        relevantTreatmentPlanIds.add(String(plan.id));
+      });
+    }
+
+    const { data: treatmentPlanVisitsTodayData, error: treatmentPlanVisitsTodayError } = await supabase
+      .from("treatment_plan_visits")
+      .select("treatment_plan_id")
+      .in("receptionist_id", receptionistIds)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso);
+    if (treatmentPlanVisitsTodayError) {
+      console.warn("Failed loading treatment plan visits today", treatmentPlanVisitsTodayError);
+    } else {
+      (treatmentPlanVisitsTodayData || []).forEach((visit: any) => {
+        const planId = String(visit.treatment_plan_id || "");
+        if (planId) relevantTreatmentPlanIds.add(planId);
+      });
+    }
+
     // Payments collected against multi-visit treatment plans today. These are
     // real cash/card collections, but the full plan price must not be counted
     // again on every visit.
@@ -1094,6 +1131,91 @@ export default function ReceiptsPage() {
       console.warn("Failed loading treatment plan payments for report", treatmentPlanPaymentsError);
     } else {
       treatmentPlanPaymentsTotal = (treatmentPlanPaymentsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
+    }
+
+    const { data: treatmentPlanPaymentPlanIdsData, error: treatmentPlanPaymentPlanIdsError } = await supabase
+      .from("treatment_plan_payments")
+      .select("treatment_plan_id")
+      .in("receptionist_id", receptionistIds)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso);
+    if (treatmentPlanPaymentPlanIdsError) {
+      console.warn("Failed loading treatment plan payment ids for report", treatmentPlanPaymentPlanIdsError);
+    } else {
+      (treatmentPlanPaymentPlanIdsData || []).forEach((payment: any) => {
+        const planId = String(payment.treatment_plan_id || "");
+        if (planId) relevantTreatmentPlanIds.add(planId);
+      });
+    }
+
+    if (relevantTreatmentPlanIds.size > 0) {
+      const planIds = [...relevantTreatmentPlanIds];
+      const missingPlanIds = planIds.filter((planId) => !treatmentPlansById.has(planId));
+
+      if (missingPlanIds.length > 0) {
+        const { data: missingPlansData, error: missingPlansError } = await supabase
+          .from("treatment_plans")
+          .select("id, patient_id, title, total_amount, planned_visits, status, notes, created_at, completed_at, patients(name, patient_number)")
+          .eq("clinic_id", activeClinic.id)
+          .in("id", missingPlanIds)
+          .order("created_at", { ascending: true });
+        if (missingPlansError) {
+          console.warn("Failed loading treatment plan details for report", missingPlansError);
+        } else {
+          (missingPlansData || []).forEach((plan: any) => {
+            treatmentPlansById.set(String(plan.id), plan);
+          });
+        }
+      }
+
+      const [allPlanPaymentsResult, allPlanVisitsResult] = await Promise.all([
+        supabase
+          .from("treatment_plan_payments")
+          .select("treatment_plan_id, amount")
+          .in("treatment_plan_id", planIds)
+          .lte("created_at", endUtcIso),
+        supabase
+          .from("treatment_plan_visits")
+          .select("treatment_plan_id")
+          .in("treatment_plan_id", planIds),
+      ]);
+
+      if (!allPlanPaymentsResult.error) {
+        (allPlanPaymentsResult.data || []).forEach((payment: any) => {
+          const planId = String(payment.treatment_plan_id || "");
+          treatmentPlanPaidToDate.set(planId, (treatmentPlanPaidToDate.get(planId) || 0) + Number(payment.amount || 0));
+        });
+      }
+      if (!allPlanVisitsResult.error) {
+        (allPlanVisitsResult.data || []).forEach((visit: any) => {
+          const planId = String(visit.treatment_plan_id || "");
+          treatmentPlanVisitCounts.set(planId, (treatmentPlanVisitCounts.get(planId) || 0) + 1);
+        });
+      }
+
+      [...treatmentPlansById.values()].forEach((plan: any) => {
+        const patient = Array.isArray(plan.patients) ? plan.patients[0] : plan.patients;
+        const planId = String(plan.id || "");
+        const totalAmount = Number(plan.total_amount || 0);
+        const paidToDate = treatmentPlanPaidToDate.get(planId) || 0;
+        treatmentPlanRows.push([
+          new Date(plan.created_at || now).toLocaleTimeString("en-US", {
+            timeZone: "Asia/Dubai",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+          }),
+          patient?.name || "",
+          patient?.patient_number ? String(patient.patient_number) : "",
+          plan.title || "Treatment Plan",
+          plan.status || "",
+          totalAmount,
+          paidToDate,
+          Math.max(0, totalAmount - paidToDate),
+          `${treatmentPlanVisitCounts.get(planId) || 0} / ${Number(plan.planned_visits || 1)}`,
+          plan.notes || "",
+        ]);
+      });
     }
 
     const treatmentPlanPaymentRows: Array<(string | number)[]> = [];
@@ -1141,7 +1263,6 @@ export default function ReceiptsPage() {
       (treatmentPlanPaymentDetailsData || []).forEach((payment: any) => {
         const plan = Array.isArray(payment.treatment_plans) ? payment.treatment_plans[0] : payment.treatment_plans;
         const patient = Array.isArray(payment.patients) ? payment.patients[0] : payment.patients;
-        if (plan?.status !== "Active") return;
         const planId = String(payment.treatment_plan_id || "");
         const totalAmount = Number(plan?.total_amount || 0);
         const paidAfterToday = paidByPlanBeforeEnd.get(planId) || Number(payment.amount || 0);
@@ -1541,11 +1662,78 @@ export default function ReceiptsPage() {
     XLSX.utils.book_append_sheet(workbook, summarySheet, "Daily Summary");
     XLSX.utils.book_append_sheet(workbook, detailsSheet, "Transaction Details");
 
+    const planHeaders = [
+      "Created Time",
+      "Patient Name",
+      "Patient ID Number",
+      "Treatment Plan",
+      "Status",
+      "Plan Total",
+      "Paid To Date",
+      "Remaining",
+      "Visit Progress",
+      "Notes",
+    ];
+    const planData = [
+      planHeaders,
+      ...(treatmentPlanRows.length > 0
+        ? treatmentPlanRows
+        : [["", "No treatment plans created, visited, or paid today", "", "", "", "", "", "", "", ""]]),
+    ];
+    const planSheet = XLSX.utils.aoa_to_sheet(planData);
+    planSheet["!autofilter"] = { ref: `A1:J${planData.length}` };
+    planSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+    planSheet["!cols"] = [
+      { wch: 14 },
+      { wch: 32 },
+      { wch: 16 },
+      { wch: 32 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 16 },
+      { wch: 36 },
+    ];
+
+    const stylePlanCell = (row: number, col: number, style: Record<string, unknown>) => {
+      const ref = XLSX.utils.encode_cell({ r: row - 1, c: col - 1 });
+      const cell = (planSheet as any)[ref];
+      if (!cell) return;
+      cell.s = { ...(cell.s || {}), ...style };
+    };
+
+    for (let col = 1; col <= planHeaders.length; col++) {
+      stylePlanCell(1, col, {
+        fill: { fgColor: { rgb: "1F4E78" } },
+        font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FFFFFF" } },
+        alignment: { horizontal: "center", vertical: "center", wrapText: true },
+        border: thinBorder,
+      });
+    }
+    const planCurrencyCols = new Set([6, 7, 8]);
+    for (let row = 2; row <= planData.length; row++) {
+      for (let col = 1; col <= planHeaders.length; col++) {
+        stylePlanCell(row, col, {
+          border: thinBorder,
+          font: { name: "Calibri", sz: 10, color: { rgb: "111827" } },
+          alignment: {
+            vertical: "top",
+            horizontal: planCurrencyCols.has(col) ? "right" : col === 2 || col === 4 || col === 10 ? "left" : "center",
+            wrapText: col === 2 || col === 4 || col === 10,
+          },
+          fill: row % 2 === 0 ? { fgColor: { rgb: "F8FAFC" } } : { fgColor: { rgb: "FFFFFF" } },
+          ...(planCurrencyCols.has(col) ? { numFmt: "#,##0.00" } : {}),
+        });
+      }
+    }
+    XLSX.utils.book_append_sheet(workbook, planSheet, "Treatment Plans");
+
     const planPaymentHeaders = [
       "Time",
       "Patient Name",
       "Patient ID Number",
-      "Active Plan",
+      "Treatment Plan",
       "Plan Total",
       "Paid Today",
       "Paid To Date",
@@ -1558,7 +1746,7 @@ export default function ReceiptsPage() {
       planPaymentHeaders,
       ...(treatmentPlanPaymentRows.length > 0
         ? treatmentPlanPaymentRows
-        : [["", "No active treatment plan payments today", "", "", "", "", "", "", "", "", ""]]),
+        : [["", "No treatment plan payments today", "", "", "", "", "", "", "", "", ""]]),
     ];
     const planPaymentSheet = XLSX.utils.aoa_to_sheet(planPaymentData);
     planPaymentSheet["!autofilter"] = { ref: `A1:K${planPaymentData.length}` };
@@ -2903,6 +3091,16 @@ export default function ReceiptsPage() {
     const invoiceNo = receiptForDisplay?.receipt_number
       ? `#${String(receiptForDisplay.receipt_number).padStart(5, "0")}`
       : "DRAFT";
+    const qrHtml = buildReceiptQrHtml({
+      clinic: activeClinic,
+      clinicDisplayName,
+      clinicPhone,
+      clinicWhatsapp,
+      clinicInstagram,
+      clinicFacebook,
+      clinicTiktok,
+      invoiceNo,
+    });
     const dateValue = now.toLocaleDateString("en-GB");
     const timeValue = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
 
@@ -3128,6 +3326,10 @@ export default function ReceiptsPage() {
           ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
           ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
         </div>
+
+        <div class="hr"></div>
+
+        ${qrHtml}
 
         <div class="hr"></div>
 

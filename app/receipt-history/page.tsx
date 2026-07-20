@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 
 type Receipt = {
   id: string;
@@ -162,6 +162,16 @@ export default function ReceiptHistoryPage() {
     const invoiceNo = selectedReceipt.receipt_number
       ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
       : "-";
+    const qrHtml = buildReceiptQrHtml({
+      clinic,
+      clinicDisplayName,
+      clinicPhone,
+      clinicWhatsapp,
+      clinicInstagram,
+      clinicFacebook,
+      clinicTiktok,
+      invoiceNo,
+    });
     const dateValue = createdAt.toLocaleDateString("en-GB");
     const timeValue = createdAt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
 
@@ -253,6 +263,8 @@ export default function ReceiptHistoryPage() {
         <div class="hr"></div>
         ${clinicPhone ? `<div class="row"><span>For appointments - Number</span><span>: ${clinicPhone}</span></div>` : ""}
         ${clinicWhatsapp ? `<div class="row"><span>WhatsApp</span><span>: ${clinicWhatsapp}</span></div>` : ""}
+        <div class="hr"></div>
+        ${qrHtml}
         <div class="hr"></div>
         <div class="double">${receiptFinalMessage}</div>
       </body>

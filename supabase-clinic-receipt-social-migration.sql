@@ -12,5 +12,6 @@ alter table public.clinics
   add column if not exists receipt_vat_note text,
   add column if not exists receipt_thank_you text,
   add column if not exists receipt_final_message text,
+  add column if not exists receipt_qr_url text,
   add column if not exists trn text,
   add column if not exists logo text;

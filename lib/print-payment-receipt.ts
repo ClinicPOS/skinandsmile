@@ -1,5 +1,6 @@
 import type { Clinic, Patient, OutstandingBalance, BalancePayment } from "./types";
 import { formatBalanceReference } from "./outstanding-balances";
+import { buildReceiptQrHtml } from "./receipt-branding";
 
 export type PaymentReceiptContext = {
   balance: OutstandingBalance;
@@ -31,6 +32,8 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
   const clinicTrn = clinic?.trn || "";
   const clinicInstagram = clinic?.instagram || "";
   const clinicFacebook = clinic?.facebook || "";
+  const clinicWhatsapp = clinic?.whatsapp || "";
+  const clinicTiktok = clinic?.tiktok || "";
   const now = new Date(payment.created_at || Date.now());
   const dateStr = now.toLocaleDateString("en-GB");
   const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
@@ -43,6 +46,16 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
   const patientNo = patient.patient_number != null
     ? `#${String(patient.patient_number).padStart(5, "0")}`
     : "-";
+  const qrHtml = buildReceiptQrHtml({
+    clinic,
+    clinicDisplayName: clinicName,
+    clinicPhone,
+    clinicWhatsapp,
+    clinicInstagram,
+    clinicFacebook,
+    clinicTiktok,
+    invoiceNo: reference,
+  });
 
   return `<!DOCTYPE html>
 <html>
@@ -105,6 +118,8 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
 
   <div class="footer">Thank you for your payment.</div>
   ${clinicInstagram || clinicFacebook ? `<div class="footer">Follow us${clinicInstagram ? `<br/>Instagram: ${clinicInstagram}` : ""}${clinicFacebook ? `<br/>Facebook: ${clinicFacebook}` : ""}</div>` : ""}
+  <div class="divider"></div>
+  ${qrHtml}
 </body>
 </html>`;
 }

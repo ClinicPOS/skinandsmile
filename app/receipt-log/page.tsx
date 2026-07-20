@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 
 const PAGE_SIZE = 10;
 const BOSS_PIN = "0404";
@@ -344,6 +344,16 @@ export default function ReceiptLogPage() {
     const invoiceNo = selectedReceipt.receipt_number
       ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
       : "REPRINT";
+    const qrHtml = buildReceiptQrHtml({
+      clinic,
+      clinicDisplayName,
+      clinicPhone,
+      clinicWhatsapp,
+      clinicInstagram,
+      clinicFacebook,
+      clinicTiktok,
+      invoiceNo,
+    });
     const subtotal = Number(selectedReceipt.subtotal || 0);
     const discountAmount = Number(selectedReceipt.discount_amount || 0);
     const vat = Number(selectedReceipt.vat || 0);
@@ -419,6 +429,8 @@ export default function ReceiptLogPage() {
     ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
     ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
   </div>
+  <div class="hr"></div>
+  ${qrHtml}
   <div class="hr"></div>
   <div class="double">${receiptFinalMessage}</div>
 </body></html>`;

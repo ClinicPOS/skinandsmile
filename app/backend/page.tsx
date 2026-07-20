@@ -96,6 +96,7 @@ export default function BackendPage() {
   const [receiptVatNote, setReceiptVatNote] = useState("");
   const [receiptThankYou, setReceiptThankYou] = useState("");
   const [receiptFinalMessage, setReceiptFinalMessage] = useState("");
+  const [receiptQrUrl, setReceiptQrUrl] = useState("");
   const [receiptTrn, setReceiptTrn] = useState("");
   const [receiptLogo, setReceiptLogo] = useState("");
 
@@ -179,6 +180,7 @@ export default function BackendPage() {
   const receiptVatNoteValue = isReceiptDraftForSelectedClinic ? receiptVatNote : (selectedClinic?.receipt_vat_note || "VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه");
   const receiptThankYouValue = isReceiptDraftForSelectedClinic ? receiptThankYou : (selectedClinic?.receipt_thank_you || "Thank you for visiting us / شكراً لزيارتك لنا");
   const receiptFinalMessageValue = isReceiptDraftForSelectedClinic ? receiptFinalMessage : (selectedClinic?.receipt_final_message || "Thank you for Visiting US!");
+  const receiptQrUrlValue = isReceiptDraftForSelectedClinic ? receiptQrUrl : (selectedClinic?.receipt_qr_url || "");
   const receiptTrnValue = isReceiptDraftForSelectedClinic ? receiptTrn : (selectedClinic?.trn || "");
   const receiptLogoValue = isReceiptDraftForSelectedClinic ? receiptLogo : (selectedClinic?.logo || "");
 
@@ -196,6 +198,7 @@ export default function BackendPage() {
     setReceiptVatNote(clinic?.receipt_vat_note || "VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه");
     setReceiptThankYou(clinic?.receipt_thank_you || "Thank you for visiting us / شكراً لزيارتك لنا");
     setReceiptFinalMessage(clinic?.receipt_final_message || "Thank you for Visiting US!");
+    setReceiptQrUrl(clinic?.receipt_qr_url || "");
     setReceiptTrn(clinic?.trn || "");
     setReceiptLogo(clinic?.logo || "");
   }
@@ -870,6 +873,7 @@ export default function BackendPage() {
       receipt_vat_note: receiptVatNoteValue.trim() || null,
       receipt_thank_you: receiptThankYouValue.trim() || null,
       receipt_final_message: receiptFinalMessageValue.trim() || null,
+      receipt_qr_url: receiptQrUrlValue.trim() || null,
       trn: receiptTrnValue.trim() || null,
       logo: receiptLogoValue.trim() || null,
     };
@@ -900,6 +904,7 @@ export default function BackendPage() {
     setReceiptVatNote(payload.receipt_vat_note || "");
     setReceiptThankYou(payload.receipt_thank_you || "");
     setReceiptFinalMessage(payload.receipt_final_message || "");
+    setReceiptQrUrl(payload.receipt_qr_url || "");
     setReceiptTrn(payload.trn || "");
     setReceiptLogo(payload.logo || "");
     alert("Clinic receipt print settings updated.");
@@ -1055,6 +1060,15 @@ export default function BackendPage() {
                   setReceiptRoom(e.target.value);
                 }}
                 placeholder="Room (e.g. 408)"
+                className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              />
+              <input
+                value={receiptQrUrlValue}
+                onChange={(e) => {
+                  ensureReceiptDraftForSelectedClinic();
+                  setReceiptQrUrl(e.target.value);
+                }}
+                placeholder="QR link (Google Review URL)"
                 className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
               />
               <input

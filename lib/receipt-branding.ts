@@ -1,3 +1,4 @@
+import qrcode from "qrcode-generator";
 import type { Clinic } from "./types";
 
 export const receiptLogoOptions = [
@@ -20,6 +21,75 @@ export function getReceiptLogoPath(clinic: Pick<Clinic, "logo"> | { logo?: strin
   if (logo.startsWith("/")) return logo;
 
   return fallbackPath;
+}
+
+type ReceiptQrClinic = Partial<Pick<Clinic, "name" | "phone" | "whatsapp" | "instagram" | "facebook" | "tiktok" | "receipt_qr_url">> | null | undefined;
+
+type ReceiptQrOptions = {
+  clinic: ReceiptQrClinic;
+  clinicDisplayName: string;
+  clinicPhone?: string;
+  clinicWhatsapp?: string;
+  clinicInstagram?: string;
+  clinicFacebook?: string;
+  clinicTiktok?: string;
+  qrUrl?: string;
+  invoiceNo?: string;
+};
+
+function cleanSocialHandle(value: string) {
+  return value.trim().replace(/^@+/, "");
+}
+
+function receiptQrValue(options: ReceiptQrOptions) {
+  const configuredUrl = (options.qrUrl || options.clinic?.receipt_qr_url || "").trim();
+  if (configuredUrl) return configuredUrl;
+
+  const whatsapp = options.clinicWhatsapp || options.clinic?.whatsapp || "";
+  const instagram = options.clinicInstagram || options.clinic?.instagram || "";
+  const facebook = options.clinicFacebook || options.clinic?.facebook || "";
+  const tiktok = options.clinicTiktok || options.clinic?.tiktok || "";
+  const phone = options.clinicPhone || options.clinic?.phone || "";
+
+  const whatsappDigits = whatsapp.replace(/\D/g, "");
+  if (whatsappDigits.length >= 8) {
+    return `https://wa.me/${whatsappDigits}`;
+  }
+
+  const instagramHandle = cleanSocialHandle(instagram);
+  if (instagramHandle) {
+    return `https://www.instagram.com/${instagramHandle}`;
+  }
+
+  const facebookValue = facebook.trim();
+  if (/^https?:\/\//i.test(facebookValue)) {
+    return facebookValue;
+  }
+
+  const tiktokHandle = cleanSocialHandle(tiktok);
+  if (tiktokHandle) {
+    return `https://www.tiktok.com/@${tiktokHandle}`;
+  }
+
+  return [
+    options.clinicDisplayName || options.clinic?.name || "Clinic",
+    phone ? `Phone: ${phone}` : "",
+    options.invoiceNo ? `Invoice: ${options.invoiceNo}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+export function buildReceiptQrHtml(options: ReceiptQrOptions) {
+  const qr = qrcode(0, "M");
+  qr.addData(receiptQrValue(options));
+  qr.make();
+  const svg = qr.createSvgTag({ cellSize: 3, margin: 2, scalable: true })
+    .replace("<svg ", '<svg style="width:22mm;height:22mm;display:block;" ');
+
+  return `
+    <div class="receipt-qr" style="display:flex;flex-direction:column;align-items:center;margin:6px 0 4px;break-inside:avoid;">
+      ${svg}
+      <div style="font-size:8px;line-height:1.2;margin-top:2px;text-align:center;">Scan for appointments</div>
+    </div>`;
 }
 
 export function printHtmlWhenImagesReady(html: string, popupMessage = "Please allow popups to print the receipt.") {

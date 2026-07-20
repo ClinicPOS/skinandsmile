@@ -17,7 +17,7 @@ import { rollupBalance, formatBalanceReference } from "../lib/outstanding-balanc
 import { availableCredit } from "../lib/patient-credits";
 import { ReceiveDepositModal } from "./patient-credit-modals";
 import { EditPatientModal } from "./edit-patient-modal";
-import { getReceiptLogoPath, printHtmlWhenImagesReady } from "../lib/receipt-branding";
+import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../lib/receipt-branding";
 
 type Patient = {
   id: string;
@@ -1876,6 +1876,16 @@ export function ReceiptHistoryModal({
     const invoiceNo = receipt.receipt_number
       ? `#${String(receipt.receipt_number).padStart(5, "0")}`
       : `#${receipt.id.slice(0, 8)}`;
+    const qrHtml = buildReceiptQrHtml({
+      clinic,
+      clinicDisplayName,
+      clinicPhone,
+      clinicWhatsapp,
+      clinicInstagram,
+      clinicFacebook,
+      clinicTiktok,
+      invoiceNo,
+    });
 
     const patient = patients.find((p) => p.id === receipt.patient_id);
     const patientName = patient?.name || "-";
@@ -1959,6 +1969,8 @@ export function ReceiptHistoryModal({
         ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
         ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
       </div>
+      <div class="hr"></div>
+      ${qrHtml}
       <div class="hr"></div>
       <div class="double">${receiptFinalMessage}</div>
     </body></html>`;

@@ -30,6 +30,7 @@ create table if not exists public.clinics (
   receipt_vat_note text,
   receipt_thank_you text,
   receipt_final_message text,
+  receipt_qr_url text,
   trn text,
   room text,
   logo text,

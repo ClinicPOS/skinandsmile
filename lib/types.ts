@@ -13,6 +13,7 @@ export type Clinic = {
   receipt_vat_note: string | null;
   receipt_thank_you: string | null;
   receipt_final_message: string | null;
+  receipt_qr_url: string | null;
   trn: string | null;
   logo: string | null;
 };
