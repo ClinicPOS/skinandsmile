@@ -17,6 +17,7 @@ import { rollupBalance, formatBalanceReference } from "../lib/outstanding-balanc
 import { availableCredit } from "../lib/patient-credits";
 import { ReceiveDepositModal } from "./patient-credit-modals";
 import { EditPatientModal } from "./edit-patient-modal";
+import { getReceiptLogoPath, printHtmlWhenImagesReady } from "../lib/receipt-branding";
 
 type Patient = {
   id: string;
@@ -1842,7 +1843,7 @@ export function ReceiptHistoryModal({
   }
 
   function reprintReceipt(receipt: Receipt) {
-    const logoPath = clinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo6.jpg";
+    const logoPath = getReceiptLogoPath(clinic);
     const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
       .replace(/\s*\([^)]*\)\s*/g, " ")
       .replace(/\s{2,}/g, " ")
@@ -1904,7 +1905,7 @@ export function ReceiptHistoryModal({
       body{font-family:Arial,Helvetica,sans-serif;width:72mm;margin:0;padding:2mm;font-size:10px;line-height:1.25;color:#000;background:#fff;overflow-x:hidden;-webkit-text-size-adjust:100%;font-weight:500;}
       .center{text-align:center;}.hr{border-top:1px dashed #000;margin:5px 0;}
       .double{border-top:2px solid #000;border-bottom:2px solid #000;padding:3px 0;margin:5px 0;text-align:center;font-weight:700;}
-      .logo-wrap{display:flex;justify-content:center;margin-bottom:4px;}.logo{max-width:48mm;max-height:26mm;object-fit:contain;}
+      .logo-wrap{display:flex;justify-content:center;margin-bottom:4px;}.logo{max-width:68mm;max-height:36mm;object-fit:contain;}
       .clinic-name{text-align:center;font-size:14px;font-weight:700;line-height:1.1;}.address{text-align:center;font-size:9px;line-height:1.25;margin-top:4px;}
       .row{display:flex;justify-content:space-between;gap:6px;margin:1px 0;}.row span:first-child{min-width:30mm;}
       .row span:last-child{text-align:right;flex:1;min-width:0;overflow-wrap:anywhere;word-break:break-word;}
@@ -1962,13 +1963,7 @@ export function ReceiptHistoryModal({
       <div class="double">${receiptFinalMessage}</div>
     </body></html>`;
 
-    const w = window.open("", "_blank", "width=400,height=600");
-    if (!w) { alert("Please allow popups to print."); return; }
-    w.document.open();
-    w.document.write(html);
-    w.document.close();
-    w.focus();
-    setTimeout(() => w.print(), 500);
+    printHtmlWhenImagesReady(html, "Please allow popups to print.");
   }
 
   function formatReceiptNo(receipt: Receipt) {

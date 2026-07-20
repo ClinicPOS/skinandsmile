@@ -16,6 +16,7 @@ import { COUNTRIES } from "../../lib/countries";
 import { getAestheticServiceCategory } from "../../lib/service-categories";
 import { nextAutoFileNumber } from "../../lib/patient-file-number";
 import { calculateInstallmentFee, getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
+import { getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Split Payment"];
 
@@ -2868,7 +2869,7 @@ export default function ReceiptsPage() {
   }
 
   function buildThermalReceiptHtml(title: string, savedReceipt?: any) {
-    const logoPath = activeClinic?.logo === "altamuze" ? "/images/logo5.jpg" : "/images/logo6.jpg";
+    const logoPath = getReceiptLogoPath(activeClinic);
     const clinicDisplayName = (activeClinic?.receipt_print_name || activeClinic?.name || "Skin and Smile Dental Clinic")
       .replace(/\s*\([^)]*\)\s*/g, " ")
       .replace(/\s{2,}/g, " ")
@@ -3039,7 +3040,7 @@ export default function ReceiptsPage() {
             font-weight: 700;
           }
           .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-          .logo { max-width: 48mm; max-height: 26mm; object-fit: contain; }
+          .logo { max-width: 68mm; max-height: 36mm; object-fit: contain; }
           .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
           .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
           .row {
@@ -3065,7 +3066,7 @@ export default function ReceiptsPage() {
             @page { size: 80mm auto; margin: 0; }
             body { width: 72mm; }
             * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; }
-            .logo { width: 100%; max-width: 66mm; height: auto; }
+            .logo { width: 100%; max-width: 68mm; max-height: 36mm; height: auto; }
           }
         </style>
       </head>
@@ -3138,26 +3139,8 @@ export default function ReceiptsPage() {
   function printReceipt(savedReceipt?: any) {
     const receiptHtml = buildThermalReceiptHtml("Receipt", savedReceipt);
 
-    function openReceiptWindow(autoPrint: boolean) {
-      const w = window.open("", "_blank", "width=400,height=600");
-      if (!w) {
-        alert("Please allow popups to print the receipt.");
-        return;
-      }
-      w.document.open();
-      w.document.write(receiptHtml);
-      w.document.close();
-      w.focus();
-
-      if (autoPrint) {
-        setTimeout(() => {
-          w.print();
-        }, 500);
-      }
-    }
-
     try {
-      openReceiptWindow(true);
+      printHtmlWhenImagesReady(receiptHtml);
     } catch (error) {
       alert("Error opening print dialog. Please check browser settings.");
     }

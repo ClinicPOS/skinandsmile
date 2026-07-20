@@ -8,6 +8,7 @@ import { calculateAge } from "../../lib/utils";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
 import { effectiveServiceCategory } from "../../lib/service-categories";
+import { getReceiptLogoPath, receiptLogoOptions } from "../../lib/receipt-branding";
 
 const BACKEND_PIN = "0404";
 
@@ -1083,15 +1084,19 @@ export default function BackendPage() {
                 placeholder="TikTok (optional)"
                 className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
               />
-              <input
+              <select
                 value={receiptLogoValue}
                 onChange={(e) => {
                   ensureReceiptDraftForSelectedClinic();
                   setReceiptLogo(e.target.value);
                 }}
-                placeholder="Logo key (default / altamuze)"
                 className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-              />
+              >
+                <option value="">Skin and Smile default</option>
+                {receiptLogoOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
               <input
                 value={selectedClinic?.name || ""}
                 disabled
@@ -1146,6 +1151,9 @@ export default function BackendPage() {
           <div className="mx-auto w-[240px] rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <p className="mb-2 text-center text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Thermal Preview</p>
             <div className="bg-white px-2 py-3 text-[9px] leading-tight text-slate-950 shadow-sm">
+              <div className="mb-2 flex justify-center">
+                <img src={getReceiptLogoPath({ logo: receiptLogoValue })} alt="Receipt logo preview" className="max-h-24 max-w-[210px] object-contain" />
+              </div>
               <div className="mb-1 text-center text-[11px] font-bold">{receiptTitleValue || "TAX INVOICE"}</div>
               <div className="text-center text-[12px] font-bold leading-tight">{receiptPrintNameValue || defaultReceiptPrintName}</div>
               <div className="mt-1 text-center text-[8px] leading-snug">

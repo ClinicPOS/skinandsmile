@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
+import { getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 
 type Receipt = {
   id: string;
@@ -128,7 +129,7 @@ export default function ReceiptHistoryPage() {
 
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
-    const logoPath = clinic?.logo === "altamuze" ? "/images/logo4.png" : "/images/logo6.jpg";
+    const logoPath = getReceiptLogoPath(clinic);
     const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
       .replace(/\s*\([^)]*\)\s*/g, " ")
       .replace(/\s{2,}/g, " ")
@@ -198,7 +199,7 @@ export default function ReceiptHistoryPage() {
           .hr { border-top: 1px dashed #000; margin: 5px 0; }
           .double { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 3px 0; margin: 5px 0; text-align: center; font-weight: 700; }
           .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-          .logo { max-width: 48mm; max-height: 26mm; object-fit: contain; }
+          .logo { max-width: 68mm; max-height: 36mm; object-fit: contain; }
           .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
           .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
           .row { display: flex; justify-content: space-between; gap: 6px; margin: 1px 0; }
@@ -258,18 +259,7 @@ export default function ReceiptHistoryPage() {
     </html>`;
 
     try {
-      const w = window.open("", "_blank", "width=400,height=600");
-      if (!w) {
-        alert("Please allow popups to print the receipt.");
-        return;
-      }
-      w.document.open();
-      w.document.write(receiptHtml);
-      w.document.close();
-      w.focus();
-      setTimeout(() => {
-        w.print();
-      }, 500);
+      printHtmlWhenImagesReady(receiptHtml);
     } catch (error) {
       alert("Error opening print dialog. Please check browser settings.");
     }
