@@ -9,6 +9,7 @@ export const receiptLogoOptions = [
   { value: "logo", label: "Logo 1", path: "/images/logo.png" },
   { value: "logo2", label: "Logo 2", path: "/images/logo2.png" },
   { value: "logo3", label: "Logo 3", path: "/images/logo3.png" },
+  { value: "al-jameelah", label: "Al Jameelah Clinic", path: "/images/logo11.png" },
 ] as const;
 
 export function getReceiptLogoPath(clinic: Pick<Clinic, "logo"> | { logo?: string | null } | null | undefined, fallbackPath = "/images/logo6.jpg") {
