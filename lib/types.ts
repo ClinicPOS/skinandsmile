@@ -49,6 +49,8 @@ export type Service = {
   category?: string | null;
   requires_quantity?: boolean;
   billing_unit?: string | null;
+  tooth_selection_mode?: 'none' | 'optional' | 'required';
+  default_visit_count?: number;
 };
 
 export type Receptionist = {
@@ -132,6 +134,11 @@ export type TreatmentPlan = {
   created_by: string | null;
   created_at: string;
   completed_at: string | null;
+  is_legacy?: boolean;
+  historical_amount_paid?: number;
+  payment_arrangement?: string | null;
+  source_imported_visit_id?: string | null;
+  clinic_patient_file_id?: string | null;
 };
 
 export type TreatmentPlanVisit = {
@@ -155,5 +162,37 @@ export type TreatmentPlanPayment = {
   receptionist_id: string;
   register_session_id: string | null;
   notes: string | null;
+  created_at: string;
+};
+
+export type PosHold = {
+  id: string;
+  clinic_id: string;
+  patient_id: string | null;
+  patient_name: string;
+  patient_phone: string | null;
+  doctor_id: string | null;
+  receptionist_id: string;
+  register_session_id: string | null;
+  clinic_patient_file_id: string | null;
+  patient_file_no: string | null;
+  status: 'Waiting' | 'In Treatment' | 'Ready to Pay' | 'Cancelled';
+  notes: string | null;
+  discount_input: string | null;
+  discount_type: 'AED' | '%' | null;
+  cancel_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PosHoldService = {
+  id: string;
+  hold_id: string;
+  service_id: string | null;
+  service_name: string;
+  price: number;
+  original_price: number | null;
+  quantity: number;
+  teeth: string[];
   created_at: string;
 };

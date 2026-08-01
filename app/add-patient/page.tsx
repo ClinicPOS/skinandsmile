@@ -5,10 +5,16 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { COUNTRIES } from "../../lib/countries";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
-import { nextAutoFileNumber } from "../../lib/patient-file-number";
+import {
+  createClinicPatientFile,
+  getActiveClinicIdFromRegisterSession,
+  nextClinicFileNumber,
+} from "../../lib/clinic-patient-files";
+import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 import type { Clinic, Patient, OutstandingBalance } from "../../lib/types";
 
 export default function AddPatientPage() {
+  const { accessSession, isLoaded, isManager, allowedClinicId } = useClinicAccess();
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
@@ -23,6 +29,7 @@ export default function AddPatientPage() {
   const [passportNumber, setPassportNumber] = useState("");
   const [mrn, setMrn] = useState("");
   const [fileNo, setFileNo] = useState("");
+  const [selectedClinicId, setSelectedClinicId] = useState("");
 
   const [saving, setSaving] = useState(false);
   const [lastAdded, setLastAdded] = useState<Patient | null>(null);
@@ -31,11 +38,21 @@ export default function AddPatientPage() {
   const [savedBalance, setSavedBalance] = useState<OutstandingBalance | null>(null);
 
   useEffect(() => {
+    if (!isLoaded) return;
     supabase
       .from("clinics")
       .select("*")
-      .then(({ data }) => setClinics((data || []) as Clinic[]));
-  }, []);
+      .then(({ data }) => {
+        const rows = filterClinicsForAccess((data || []) as Clinic[], accessSession);
+        setClinics(rows);
+        const activeClinicId = allowedClinicId && rows.some((c) => c.id === allowedClinicId)
+          ? allowedClinicId
+          : getActiveClinicIdFromRegisterSession();
+        if (activeClinicId && rows.some((c) => c.id === activeClinicId)) {
+          setSelectedClinicId(activeClinicId);
+        }
+      });
+  }, [accessSession, allowedClinicId, isLoaded]);
 
   function resetForm() {
     setName("");
@@ -57,22 +74,27 @@ export default function AddPatientPage() {
       alert("Patient name is required.");
       return;
     }
+    if (!selectedClinicId) {
+      alert("Please select a clinic before adding a patient.");
+      return;
+    }
 
     // File numbers are official physical file labels — verify a manual entry
     // is unique before inserting so the receptionist gets a clear message.
     if (fileNo.trim()) {
-      const manualNumber = parseInt(fileNo.trim(), 10);
-      if (!Number.isFinite(manualNumber) || manualNumber <= 0) {
-        alert("File No. must be a positive number.");
+      const manualNo = fileNo.trim();
+      if (!manualNo) {
+        alert("File No. cannot be blank.");
         return;
       }
       const { data: fileNoDupes } = await supabase
-        .from("patients")
+        .from("clinic_patient_files")
         .select("id")
-        .eq("patient_number", manualNumber)
+        .eq("clinic_id", selectedClinicId)
+        .eq("file_no", manualNo)
         .limit(1);
       if ((fileNoDupes || []).length > 0) {
-        alert("This File Number already exists. Please use another File Number.");
+        alert("This File Number already exists in this clinic. Please use another File Number.");
         return;
       }
     }
@@ -80,20 +102,14 @@ export default function AddPatientPage() {
     setSaving(true);
     try {
       let saved: Patient | null = null;
-      let lastError: any = null;
+      let lastError: { code?: string; message?: string; details?: string; hint?: string } | null = null;
 
       for (let attempt = 0; attempt < 5; attempt++) {
-        let patientNumber: number;
+        let clinicFileNo: string;
         if (fileNo.trim()) {
-          patientNumber = parseInt(fileNo.trim(), 10);
-          if (!Number.isFinite(patientNumber)) {
-            alert("File No. must be a number.");
-            return;
-          }
+          clinicFileNo = fileNo.trim();
         } else {
-          // Auto-assigned numbers start at 20,000 (old-system files stop
-          // around 18,000). On a duplicate retry this fetches a fresh number.
-          patientNumber = await nextAutoFileNumber();
+          clinicFileNo = await nextClinicFileNumber(selectedClinicId);
         }
 
         const chosenNationality = nationality || nationalitySearch.trim() || null;
@@ -112,19 +128,37 @@ export default function AddPatientPage() {
               nationality: chosenNationality,
               emirates_id: emiratesId.trim() || null,
               passport_number: passportNumber.trim() || null,
-              mrn: mrn.trim() || null,
-              patient_number: patientNumber,
+              mrn: null,
             },
           ])
           .select("*")
           .single();
 
         if (!error) {
-          saved = data as Patient;
+          try {
+            await createClinicPatientFile({
+              clinicId: selectedClinicId,
+              patientId: String((data as Patient).id),
+              fileNo: clinicFileNo,
+              mrn: mrn.trim() || null,
+              clinicalNotes: notes.trim() || null,
+            });
+            saved = data as Patient;
+          } catch (fileError: unknown) {
+            const rollback = await supabase.from("patients").delete().eq("id", (data as Patient).id);
+            if (rollback.error) {
+              console.error("Rollback failed after patient file create error", rollback.error);
+            }
+            if (fileError instanceof Error) {
+              lastError = { message: fileError.message };
+            } else {
+              lastError = { message: "Failed to create clinic patient file." };
+            }
+          }
           break;
         }
         lastError = error;
-        if ((error as any).code !== "23505") break;
+        if ((error as { code?: string }).code !== "23505") break;
         if (fileNo.trim()) break;
       }
 
@@ -133,7 +167,7 @@ export default function AddPatientPage() {
         console.error("Error keys:", lastError ? Object.keys(lastError) : "no error object");
         console.error("Error JSON:", JSON.stringify(lastError, null, 2));
         if (lastError?.code === "23505" && fileNo.trim()) {
-          alert("This File Number already exists. Please use another File Number.");
+          alert("This File Number already exists in this clinic. Please use another File Number.");
         } else {
           const detail =
             lastError?.message ||
@@ -171,9 +205,6 @@ export default function AddPatientPage() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span>
                 Added <span className="font-semibold">{lastAdded.name}</span>
-                {lastAdded.patient_number != null && (
-                  <> — File No. <span className="font-semibold">#{String(lastAdded.patient_number).padStart(5, "0")}</span></>
-                )}
               </span>
               <button
                 onClick={() => setShowBalanceModal(true)}
@@ -192,6 +223,19 @@ export default function AddPatientPage() {
         )}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <select
+            value={selectedClinicId}
+            onChange={(e) => setSelectedClinicId(e.target.value)}
+            disabled={!isManager}
+            className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+          >
+            <option value="">Select clinic</option>
+            {clinics.map((clinic) => (
+              <option key={clinic.id} value={clinic.id}>
+                {clinic.name}
+              </option>
+            ))}
+          </select>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -308,8 +352,6 @@ export default function AddPatientPage() {
             className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
           />
           <input
-            type="number"
-            min="1"
             value={fileNo}
             onChange={(e) => setFileNo(e.target.value)}
             placeholder="File No. (auto if blank)"

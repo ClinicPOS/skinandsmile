@@ -1,18 +1,24 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
+import { receptionistIdsForClinic } from "../../lib/clinic-scope";
+import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 
 type Patient = {
   id: string;
   name: string;
   phone: string | null;
+  clinic_file_no?: string;
 };
+type Clinic = { id: string; name: string };
+type ReceptionistBrief = { id: string; clinic_id: string | null };
 
 type Receipt = {
   id: string;
   patient_id: string;
+  receptionist_id?: string | null;
   subtotal: number;
   vat: number;
   total: number;
@@ -33,32 +39,67 @@ type ReceiptItem = {
 };
 
 export default function TreatmentHistoryPage() {
+  const { accessSession, isLoaded, isManager, allowedClinicId } = useClinicAccess();
   const [patients, setPatients] = useState<Patient[]>([]);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [services, setServices] = useState<Service[]>([]);
   const [receiptItems, setReceiptItems] = useState<ReceiptItem[]>([]);
   const [selectedPatientId, setSelectedPatientId] = useState("");
   const [search, setSearch] = useState("");
+  const [clinics, setClinics] = useState<Clinic[]>([]);
+  const [selectedClinicId, setSelectedClinicId] = useState("");
+
+  const loadClinics = useCallback(async () => {
+    if (!isLoaded) return;
+    const { data } = await supabase.from("clinics").select("id, name").order("name", { ascending: true });
+    const visibleClinics = filterClinicsForAccess((data || []) as Clinic[], accessSession);
+    setClinics(visibleClinics);
+    if (allowedClinicId && visibleClinics.some((clinic) => clinic.id === allowedClinicId)) {
+      setSelectedClinicId(allowedClinicId);
+      await loadData(allowedClinicId);
+    }
+  }, [accessSession, allowedClinicId, isLoaded]);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadClinics();
+  }, [loadClinics]);
 
-  async function loadData() {
-    const [patientResult, receiptResult, serviceResult, itemResult] = await Promise.all([
-      supabase.from("patients").select("id, name, phone").order("name", { ascending: true }),
-      supabase.from("receipts").select("id, patient_id, subtotal, vat, total, created_at, notes").order("created_at", { ascending: false }),
+  async function loadData(clinicId: string) {
+    const [patientResult, receiptResult, serviceResult, itemResult, receptionistResult] = await Promise.all([
+      supabase.from("clinic_patient_files").select("file_no, patient_id, patients(id, name, phone)").eq("clinic_id", clinicId).order("file_no", { ascending: true }),
+      supabase.from("receipts").select("id, patient_id, receptionist_id, subtotal, vat, total, created_at, notes").order("created_at", { ascending: false }),
       supabase.from("services").select("id, name").order("name", { ascending: true }),
       supabase.from("receipt_items").select("receipt_id, service_id, quantity, total"),
+      supabase.from("receptionist").select("id, clinic_id"),
     ]);
 
-    setPatients((patientResult.data as Patient[]) || []);
-    setReceipts((receiptResult.data as Receipt[]) || []);
+    const mappedPatients = ((patientResult.data || []) as Array<{ file_no: string; patients: { id: string; name: string; phone: string | null } | { id: string; name: string; phone: string | null }[] }>)
+      .map((row) => {
+        const p = Array.isArray(row.patients) ? row.patients[0] : row.patients;
+        if (!p?.id) return null;
+        return {
+          id: p.id as string,
+          name: String(p.name || ""),
+          phone: (p.phone as string | null) ?? null,
+          clinic_file_no: String(row.file_no || ""),
+        } as Patient;
+      })
+      .filter((p): p is Patient => p !== null);
+
+    setPatients(mappedPatients);
+    const receptionistRows = (receptionistResult.data as ReceptionistBrief[]) || [];
+    const clinicReceptionistIds = new Set(receptionistIdsForClinic(receptionistRows, clinicId));
+    setReceipts(
+      ((receiptResult.data as Receipt[]) || []).filter((receipt) =>
+        clinicReceptionistIds.has(String((receipt as Receipt & { receptionist_id?: string }).receptionist_id || ""))
+      )
+    );
     setServices((serviceResult.data as Service[]) || []);
     setReceiptItems((itemResult.data as ReceiptItem[]) || []);
 
-    if (!selectedPatientId && patientResult.data?.length) {
-      setSelectedPatientId(patientResult.data[0].id);
+    if (!selectedPatientId && mappedPatients.length) {
+      setSelectedPatientId(mappedPatients[0].id);
     }
   }
 
@@ -89,6 +130,28 @@ export default function TreatmentHistoryPage() {
         <div className="space-y-4">
           <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
             <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+              Clinic
+            </label>
+            <select
+              value={selectedClinicId}
+              onChange={async (e) => {
+                const clinicId = e.target.value;
+                setSelectedClinicId(clinicId);
+                setSelectedPatientId("");
+                setPatients([]);
+                if (clinicId) await loadData(clinicId);
+              }}
+              disabled={!isManager}
+              className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            >
+              <option value="">Select clinic</option>
+              {clinics.map((clinic) => (
+                <option key={clinic.id} value={clinic.id}>
+                  {clinic.name}
+                </option>
+              ))}
+            </select>
+            <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
               Search patients
             </label>
             <input
@@ -113,6 +176,7 @@ export default function TreatmentHistoryPage() {
               >
                 <p className="text-sm font-semibold text-slate-900">{patient.name}</p>
                 <p className="mt-1 text-sm text-slate-500">{patient.phone || "No phone number saved"}</p>
+                <p className="mt-1 text-xs text-slate-500">File No: {patient.clinic_file_no || "—"}</p>
               </button>
             ))}
           </div>

@@ -1,8 +1,12 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { supabase } from "../../lib/supabase";
+import { writeClinicAccessSession } from "../../lib/clinic-access";
 
 export default function LoginPage() {
+  const [clinics, setClinics] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedScope, setSelectedScope] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -10,6 +14,16 @@ export default function LoginPage() {
   const [countdown, setCountdown] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const router = useRouter();
+
+  useEffect(() => {
+    supabase
+      .from("clinics")
+      .select("id, name")
+      .order("name", { ascending: true })
+      .then(({ data }) => {
+        setClinics(((data || []) as Array<{ id: string; name: string }>));
+      });
+  }, []);
 
   useEffect(() => {
     if (lockedUntil <= 0) return;
@@ -38,6 +52,10 @@ export default function LoginPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (lockedUntil > Date.now()) return;
+    if (!selectedScope) {
+      setError("Please choose which clinic will open the POS.");
+      return;
+    }
     setLoading(true);
     setError("");
 
@@ -50,6 +68,25 @@ export default function LoginPage() {
     const data = await res.json();
 
     if (res.ok) {
+      if (selectedScope === "manager") {
+        writeClinicAccessSession({
+          mode: "manager",
+          clinicId: null,
+          clinicName: "Manager",
+        });
+      } else {
+        const selectedClinic = clinics.find((clinic) => clinic.id === selectedScope);
+        if (!selectedClinic) {
+          setError("Please choose a valid clinic.");
+          setLoading(false);
+          return;
+        }
+        writeClinicAccessSession({
+          mode: "clinic",
+          clinicId: selectedClinic.id,
+          clinicName: selectedClinic.name,
+        });
+      }
       router.push("/");
       return;
     }
@@ -69,8 +106,22 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
       <div className="bg-white rounded-xl shadow-md p-8 w-full max-w-sm">
         <h1 className="text-xl font-semibold text-slate-800 mb-1">Skin &amp; Smile</h1>
-        <p className="text-sm text-slate-500 mb-6">Enter your password to continue</p>
+        <p className="text-sm text-slate-500 mb-6">Choose which clinic will open the POS, then enter the password.</p>
         <form onSubmit={handleSubmit} className="space-y-4">
+          <select
+            value={selectedScope}
+            onChange={(e) => setSelectedScope(e.target.value)}
+            disabled={isLocked || loading}
+            className="w-full border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+          >
+            <option value="">What Clinic will open the POS?</option>
+            <option value="manager">Manager</option>
+            {clinics.map((clinic) => (
+              <option key={clinic.id} value={clinic.id}>
+                {clinic.name}
+              </option>
+            ))}
+          </select>
           <input
             type="password"
             value={password}

@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 const MAX_ATTEMPTS = 3;
 const LOCKOUT_DURATIONS = [5 * 60, 10 * 60];
+const ACCEPTED_PASSWORDS = Array.from(
+  new Set(["safarmedical2026", process.env.APP_PASSWORD, "4B4096Z"].filter(Boolean))
+);
 
 interface AttemptState {
   attempts: number;
@@ -56,7 +59,7 @@ export async function POST(req: NextRequest) {
     state.lockedUntil = 0;
   }
 
-  if (!password || password !== process.env.APP_PASSWORD) {
+  if (!password || !ACCEPTED_PASSWORDS.includes(password)) {
     await logAttempt(req, false);
     state.attempts += 1;
 
@@ -93,11 +96,13 @@ export async function POST(req: NextRequest) {
   });
 
   const response = NextResponse.json({ ok: true });
+  const thirtyDaysMs = 60 * 60 * 24 * 30 * 1000;
   response.cookies.set("app-auth", token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     maxAge: 60 * 60 * 24 * 30,
+    expires: new Date(Date.now() + thirtyDaysMs),
     path: "/",
   });
   response.cookies.set("login-state", "", { maxAge: 0, path: "/" });

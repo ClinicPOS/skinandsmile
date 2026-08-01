@@ -4,11 +4,13 @@ import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 
 const PAGE_SIZE = 10;
 const BOSS_PIN = "0404";
 
 export default function ReceiptLogPage() {
+  const { accessSession, isLoaded, isManager, allowedClinicId } = useClinicAccess();
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState("");
@@ -40,8 +42,9 @@ export default function ReceiptLogPage() {
   const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
+    if (!isLoaded) return;
     loadData();
-  }, []);
+  }, [isLoaded]);
 
   function handleUnlock() {
     if (pinInput === BOSS_PIN) {
@@ -67,11 +70,12 @@ export default function ReceiptLogPage() {
     if (patientsRes.status === "fulfilled") setPatients(patientsRes.value.data || []);
     if (receptionistsRes.status === "fulfilled") setReceptionists(receptionistsRes.value.data || []);
     if (clinicsRes.status === "fulfilled") {
-      const clinicRows = clinicsRes.value.data || [];
+      const clinicRows = filterClinicsForAccess((clinicsRes.value.data || []) as any[], accessSession);
       setClinics(clinicRows);
       setSelectedClinicId((prev) => {
+        if (allowedClinicId && clinicRows.some((c: any) => c.id === allowedClinicId)) return allowedClinicId;
         if (prev && clinicRows.some((c: any) => c.id === prev)) return prev;
-        return clinicRows[0]?.id ?? "";
+        return isManager ? clinicRows[0]?.id ?? "" : "";
       });
     }
     if (doctorsRes.status === "fulfilled") setDoctors(doctorsRes.value.data || []);
@@ -527,6 +531,7 @@ export default function ReceiptLogPage() {
           <select
             value={selectedClinicId}
             onChange={(e) => setSelectedClinicId(e.target.value)}
+            disabled={!isManager}
             className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
           >
             {clinics.map((c) => (

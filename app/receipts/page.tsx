@@ -9,14 +9,17 @@ import { Clinic, OutstandingBalance, BalancePayment, PatientCredit } from "../..
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal } from "../../components/pos-modals";
 import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
+import { PosHoldsModal } from "../../components/pos-holds-modal";
+import { PosPlanCheckoutModal } from "../../components/pos-plan-checkout-modal";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { printPaymentReceipt } from "../../lib/print-payment-receipt";
 import { availableCredit } from "../../lib/patient-credits";
 import { COUNTRIES } from "../../lib/countries";
 import { getAestheticServiceCategory } from "../../lib/service-categories";
-import { nextAutoFileNumber } from "../../lib/patient-file-number";
 import { calculateInstallmentFee, getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
+import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 
 const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Split Payment"];
 
@@ -226,7 +229,9 @@ const serviceCategories = [
 ];
 
 export default function ReceiptsPage() {
+  const { accessSession, isLoaded, isManager, allowedClinicId } = useClinicAccess();
   const [patients, setPatients] = useState<any[]>([]);
+  const [clinicPatientFiles, setClinicPatientFiles] = useState<any[]>([]);
   const [doctors, setDoctors] = useState<any[]>([]);
   const [receptionists, setReceptionists] = useState<any[]>([]);
   const [services, setServices] = useState<any[]>([]);
@@ -250,6 +255,7 @@ export default function ReceiptsPage() {
   const [filteredPatients, setFilteredPatients] = useState<any[]>([]);
   const [showPatientSuggestions, setShowPatientSuggestions] = useState(false);
   const [transactionPatientId, setTransactionPatientId] = useState(""); // Track patient ID for current transaction
+  const [transactionPatientFileId, setTransactionPatientFileId] = useState("");
   const [selectedPatientInfo, setSelectedPatientInfo] = useState<{
     date_of_birth?: string | null;
     sex?: string | null;
@@ -320,9 +326,31 @@ export default function ReceiptsPage() {
   } | null>(null);
   const isProceedingRef = useRef(false);
   const [isProceeding, setIsProceeding] = useState(false);
+  // Tooth numbers per cart item (parallel array matching selectedServices)
+  const [cartItemTeeth, setCartItemTeeth] = useState<string[][]>([]);
+  // Transaction type step
+  const [showTransactionTypeModal, setShowTransactionTypeModal] = useState(false);
+  // Treatment plan checkout
+  const [showPlanCheckoutModal, setShowPlanCheckoutModal] = useState(false);
+  // Holds
+  const [showHoldsModal, setShowHoldsModal] = useState(false);
+  const [activeHoldId, setActiveHoldId] = useState("");
+  const [holdCount, setHoldCount] = useState(0);
+  const [isSavingHold, setIsSavingHold] = useState(false);
+  // Active plans for selected patient
+  const [patientActivePlans, setPatientActivePlans] = useState<any[]>([]);
+  const [patientActivePlanPayments, setPatientActivePlanPayments] = useState<any[]>([]);
+  const [patientActivePlanVisits, setPatientActivePlanVisits] = useState<any[]>([]);
+  const [isLoadingActivePlans, setIsLoadingActivePlans] = useState(false);
   const router = useRouter();
 
+  const visibleReceptionists = useMemo(() => {
+    if (!allowedClinicId) return receptionists;
+    return receptionists.filter((person) => person.clinic_id === allowedClinicId);
+  }, [receptionists, allowedClinicId]);
+
   useEffect(() => {
+    if (!isLoaded) return;
     loadData();
 
     const savedSession = localStorage.getItem(POS_REGISTER_SESSION_KEY);
@@ -335,6 +363,10 @@ export default function ReceiptsPage() {
       if (!parsed?.receptionistId) {
         return;
       }
+      if (!clinicAccessAllowsClinic(accessSession, parsed.clinicId || null)) {
+        localStorage.removeItem(POS_REGISTER_SESSION_KEY);
+        return;
+      }
 
       setIsPosUnlocked(true);
       setReceptionistId(parsed.receptionistId);
@@ -345,7 +377,7 @@ export default function ReceiptsPage() {
     } catch {
       localStorage.removeItem(POS_REGISTER_SESSION_KEY);
     }
-  }, []);
+  }, [accessSession, isLoaded]);
 
   useEffect(() => {
     if (!receptionistId || clinics.length === 0) return;
@@ -354,16 +386,42 @@ export default function ReceiptsPage() {
     try {
       const parsed = JSON.parse(savedSession);
       if (!parsed?.clinicId) return;
+      if (!clinicAccessAllowsClinic(accessSession, parsed.clinicId || null)) return;
       const clinic = clinics.find((c) => c.id === parsed.clinicId);
       if (clinic) setActiveClinic(clinic);
     } catch {
       // ignore
     }
-  }, [receptionistId, clinics]);
+  }, [receptionistId, clinics, accessSession]);
+
+  useEffect(() => {
+    if (!activeClinic?.id) return;
+    loadHoldCount();
+  }, [activeClinic?.id]);
+
+  // Loads all rows from a table by paginating through 1 000-row batches, working
+  // around PostgREST's default max-rows cap.
+  async function fetchAllRows(table: string, select: string): Promise<any[]> {
+    const BATCH = 1000;
+    let all: any[] = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from(table)
+        .select(select)
+        .range(from, from + BATCH - 1);
+      if (error || !data || data.length === 0) break;
+      all = all.concat(data);
+      if (data.length < BATCH) break;
+      from += BATCH;
+    }
+    return all;
+  }
 
   async function loadData() {
-    const [patientResult, doctorResult, receptionistResult, serviceResult, clinicResult, balancesResult, balancePaymentsResult, patientCreditsResult] = await Promise.allSettled([
-      supabase.from("patients").select("*"),
+    const [patientRows, clinicFileRows, doctorResult, receptionistResult, serviceResult, clinicResult, balancesResult, balancePaymentsResult, patientCreditsResult] = await Promise.allSettled([
+      fetchAllRows("patients", "*"),
+      fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no, mrn"),
       supabase.from("doctors").select("*"),
       supabase.from("receptionist").select("*"),
       supabase.from("services").select("*"),
@@ -373,8 +431,12 @@ export default function ReceiptsPage() {
       supabase.from("patient_credits").select("*"),
     ]);
 
-    if (patientResult.status === "fulfilled") {
-      setPatients((patientResult.value.data || []) as any[]);
+    if (patientRows.status === "fulfilled") {
+      setPatients(patientRows.value as any[]);
+    }
+
+    if (clinicFileRows.status === "fulfilled") {
+      setClinicPatientFiles(clinicFileRows.value as any[]);
     }
 
     if (doctorResult.status === "fulfilled") {
@@ -382,7 +444,10 @@ export default function ReceiptsPage() {
     }
 
     if (receptionistResult.status === "fulfilled") {
-      setReceptionists((receptionistResult.value.data || []) as any[]);
+      const receptionistRows = ((receptionistResult.value.data || []) as any[]).filter((person) =>
+        clinicAccessAllowsClinic(accessSession, person.clinic_id || null)
+      );
+      setReceptionists(receptionistRows);
     }
 
     if (serviceResult.status === "fulfilled") {
@@ -390,7 +455,7 @@ export default function ReceiptsPage() {
     }
 
     if (clinicResult.status === "fulfilled") {
-      setClinics((clinicResult.value.data || []) as Clinic[]);
+      setClinics(filterClinicsForAccess((clinicResult.value.data || []) as Clinic[], accessSession));
     }
 
     if (balancesResult.status === "fulfilled" && !balancesResult.value.error) {
@@ -414,8 +479,14 @@ export default function ReceiptsPage() {
     }
   }
 
+  // Returns "Free" for zero-price services, otherwise an AED amount string.
+  function fmtServicePrice(amount: number, decimals = 2): string {
+    return amount === 0 ? "Free" : `AED ${amount.toFixed(decimals)}`;
+  }
+
   function addService(service: any) {
     setSelectedServices((current) => [...current, service]);
+    setCartItemTeeth((current) => [...current, []]);
 
     const serviceId = String(service.id);
     setRecentServiceIds((current) => {
@@ -429,6 +500,11 @@ export default function ReceiptsPage() {
 
   function removeService(index: number) {
     setSelectedServices((current) => {
+      const updated = [...current];
+      updated.splice(index, 1);
+      return updated;
+    });
+    setCartItemTeeth((current) => {
       const updated = [...current];
       updated.splice(index, 1);
       return updated;
@@ -460,6 +536,219 @@ export default function ReceiptsPage() {
       updated[index] = { ...updated[index], quantity: Math.round(qty) };
       return updated;
     });
+  }
+
+  function updateCartItemTeeth(index: number, teethStr: string) {
+    const parsed = teethStr.split(/[\s,]+/).map((t) => t.trim()).filter((t) => t.length > 0);
+    setCartItemTeeth((current) => {
+      const updated = [...current];
+      while (updated.length <= index) updated.push([]);
+      updated[index] = parsed;
+      return updated;
+    });
+  }
+
+  function getTeethForItem(index: number): string[] {
+    return cartItemTeeth[index] || [];
+  }
+
+  function getTeethDisplay(index: number): string {
+    const teeth = getTeethForItem(index);
+    if (teeth.length === 0) return "";
+    return `Tooth #${teeth.join(", #")}`;
+  }
+
+  async function loadHoldCount() {
+    if (!activeClinic?.id) return;
+    const { count } = await supabase
+      .from("pos_holds")
+      .select("id", { count: "exact", head: true })
+      .eq("clinic_id", activeClinic.id)
+      .in("status", ["Waiting", "In Treatment", "Ready to Pay"]);
+    setHoldCount(count || 0);
+  }
+
+  async function holdAndStartNew() {
+    if (!isPosUnlocked) { alert("Open the register first."); return; }
+    if (!patientName.trim()) { alert("Enter a patient name before holding."); return; }
+    if (!activeClinic?.id) { alert("Open the register for a clinic first."); return; }
+
+    setIsSavingHold(true);
+    try {
+      const { data: holdData, error: holdError } = await supabase
+        .from("pos_holds")
+        .insert([{
+          clinic_id: activeClinic.id,
+          patient_id: transactionPatientId || null,
+          patient_name: patientName.trim(),
+          patient_phone: patientPhoneInput.trim() || null,
+          doctor_id: doctorId || null,
+          receptionist_id: receptionistId || loginReceptionistId,
+          register_session_id: registerSessionId || null,
+          clinic_patient_file_id: transactionPatientFileId || null,
+          patient_file_no: patientFileNumberInput.trim() || null,
+          status: "Waiting",
+          notes: notes.trim() || null,
+          discount_input: discountInput || null,
+          discount_type: discountType,
+        }])
+        .select()
+        .single();
+
+      if (holdError || !holdData) {
+        alert(`Could not save hold: ${holdError?.message || "Unknown error"}`);
+        return;
+      }
+
+      if (selectedServices.length > 0) {
+        const holdServices = selectedServices.map((s, i) => ({
+          hold_id: holdData.id,
+          service_id: s.id,
+          service_name: s.name,
+          price: Number(s.price),
+          original_price: s.originalPrice != null ? Number(s.originalPrice) : null,
+          quantity: s.quantity ?? 1,
+          teeth: getTeethForItem(i),
+        }));
+        await supabase.from("pos_hold_services").insert(holdServices);
+      }
+
+      clearPosForm();
+      setHoldCount((c) => c + 1);
+      alert(`Hold saved for ${patientName.trim()}. POS is ready for the next patient.`);
+    } finally {
+      setIsSavingHold(false);
+    }
+  }
+
+  function clearPosForm() {
+    setPatientId("");
+    setPatientName("");
+    setPatientPhoneInput("");
+    setPatientEmailInput("");
+    setPatientDobInput("");
+    setPatientSexInput("");
+    setPatientEmiratesIdInput("");
+    setPatientPassportInput("");
+    setPatientMrnInput("");
+    setPatientNationalityInput("");
+    setNationalitySearch("");
+    setPatientFileNumberInput("");
+    setDoctorId("");
+    setNotes("");
+    setSelectedServices([]);
+    setCartItemTeeth([]);
+    setDiscountInput("");
+    setDiscountType("AED");
+    setTransactionPatientId("");
+    setTransactionPatientFileId("");
+    setSelectedPatientInfo(null);
+    setActiveHoldId("");
+    setPatientActivePlans([]);
+    setPatientActivePlanPayments([]);
+    setPatientActivePlanVisits([]);
+  }
+
+  async function loadPatientActivePlans(pid: string, cid: string) {
+    if (!pid || !cid) return;
+    setIsLoadingActivePlans(true);
+    try {
+      const plansResult = await supabase
+        .from("treatment_plans")
+        .select("*")
+        .eq("patient_id", pid)
+        .eq("clinic_id", cid)
+        .eq("status", "Active")
+        .order("created_at", { ascending: false });
+
+      const plans = (plansResult.data || []);
+      if (plans.length > 0) {
+        const planIds = plans.map((p: any) => p.id);
+        const [visR, payR] = await Promise.all([
+          supabase.from("treatment_plan_visits").select("*").in("treatment_plan_id", planIds),
+          supabase.from("treatment_plan_payments").select("*").in("treatment_plan_id", planIds),
+        ]);
+        setPatientActivePlanVisits((visR.data || []) as any[]);
+        setPatientActivePlanPayments((payR.data || []) as any[]);
+      } else {
+        setPatientActivePlanVisits([]);
+        setPatientActivePlanPayments([]);
+      }
+      setPatientActivePlans(plans);
+    } finally {
+      setIsLoadingActivePlans(false);
+    }
+  }
+
+  async function resumeHold(hold: any) {
+    setShowHoldsModal(false);
+    setActiveHoldId(String(hold.id || ""));
+    setPatientName(hold.patient_name || "");
+    setPatientPhoneInput(hold.patient_phone || "");
+    setDoctorId(hold.doctor_id || "");
+    setNotes(hold.notes || "");
+    setDiscountInput(hold.discount_input || "");
+    setDiscountType(hold.discount_type === "%" ? "%" : "AED");
+
+    let resumedPatientId = hold.patient_id || "";
+    let resumedClinicPatientFileId = hold.clinic_patient_file_id || "";
+    let resumedFileNo = hold.patient_file_no || "";
+
+    if (hold.clinic_patient_file_id) {
+      const { data: clinicFile } = await supabase
+        .from("clinic_patient_files")
+        .select("id, patient_id, file_no")
+        .eq("id", hold.clinic_patient_file_id)
+        .maybeSingle();
+
+      if (clinicFile) {
+        resumedClinicPatientFileId = String(clinicFile.id || resumedClinicPatientFileId);
+        resumedFileNo = String(clinicFile.file_no || resumedFileNo);
+        resumedPatientId = String(clinicFile.patient_id || resumedPatientId);
+      }
+    }
+
+    setPatientId(resumedPatientId);
+    setTransactionPatientId(resumedPatientId);
+    setTransactionPatientFileId(resumedClinicPatientFileId);
+    setPatientFileNumberInput(resumedFileNo);
+
+    if (hold.services && hold.services.length > 0) {
+      const svcs = hold.services.map((s: any) => ({
+        id: s.service_id || "",
+        name: s.service_name,
+        price: Number(s.price),
+        originalPrice: s.original_price != null ? Number(s.original_price) : undefined,
+        quantity: s.quantity || 1,
+      }));
+      setSelectedServices(svcs);
+      setCartItemTeeth(hold.services.map((s: any) => s.teeth || []));
+    }
+  }
+
+  async function clearActiveHold(holdId: string) {
+    if (!holdId) return;
+
+    const { error: holdDeleteError } = await supabase.from("pos_holds").delete().eq("id", holdId);
+    if (holdDeleteError) {
+      console.error("Hold cleanup error", holdDeleteError);
+      const { error: fallbackError } = await supabase
+        .from("pos_holds")
+        .update({
+          status: "Cancelled",
+          cancel_reason: "Completed at checkout",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", holdId);
+      if (fallbackError) {
+        console.error("Hold fallback cleanup error", fallbackError);
+        return;
+      }
+    }
+
+    await supabase.from("pos_hold_services").delete().eq("hold_id", holdId);
+    setActiveHoldId("");
+    await loadHoldCount();
   }
 
   const subtotal = selectedServices.reduce((sum, service) => sum + Number(service.price) * (service.quantity ?? 1), 0);
@@ -522,6 +811,26 @@ export default function ReceiptsPage() {
     if (!activeClinic) return [];
     return doctors.filter((d) => d.clinic_id === activeClinic.id);
   }, [doctors, activeClinic]);
+
+  const clinicScopedPatients = useMemo(() => {
+    if (!activeClinic?.id) return [];
+    const patientById = new Map<string, any>();
+    for (const p of patients) patientById.set(String(p.id), p);
+
+    return clinicPatientFiles
+      .filter((file) => file.clinic_id === activeClinic.id)
+      .map((file) => {
+        const p = patientById.get(String(file.patient_id));
+        if (!p) return null;
+        return {
+          ...p,
+          clinic_patient_file_id: file.id,
+          clinic_file_no: file.file_no,
+          clinic_file_mrn: file.mrn,
+        };
+      })
+      .filter(Boolean);
+  }, [activeClinic, patients, clinicPatientFiles]);
 
   const filteredServices = useMemo(() => {
     const query = serviceSearch.trim().toLowerCase();
@@ -614,7 +923,7 @@ export default function ReceiptsPage() {
       setSelectedPatientInfo(null);
     }
     if (e.trim()) {
-      const filtered = patients.filter((patient) => patient.name.toLowerCase().includes(e.toLowerCase()));
+      const filtered = clinicScopedPatients.filter((patient) => patient.name.toLowerCase().includes(e.toLowerCase()));
       setFilteredPatients(filtered);
       setShowPatientSuggestions(true);
     } else {
@@ -633,10 +942,11 @@ export default function ReceiptsPage() {
     setPatientSexInput(patient.sex || "");
     setPatientNationalityInput(patient.nationality || "");
     setNationalitySearch(patient.nationality || "");
-    setPatientFileNumberInput(patient.patient_number != null ? String(patient.patient_number) : "");
+    setPatientFileNumberInput(String(patient.clinic_file_no || patient.patient_number || ""));
     setPatientEmiratesIdInput(patient.emirates_id || "");
     setPatientPassportInput(patient.passport_number || "");
-    setPatientMrnInput(patient.mrn || "");
+    setPatientMrnInput(patient.clinic_file_mrn || patient.mrn || "");
+    setTransactionPatientFileId(String(patient.clinic_patient_file_id || ""));
     setSelectedPatientInfo({
       date_of_birth: patient.date_of_birth,
       sex: patient.sex,
@@ -648,6 +958,9 @@ export default function ReceiptsPage() {
     });
     setShowPatientSuggestions(false);
     setFilteredPatients([]);
+    if (patient.id && activeClinic?.id) {
+      loadPatientActivePlans(patient.id, activeClinic.id);
+    }
   }
 
   function parseMoneyInput(value: string) {
@@ -686,6 +999,10 @@ export default function ReceiptsPage() {
     const clinicForReceptionist = clinics.find((c) => c.id === selectedReceptionist.clinic_id);
     if (!clinicForReceptionist) {
       alert("This receptionist is not assigned to a clinic. Please assign one in the Backend > Receptionists section.");
+      return;
+    }
+    if (!clinicAccessAllowsClinic(accessSession, clinicForReceptionist.id)) {
+      alert("This receptionist is not allowed for the clinic you opened.");
       return;
     }
 
@@ -753,6 +1070,14 @@ export default function ReceiptsPage() {
     setIsPosUnlocked(true);
     setPinInput("");
     setOpeningCashInput("");
+
+    // Load active hold count for the new clinic
+    const { count: hc } = await supabase
+      .from("pos_holds")
+      .select("id", { count: "exact", head: true })
+      .eq("clinic_id", clinicForReceptionist.id)
+      .in("status", ["Waiting", "In Treatment", "Ready to Pay"]);
+    setHoldCount(hc || 0);
   }
 
   async function closeRegister() {
@@ -817,6 +1142,8 @@ export default function ReceiptsPage() {
     setPatientMrnInput("");
     setSelectedPatientInfo(null);
     setTransactionPatientId("");
+    setTransactionPatientFileId("");
+    setActiveHoldId("");
     setDoctorId("");
     setSelectedPaymentMethod("");
     setTabbyReferenceInput("");
@@ -1818,24 +2145,28 @@ export default function ReceiptsPage() {
       return;
     }
 
+    if (!activeClinic?.id) {
+      alert("Open the register for a clinic first.");
+      return;
+    }
+
     let finalPatientId = patientId;
+    let finalPatientFileId = transactionPatientFileId || "";
+    let finalClinicFileNo = patientFileNumberInput.trim();
 
     // File numbers are official physical file labels — verify a manual entry
     // is unique before writing (covers both the update and create paths below).
     if (patientFileNumberInput.trim()) {
-      const fileNo = parseInt(patientFileNumberInput.trim(), 10);
-      if (!Number.isFinite(fileNo) || fileNo <= 0) {
-        alert("File No. must be a positive number.");
-        return;
-      }
+      const fileNo = patientFileNumberInput.trim();
       const { data: fileNoDupes } = await supabase
-        .from("patients")
-        .select("id")
-        .eq("patient_number", fileNo)
+        .from("clinic_patient_files")
+        .select("id, patient_id")
+        .eq("clinic_id", activeClinic.id)
+        .eq("file_no", fileNo)
         .limit(1);
-      const takenByOther = (fileNoDupes || []).some((row) => row.id !== patientId);
+      const takenByOther = (fileNoDupes || []).some((row) => String(row.id) !== finalPatientFileId);
       if (takenByOther) {
-        alert("This File Number already exists. Please use another File Number.");
+        alert("This File Number already exists in this clinic. Please use another File Number.");
         return;
       }
     }
@@ -1853,7 +2184,6 @@ export default function ReceiptsPage() {
           emirates_id: patientEmiratesIdInput.trim() || null,
           passport_number: patientPassportInput.trim() || null,
           mrn: patientMrnInput.trim() || null,
-          ...(patientFileNumberInput.trim() ? { patient_number: parseInt(patientFileNumberInput.trim(), 10) } : {}),
         })
         .eq("id", patientId);
     }
@@ -1862,53 +2192,32 @@ export default function ReceiptsPage() {
     if (!patientId && patientName.trim()) {
       let newPatient = null;
       let lastError: any = null;
-
-      for (let attempt = 0; attempt < 5; attempt++) {
-        let patientNumber: number;
-        if (patientFileNumberInput.trim()) {
-          patientNumber = parseInt(patientFileNumberInput.trim(), 10);
-        } else {
-          // Auto-assigned numbers start at 20,000 (old-system files stop
-          // around 18,000). On a duplicate retry this fetches a fresh number.
-          patientNumber = await nextAutoFileNumber();
-        }
-
-        const { data, error } = await supabase
-          .from("patients")
-          .insert([
-            {
-              name: patientName.trim(),
-              phone: patientPhoneInput.trim() || "",
-              email: patientEmailInput.trim() || null,
-              date_of_birth: patientDobInput || null,
-              sex: patientSexInput || null,
-              nationality: patientNationalityInput.trim() || null,
-              emirates_id: patientEmiratesIdInput.trim() || null,
-              passport_number: patientPassportInput.trim() || null,
-              mrn: patientMrnInput.trim() || null,
-              patient_number: patientNumber,
-            },
-          ])
-          .select()
-          .single();
-
-        if (!error) {
-          newPatient = data;
-          break;
-        }
-
+      const { data, error } = await supabase
+        .from("patients")
+        .insert([
+          {
+            name: patientName.trim(),
+            phone: patientPhoneInput.trim() || "",
+            email: patientEmailInput.trim() || null,
+            date_of_birth: patientDobInput || null,
+            sex: patientSexInput || null,
+            nationality: patientNationalityInput.trim() || null,
+            emirates_id: patientEmiratesIdInput.trim() || null,
+            passport_number: patientPassportInput.trim() || null,
+            mrn: null,
+          },
+        ])
+        .select()
+        .single();
+      if (!error) {
+        newPatient = data;
+      } else {
         lastError = error;
-        if ((error as any).code !== "23505") break; // non-duplicate error, don't retry
-        if (patientFileNumberInput.trim()) break; // manual file no. duplicate — don't retry with same number
       }
 
       if (!newPatient) {
         console.error("Create patient error", lastError);
-        if ((lastError as any)?.code === "23505" && patientFileNumberInput.trim()) {
-          alert("This File Number already exists. Please use another File Number.");
-        } else {
-          alert(`Error creating new patient: ${lastError?.message || "unknown error"}`);
-        }
+        alert(`Error creating new patient: ${lastError?.message || "unknown error"}`);
         return;
       }
 
@@ -1916,11 +2225,62 @@ export default function ReceiptsPage() {
       setPatients([...patients, newPatient]);
     }
 
+    if (!finalPatientId) {
+      alert("Missing patient. Please select or create a patient first.");
+      return;
+    }
+
+    if (!finalPatientFileId) {
+      const existingClinicFile = await getClinicPatientFile(activeClinic.id, finalPatientId);
+      if (existingClinicFile) {
+        finalPatientFileId = existingClinicFile.id;
+        finalClinicFileNo = existingClinicFile.file_no || finalClinicFileNo;
+      }
+    }
+
+    if (!finalPatientFileId) {
+      const clinicFileNo = finalClinicFileNo || (await nextClinicFileNumber(activeClinic.id));
+      try {
+        const createdFile = await createClinicPatientFile({
+          clinicId: activeClinic.id,
+          patientId: finalPatientId,
+          fileNo: clinicFileNo,
+          mrn: patientMrnInput.trim() || null,
+        });
+        finalPatientFileId = createdFile.id;
+        finalClinicFileNo = createdFile.file_no;
+        setClinicPatientFiles((prev) => [...prev, createdFile]);
+      } catch (error: any) {
+        alert(`Could not assign clinic file number: ${error?.message || "unknown error"}`);
+        return;
+      }
+    }
+
+    if (finalPatientFileId) {
+      const updatePayload: Record<string, string | null> = {};
+      if (finalClinicFileNo) {
+        updatePayload.file_no = finalClinicFileNo;
+      }
+      updatePayload.mrn = patientMrnInput.trim() || null;
+      if (Object.keys(updatePayload).length > 0) {
+        const { error: clinicFileUpdateError } = await supabase
+          .from("clinic_patient_files")
+          .update(updatePayload)
+          .eq("id", finalPatientFileId);
+
+        if (clinicFileUpdateError) {
+          console.warn("Clinic patient file update warning", clinicFileUpdateError);
+        }
+      }
+    }
+
     // Set the transaction patient ID to use throughout the payment/print flow
     setTransactionPatientId(finalPatientId);
+    setTransactionPatientFileId(finalPatientFileId);
+    if (finalClinicFileNo) setPatientFileNumberInput(finalClinicFileNo);
     setPayTodayInput("");
     setApplyCreditChecked(false);
-    setShowPaymentModal(true);
+    setShowTransactionTypeModal(true);
     } finally {
       isProceedingRef.current = false;
       setIsProceeding(false);
@@ -2167,6 +2527,7 @@ export default function ReceiptsPage() {
       .insert([
         {
           patient_id: transactionPatientId,
+          patient_file_id: transactionPatientFileId || null,
           doctor_id: doctorId || null,
           receptionist_id: activeReceptionistId,
           subtotal: subtotal,
@@ -2203,7 +2564,7 @@ export default function ReceiptsPage() {
       return false;
     }
 
-    const items = selectedServices.map((service) => {
+    const items = selectedServices.map((service, i) => {
       const qty = service.quantity ?? 1;
       return {
         receipt_id: receiptData.id,
@@ -2211,6 +2572,7 @@ export default function ReceiptsPage() {
         quantity: qty,
         price: service.price,
         total: service.price * qty,
+        teeth: getTeethForItem(i),
       };
     });
 
@@ -2289,20 +2651,22 @@ export default function ReceiptsPage() {
     if (notes.trim()) {
       if (!activeClinic?.id) {
         alert("Receipt saved, but the clinical note was not saved because no clinic is active.");
-        return receiptData;
-      }
-      const { error: noteError } = await supabase.from("patient_notes").insert({
-        patient_id: transactionPatientId,
-        receipt_id: receiptData.id,
-        note: notes.trim(),
-        doctor_id: doctorId || null,
-        receptionist_id: activeReceptionistId,
-        clinic_id: activeClinic.id,
-      });
-      if (noteError) {
-        console.error("Patient note save error", noteError.message, noteError.code, noteError.details, noteError.hint);
+      } else {
+        const { error: noteError } = await supabase.from("patient_notes").insert({
+          patient_id: transactionPatientId,
+          receipt_id: receiptData.id,
+          note: notes.trim(),
+          doctor_id: doctorId || null,
+          receptionist_id: activeReceptionistId,
+          clinic_id: activeClinic.id,
+        });
+        if (noteError) {
+          console.error("Patient note save error", noteError.message, noteError.code, noteError.details, noteError.hint);
+        }
       }
     }
+
+    await clearActiveHold(activeHoldId);
 
     return receiptData;
     } finally {
@@ -2331,6 +2695,7 @@ export default function ReceiptsPage() {
     setPatientMrnInput("");
     setSelectedPatientInfo(null);
     setTransactionPatientId("");
+    setTransactionPatientFileId("");
     setDoctorId("");
     setSelectedPaymentMethod("");
     setTabbyReferenceInput("");
@@ -2343,6 +2708,7 @@ export default function ReceiptsPage() {
     setDiscountType("AED");
     setFilteredPatients([]);
     setShowPatientSuggestions(false);
+    setActiveHoldId("");
     router.refresh();
   }
 
@@ -2360,13 +2726,17 @@ export default function ReceiptsPage() {
 
     const itemsRows = selectedServices
       .map(
-        (service, index) => `<tr>
+        (service, index) => {
+          const price = Number(service.price);
+          const priceLabel = price === 0 ? "Free" : `AED ${price.toFixed(2)}`;
+          return `<tr>
             <td style="text-align:center; padding: 10px 8px; font-weight: 600; color: #333;">${index + 1}</td>
             <td style="padding: 10px 8px; color: #333;">${service.name}</td>
             <td style="text-align:center; padding: 10px 8px; color: #333;">1</td>
-            <td style="text-align:right; padding: 10px 8px; color: #333;">AED ${Number(service.price).toFixed(2)}</td>
-            <td style="text-align:right; padding: 10px 8px; font-weight: 600; color: #d4af37;">AED ${Number(service.price).toFixed(2)}</td>
-          </tr>`
+            <td style="text-align:right; padding: 10px 8px; color: #333;">${priceLabel}</td>
+            <td style="text-align:right; padding: 10px 8px; font-weight: 600; color: #d4af37;">${priceLabel}</td>
+          </tr>`;
+        }
       )
       .join("");
 
@@ -3107,7 +3477,9 @@ export default function ReceiptsPage() {
     const selectedPatient = patients.find((p) => p.id === transactionPatientId);
     const patientNameForReceipt = selectedPatient?.name || patientName || "-";
     const patientMobileForReceipt = selectedPatient?.phone || patientPhoneInput || "-";
-    const patientIdForReceipt = selectedPatient?.patient_number
+    const patientIdForReceipt = patientFileNumberInput.trim()
+      ? `#${patientFileNumberInput.trim()}`
+      : selectedPatient?.patient_number
       ? `#${String(selectedPatient.patient_number).padStart(5, "0")}`
       : "-";
     const doctorNameForReceipt = doctors.find((d) => d.id === doctorId)?.name || "-";
@@ -3115,25 +3487,27 @@ export default function ReceiptsPage() {
       receptionists.find((person) => person.id === (receptionistId || loginReceptionistId))?.name || "Reception";
 
     const itemsHtml = selectedServices
-      .map((service) => {
+      .map((service, index) => {
         const qty = service.quantity ?? 1;
         const lineTotal = Number(service.price) * qty;
         const qtyLabel = service.requires_quantity && qty > 1
           ? ` <span style="font-size:9px;">×${qty} ${service.billing_unit || "Unit"}</span>`
           : "";
+        const teethLabel = getTeethForItem(index);
+        const teethDisplay = teethLabel.length > 0 ? ` (Tooth #${teethLabel.join(", #")})` : "";
         return service.originalPrice != null
           ? `
           <div class="row item-row">
-            <span class="item-name">${service.name}${qtyLabel} <span style="font-size:10px;">(Promo)</span></span>
+            <span class="item-name">${service.name}${qtyLabel}${teethDisplay} <span style="font-size:10px;">(Promo)</span></span>
             <span class="amount" style="text-align:right;">
               <span style="text-decoration:line-through;font-size:10px;">AED ${Number(service.originalPrice * qty).toFixed(2)}</span><br/>
-              AED ${lineTotal.toFixed(2)}
+              ${lineTotal === 0 ? "Free" : `AED ${lineTotal.toFixed(2)}`}
             </span>
           </div>`
           : `
           <div class="row item-row">
-            <span class="item-name">${service.name}${qtyLabel}</span>
-            <span class="amount">AED ${lineTotal.toFixed(2)}</span>
+            <span class="item-name">${service.name}${qtyLabel}${teethDisplay}</span>
+            <span class="amount">${lineTotal === 0 ? "Free" : `AED ${lineTotal.toFixed(2)}`}</span>
           </div>`;
       })
       .join("");
@@ -3372,7 +3746,9 @@ export default function ReceiptsPage() {
           </p>
           <h2 className="mt-2 text-2xl font-semibold text-slate-900">Open Register</h2>
           <p className="mt-2 text-sm text-slate-600">
-            Select receptionist, enter PIN, and add opening cash before starting the shift.
+            {isManager
+              ? "Select receptionist, enter PIN, and add opening cash before starting the shift."
+              : "This POS is locked to your selected clinic. Choose that clinic's receptionist, enter PIN, and add opening cash."}
           </p>
 
           <div className="mt-5 grid gap-4">
@@ -3393,7 +3769,7 @@ export default function ReceiptsPage() {
                 className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
               >
                 <option value="">Select Receptionist</option>
-                {receptionists.map((person) => (
+                {visibleReceptionists.map((person) => (
                   <option key={person.id} value={person.id}>
                     {person.name}
                   </option>
@@ -3480,6 +3856,19 @@ export default function ReceiptsPage() {
                 className="rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
               >
                 Receipt History
+              </button>
+            </div>
+            <div className="mt-2">
+              <button
+                onClick={() => setShowHoldsModal(true)}
+                className="relative w-full rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-100"
+              >
+                Held Transactions
+                {holdCount > 0 && (
+                  <span className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-amber-500 text-xs font-bold text-white">
+                    {holdCount}
+                  </span>
+                )}
               </button>
             </div>
 
@@ -3614,6 +4003,42 @@ export default function ReceiptsPage() {
                       </li>
                     ))}
                   </ul>
+                </div>
+              )}
+
+              {patientId && patientActivePlans.length > 0 && (
+                <div className="col-span-2 rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-3">
+                  <p className="mb-2 text-xs font-bold uppercase tracking-wide text-cyan-800">
+                    Active Treatment Plans
+                  </p>
+                  {isLoadingActivePlans ? (
+                    <p className="text-xs text-cyan-600">Loading…</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {patientActivePlans.map((plan) => {
+                        const planPayments = patientActivePlanPayments.filter((p: any) => p.treatment_plan_id === plan.id);
+                        const planVisits = patientActivePlanVisits.filter((v: any) => v.treatment_plan_id === plan.id);
+                        const totalPaid = planPayments.reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
+                        const remaining = Math.max(0, Number(plan.total_amount || 0) - totalPaid);
+                        return (
+                          <div key={plan.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-xs">
+                            <div>
+                              <span className="font-semibold text-slate-800">{plan.title}</span>
+                              <span className="ml-2 text-slate-500">
+                                Visit {planVisits.length}/{plan.planned_visits} · AED {remaining.toFixed(2)} due
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => setShowSearchPatientModal(true)}
+                              className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-500"
+                            >
+                              Continue Plan
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -3863,7 +4288,7 @@ export default function ReceiptsPage() {
                               <div className="flex items-start justify-between gap-3">
                                 <p className="text-sm font-semibold text-slate-900">{service.name}</p>
                                 <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
-                                  AED {Number(service.price || 0).toFixed(0)}
+                                  {fmtServicePrice(Number(service.price || 0), 0)}
                                 </span>
                               </div>
                             </button>
@@ -3896,7 +4321,7 @@ export default function ReceiptsPage() {
                         </div>
                       ) : (
                         <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
-                          AED {Number(service.price || 0).toFixed(0)}
+                          {fmtServicePrice(Number(service.price || 0), 0)}
                         </span>
                       )}
                     </div>
@@ -3971,7 +4396,7 @@ export default function ReceiptsPage() {
                               >+</button>
                               <span className="text-xs text-slate-500">{service.billing_unit || "Unit"}</span>
                               <span className="ml-auto text-xs font-bold text-teal-900">
-                                = AED {(Number(service.price) * (service.quantity ?? 1)).toFixed(2)}
+                                = {fmtServicePrice(Number(service.price) * (service.quantity ?? 1))}
                               </span>
                             </div>
                           </div>
@@ -3980,17 +4405,32 @@ export default function ReceiptsPage() {
                             {service.originalPrice != null && (
                               <span className="text-xs text-slate-400 line-through">AED {Number(service.originalPrice).toFixed(2)}</span>
                             )}
-                            <span className="text-xs font-medium text-teal-600">AED</span>
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={Number(service.price)}
-                              onChange={(e) => updateCartItemPrice(index, e.target.value)}
-                              className="w-20 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-900 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
-                            />
+                            {Number(service.price) === 0 ? (
+                              <span className="rounded-lg bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">Free</span>
+                            ) : (
+                              <>
+                                <span className="text-xs font-medium text-teal-600">AED</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={Number(service.price)}
+                                  onChange={(e) => updateCartItemPrice(index, e.target.value)}
+                                  className="w-20 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-900 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                                />
+                              </>
+                            )}
                           </div>
                         )}
+                        <div className="mt-1.5">
+                            <input
+                              type="text"
+                              placeholder="Tooth # (e.g. 14, 20)"
+                              value={getTeethForItem(index).join(", ")}
+                              onChange={(e) => updateCartItemTeeth(index, e.target.value)}
+                              className="w-full rounded-lg border border-teal-100 bg-teal-50 px-2 py-1 text-xs text-teal-700 outline-none placeholder:text-teal-300 focus:border-teal-300"
+                            />
+                        </div>
                       </div>
                     </div>
                     <button
@@ -4036,6 +4476,14 @@ export default function ReceiptsPage() {
             </div>
 
             <div className="mt-6 grid gap-3 sm:grid-cols-1">
+              <button
+                type="button"
+                onClick={holdAndStartNew}
+                disabled={isSavingHold || !isPosUnlocked}
+                className="w-full rounded-2xl border border-white/20 py-3 text-sm font-semibold text-slate-300 transition hover:border-white/40 hover:text-white disabled:opacity-40"
+              >
+                {isSavingHold ? "Saving Hold…" : "Hold & Start New"}
+              </button>
               <button
                 onClick={proceedToPayment}
                 disabled={isProceeding}
@@ -4378,7 +4826,7 @@ export default function ReceiptsPage() {
           selectPatient(patient);
           setShowSearchPatientModal(false);
         }}
-        patients={patients}
+        patients={clinicScopedPatients}
         clinicId={activeClinic?.id ?? null}
         outstandingBalances={outstandingBalances}
         balancePayments={balancePayments}
@@ -4431,6 +4879,68 @@ export default function ReceiptsPage() {
           refetchBalancePayments();
         }}
       />
+
+      {/* Transaction Type Selection */}
+      {showTransactionTypeModal && (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-slate-100 bg-white p-8 shadow-2xl">
+            <h2 className="mb-2 text-xl font-bold text-slate-900">How should this be recorded?</h2>
+            <p className="mb-6 text-sm text-slate-500">Choose how this treatment visit is handled.</p>
+            <div className="space-y-3">
+              <button
+                onClick={() => { setShowTransactionTypeModal(false); setShowPaymentModal(true); }}
+                className="w-full rounded-2xl border-2 border-slate-200 bg-white p-5 text-left transition hover:border-teal-300 hover:bg-teal-50"
+              >
+                <p className="text-base font-bold text-slate-900">Regular Transaction</p>
+                <p className="mt-1 text-sm text-slate-500">One visit or immediate checkout. Payment collected now.</p>
+              </button>
+              <button
+                onClick={() => { setShowTransactionTypeModal(false); setShowPlanCheckoutModal(true); }}
+                className="w-full rounded-2xl border-2 border-cyan-200 bg-cyan-50 p-5 text-left transition hover:border-cyan-400 hover:bg-cyan-100"
+              >
+                <p className="text-base font-bold text-cyan-900">Active Treatment Plan</p>
+                <p className="mt-1 text-sm text-slate-600">Multiple visits, staged treatment, or payments over time.</p>
+              </button>
+            </div>
+            <button onClick={() => setShowTransactionTypeModal(false)} className="mt-4 w-full text-center text-sm text-slate-400 hover:text-slate-600">← Back</button>
+          </div>
+        </div>
+      )}
+
+      {/* Holds Modal */}
+      <PosHoldsModal
+        isOpen={showHoldsModal}
+        onClose={() => setShowHoldsModal(false)}
+        clinicId={activeClinic?.id || null}
+        onResume={resumeHold}
+      />
+
+      {/* Treatment Plan Checkout Modal */}
+      {showPlanCheckoutModal && transactionPatientId && activeClinic && (
+        <PosPlanCheckoutModal
+          isOpen={showPlanCheckoutModal}
+          onClose={() => setShowPlanCheckoutModal(false)}
+          onSaved={(plan, payment) => {
+            setShowPlanCheckoutModal(false);
+            alert(`Treatment plan "${plan.title}" created successfully!${payment ? ` Payment of AED ${Number(payment.amount).toFixed(2)} recorded.` : ""}`);
+            clearPosForm();
+          }}
+          patientId={transactionPatientId}
+          patientName={patientName}
+          clinicId={activeClinic.id}
+          clinicPatientFileId={transactionPatientFileId}
+          patientFileNo={patientFileNumberInput}
+          doctorId={doctorId}
+          receptionistId={receptionistId || loginReceptionistId}
+          registerSessionId={registerSessionId}
+          services={selectedServices.map((s, i) => ({ ...s, teeth: getTeethForItem(i) }))}
+          subtotal={subtotal}
+          total={total}
+          discountAmount={discountAmount}
+          vat={vat}
+          clinic={activeClinic}
+        />
+      )}
     </AppFrame>
   );
 }

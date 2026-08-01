@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { useClinicAccess } from "../../lib/clinic-access";
 
 type Receipt = {
   id: string;
@@ -62,6 +63,7 @@ type ReceiptItem = {
 };
 
 export default function ReceiptHistoryPage() {
+  const { allowedClinicId, isLoaded } = useClinicAccess();
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [patients, setPatients] = useState<Patient[]>([]);
   const [doctors, setDoctors] = useState<LookupItem[]>([]);
@@ -71,14 +73,32 @@ export default function ReceiptHistoryPage() {
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [selectedReceiptId, setSelectedReceiptId] = useState<string>("");
 
+  async function fetchAllRows(table: string, select: string): Promise<any[]> {
+    const BATCH = 1000;
+    let all: any[] = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from(table)
+        .select(select)
+        .range(from, from + BATCH - 1);
+      if (error || !data || data.length === 0) break;
+      all = all.concat(data);
+      if (data.length < BATCH) break;
+      from += BATCH;
+    }
+    return all;
+  }
+
   useEffect(() => {
+    if (!isLoaded) return;
     loadHistory();
-  }, []);
+  }, [isLoaded]);
 
   async function loadHistory() {
     const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult, clinicResult] = await Promise.all([
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
-      supabase.from("patients").select("id, name, phone, patient_number").order("name", { ascending: true }),
+      fetchAllRows("patients", "id, name, phone, patient_number"),
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
       supabase.from("receptionist").select("id, name, clinic_id").order("name", { ascending: true }),
       supabase.from("services").select("id, name").order("name", { ascending: true }),
@@ -87,7 +107,7 @@ export default function ReceiptHistoryPage() {
     ]);
 
     setReceipts((receiptResult.data as Receipt[]) || []);
-    setPatients((patientResult.data as Patient[]) || []);
+    setPatients((patientResult as Patient[]) || []);
     setDoctors((doctorResult.data as LookupItem[]) || []);
     setReceptionists((receptionistResult.data as LookupItem[]) || []);
     setServices((serviceResult.data as LookupItem[]) || []);
@@ -99,7 +119,25 @@ export default function ReceiptHistoryPage() {
     }
   }
 
-  const selectedReceipt = receipts.find((receipt) => receipt.id === selectedReceiptId);
+  const visibleReceipts = useMemo(() => {
+    if (!allowedClinicId) return receipts;
+    const clinicReceptionistIds = new Set(
+      receptionists.filter((receptionist) => receptionist.clinic_id === allowedClinicId).map((receptionist) => receptionist.id)
+    );
+    return receipts.filter((receipt) => clinicReceptionistIds.has(receipt.receptionist_id));
+  }, [allowedClinicId, receipts, receptionists]);
+
+  useEffect(() => {
+    if (!selectedReceiptId && visibleReceipts.length > 0) {
+      setSelectedReceiptId(visibleReceipts[0].id);
+      return;
+    }
+    if (selectedReceiptId && !visibleReceipts.some((receipt) => receipt.id === selectedReceiptId)) {
+      setSelectedReceiptId(visibleReceipts[0]?.id || "");
+    }
+  }, [selectedReceiptId, visibleReceipts]);
+
+  const selectedReceipt = visibleReceipts.find((receipt) => receipt.id === selectedReceiptId);
 
   const selectedReceiptLineItems = useMemo(() => {
     if (!selectedReceipt) {
@@ -305,12 +343,12 @@ export default function ReceiptHistoryPage() {
                 <h3 className="mt-1 text-lg font-semibold text-slate-900">Patient Visit Ledger</h3>
               </div>
               <div className="rounded-2xl border border-teal-100 bg-teal-50 px-3 py-1.5 text-xs font-semibold text-teal-700">
-                {receipts.length} Records
+                {visibleReceipts.length} Records
               </div>
             </div>
 
             <div className="space-y-3">
-              {receipts.map((receipt) => (
+              {visibleReceipts.map((receipt) => (
                 <button
                   key={receipt.id}
                   onClick={() => setSelectedReceiptId(receipt.id)}
@@ -335,7 +373,7 @@ export default function ReceiptHistoryPage() {
                 </button>
               ))}
 
-              {receipts.length === 0 && (
+              {visibleReceipts.length === 0 && (
                 <div className="rounded-2xl border border-dashed border-teal-200 bg-teal-50/60 p-8 text-center text-sm text-teal-800">
                   No receipts have been saved yet.
                 </div>

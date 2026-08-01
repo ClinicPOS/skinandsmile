@@ -24,6 +24,7 @@ type Patient = {
   name: string;
   phone: string | null;
   patient_number?: number | null;
+  clinic_file_no?: string | null;
 };
 
 type Receipt = {
@@ -65,6 +66,9 @@ type FullPatient = {
   emirates_id?: string | null;
   passport_number?: string | null;
   patient_number?: number | null;
+  clinic_file_no?: string | null;
+  clinic_file_mrn?: string | null;
+  clinic_patient_file_id?: string | null;
   address?: string | null;
   mrn?: string | null;
   notes?: string | null;
@@ -81,7 +85,16 @@ type PatientNote = {
   created_at: string;
 };
 
-type ProfileSectionKey = "plans" | "outstanding" | "credits" | "clinical" | "treatment";
+type ProfileSectionKey = "plans" | "outstanding" | "credits" | "clinical" | "treatment" | "imported";
+
+type HistoricalVisit = {
+  id: string;
+  visit_date: string | null;
+  treatment_description: string | null;
+  fee_aed: number | null;
+  original_dentist_name: string | null;
+  visit_sequence: number;
+};
 
 type Clinic = {
   id: string;
@@ -177,6 +190,7 @@ export function SearchPatientModal({
   const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [treatmentPlanVisits, setTreatmentPlanVisits] = useState<TreatmentPlanVisit[]>([]);
   const [treatmentPlanPayments, setTreatmentPlanPayments] = useState<TreatmentPlanPayment[]>([]);
+  const [historicalVisits, setHistoricalVisits] = useState<HistoricalVisit[]>([]);
   const [doctors, setDoctors] = useState<LookupItem[]>([]);
   const [receptionists, setReceptionists] = useState<LookupItem[]>([]);
   const [clinics, setClinics] = useState<LookupItem[]>([]);
@@ -196,6 +210,22 @@ export function SearchPatientModal({
   const [newPlanVisits, setNewPlanVisits] = useState("5");
   const [newPlanNotes, setNewPlanNotes] = useState("");
   const [savingTreatmentPlan, setSavingTreatmentPlan] = useState(false);
+  // Legacy treatment form
+  const [showLegacyTreatmentForm, setShowLegacyTreatmentForm] = useState(false);
+  const [legacyServiceId, setLegacyServiceId] = useState("");
+  const [legacyTitle, setLegacyTitle] = useState("");
+  const [legacyDoctorId, setLegacyDoctorId] = useState("");
+  const [legacyStartDate, setLegacyStartDate] = useState("");
+  const [legacyTotalVisits, setLegacyTotalVisits] = useState("5");
+  const [legacyVisitsCompleted, setLegacyVisitsCompleted] = useState("0");
+  const [legacyAgreedTotal, setLegacyAgreedTotal] = useState("");
+  const [legacyHistoricalPaid, setLegacyHistoricalPaid] = useState("");
+  const [legacyPaymentToday, setLegacyPaymentToday] = useState("0");
+  const [legacyPaymentTodayMethod, setLegacyPaymentTodayMethod] = useState("Cash");
+  const [legacyPaymentArrangement, setLegacyPaymentArrangement] = useState("Custom schedule");
+  const [legacyOriginalRef, setLegacyOriginalRef] = useState("");
+  const [legacyNotes, setLegacyNotes] = useState("");
+  const [savingLegacy, setSavingLegacy] = useState(false);
   const [visitPlanId, setVisitPlanId] = useState<string | null>(null);
   const [visitDoctorId, setVisitDoctorId] = useState("");
   const [visitNotes, setVisitNotes] = useState("");
@@ -231,7 +261,7 @@ export function SearchPatientModal({
         (p.email || "").toLowerCase().includes(search) ||
         (p.emirates_id || "").toLowerCase().includes(search) ||
         (p.passport_number || "").toLowerCase().includes(search) ||
-        String(p.patient_number ?? "").includes(search)
+        String(p.clinic_file_no ?? p.patient_number ?? "").includes(search)
     );
   }, [patients, query]);
 
@@ -358,6 +388,98 @@ export function SearchPatientModal({
     setPlanPaymentNotes("");
   }
 
+  function resetLegacyForm() {
+    setShowLegacyTreatmentForm(false);
+    setLegacyServiceId("");
+    setLegacyTitle("");
+    setLegacyDoctorId("");
+    setLegacyStartDate("");
+    setLegacyTotalVisits("5");
+    setLegacyVisitsCompleted("0");
+    setLegacyAgreedTotal("");
+    setLegacyHistoricalPaid("");
+    setLegacyPaymentToday("0");
+    setLegacyPaymentTodayMethod("Cash");
+    setLegacyPaymentArrangement("Custom schedule");
+    setLegacyOriginalRef("");
+    setLegacyNotes("");
+  }
+
+  async function saveLegacyTreatment() {
+    if (!selectedPatient) return;
+    if (!clinic?.id) { alert("Treatment plans need an active clinic. Open the register for a clinic first."); return; }
+    const title = legacyTitle.trim();
+    if (!title) { alert("Enter a treatment name."); return; }
+    const agreedTotal = parseMoney(legacyAgreedTotal);
+    if (agreedTotal <= 0) { alert("Agreed total must be greater than 0."); return; }
+    const totalVisits = Math.max(1, Math.round(Number(legacyTotalVisits) || 1));
+    const visitsCompleted = Math.max(0, Math.round(Number(legacyVisitsCompleted) || 0));
+    const historicalPaid = Math.max(0, parseMoney(legacyHistoricalPaid));
+    const paymentToday = Math.max(0, parseMoney(legacyPaymentToday));
+
+    setSavingLegacy(true);
+    try {
+      const notesText = [
+        legacyNotes.trim(),
+        legacyOriginalRef.trim() ? `Original Ref: ${legacyOriginalRef.trim()}` : "",
+      ].filter(Boolean).join(" | ") || null;
+
+      const { data: planData, error: planError } = await supabase
+        .from("treatment_plans")
+        .insert([{
+          patient_id: selectedPatient.id,
+          clinic_id: clinic.id,
+          service_id: legacyServiceId || null,
+          title,
+          total_amount: agreedTotal,
+          planned_visits: totalVisits,
+          notes: notesText,
+          payment_arrangement: legacyPaymentArrangement || null,
+          historical_amount_paid: historicalPaid,
+          is_legacy: true,
+          created_by: receptionistId,
+          status: "Active",
+        }])
+        .select()
+        .single();
+
+      if (planError || !planData) {
+        alert(`Error creating legacy plan: ${planError?.message || "Unknown error"}`);
+        return;
+      }
+
+      // Add completed visits as historical visit records
+      for (let i = 0; i < visitsCompleted; i++) {
+        await supabase.from("treatment_plan_visits").insert([{
+          treatment_plan_id: planData.id,
+          visit_number: i + 1,
+          visit_date: legacyStartDate || new Date().toISOString().slice(0, 10),
+          receptionist_id: receptionistId,
+          notes: "Imported historical visit",
+        }]);
+      }
+
+      // Record today's payment if applicable (NOT historical)
+      if (paymentToday > 0.001) {
+        await supabase.from("treatment_plan_payments").insert([{
+          treatment_plan_id: planData.id,
+          patient_id: selectedPatient.id,
+          clinic_id: clinic.id,
+          amount: paymentToday,
+          payment_method: legacyPaymentTodayMethod,
+          receptionist_id: receptionistId,
+          register_session_id: registerSessionId || null,
+          notes: `Payment today for legacy plan: ${title}`,
+        }]);
+      }
+
+      setTreatmentPlans((prev) => [planData as TreatmentPlan, ...prev]);
+      resetLegacyForm();
+    } finally {
+      setSavingLegacy(false);
+    }
+  }
+
   function planPaid(planId: string) {
     return (treatmentPlanPaymentsByPlanId.get(planId) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
   }
@@ -398,6 +520,7 @@ export function SearchPatientModal({
     setTreatmentPlans([]);
     setTreatmentPlanVisits([]);
     setTreatmentPlanPayments([]);
+    setHistoricalVisits([]);
     setLastVisit(null);
     setShowAddNote(false);
     setNewNoteText("");
@@ -421,7 +544,7 @@ export function SearchPatientModal({
       .order("created_at", { ascending: false });
     if (clinicId) plansQuery = plansQuery.eq("clinic_id", clinicId);
 
-    const [notesResult, doctorsResult, receptionistsResult, clinicsResult, allReceptionistsResult, receiptsResult, servicesResult, plansResult] = await Promise.all([
+    const [notesResult, doctorsResult, receptionistsResult, clinicsResult, allReceptionistsResult, receiptsResult, servicesResult, plansResult, historicalVisitsResult] = await Promise.all([
       notesQuery,
       supabase.from("doctors").select("id, name"),
       supabase.from("receptionist").select("id, name"),
@@ -432,6 +555,13 @@ export function SearchPatientModal({
       supabase.from("receipts").select("*").eq("patient_id", patient.id).order("created_at", { ascending: false }),
       supabase.from("services").select("id, name, price, clinic_id"),
       plansQuery,
+      patient.clinic_patient_file_id
+        ? supabase
+            .from("patient_treatment_visits")
+            .select("id, visit_date, treatment_description, fee_aed, original_dentist_name, visit_sequence")
+            .eq("patient_file_id", patient.clinic_patient_file_id)
+            .order("visit_date", { ascending: false })
+        : Promise.resolve({ data: [] as HistoricalVisit[] }),
     ]);
 
     let receiptsQuery = supabase
@@ -513,6 +643,7 @@ export function SearchPatientModal({
     setReceptionists((receptionistsResult.data as LookupItem[]) || []);
     setClinics((clinicsResult.data as LookupItem[]) || []);
     setLastVisit(lastVisitResult.data?.[0]?.created_at || null);
+    setHistoricalVisits((historicalVisitsResult.data as HistoricalVisit[]) || []);
     setIsLoadingProfile(false);
   }
 
@@ -816,9 +947,9 @@ export function SearchPatientModal({
                               AED {owed.remaining.toFixed(2)}
                             </span>
                           )}
-                          {patient.patient_number != null && (
+                          {(patient.clinic_file_no || patient.patient_number != null) && (
                             <span className="rounded-full bg-teal-100 px-2 py-0.5 text-xs font-semibold text-teal-700">
-                              #{patient.patient_number}
+                              #{patient.clinic_file_no || patient.patient_number}
                             </span>
                           )}
                         </div>
@@ -843,11 +974,11 @@ export function SearchPatientModal({
                     <h3 className="text-lg font-bold text-slate-900">{selectedPatient.name}</h3>
                     <div className="mt-1 space-y-0.5 text-sm">
                       <p className="font-semibold text-teal-700">
-                        File No.: {selectedPatient.patient_number != null
-                          ? `#${String(selectedPatient.patient_number).padStart(5, "0")}`
+                        File No.: {(selectedPatient.clinic_file_no || selectedPatient.patient_number != null)
+                          ? `#${String(selectedPatient.clinic_file_no || selectedPatient.patient_number)}`
                           : "Not assigned"}
                       </p>
-                      {selectedPatient.mrn && <p className="text-slate-600">MRN: {selectedPatient.mrn}</p>}
+                      {(selectedPatient.clinic_file_mrn || selectedPatient.mrn) && <p className="text-slate-600">MRN: {selectedPatient.clinic_file_mrn || selectedPatient.mrn}</p>}
                       {selectedPatient.phone && <p className="text-slate-600">Phone: {selectedPatient.phone}</p>}
                     </div>
                   </div>
@@ -953,13 +1084,21 @@ export function SearchPatientModal({
                       {treatmentPlanSummary.activeCount} active · AED {treatmentPlanSummary.totalRemaining.toFixed(2)} due {isProfileSectionOpen("plans") ? "▲" : "▼"}
                     </span>
                   </button>
-                  {isProfileSectionOpen("plans") && !showNewTreatmentPlan && (
-                    <button
-                      onClick={() => setShowNewTreatmentPlan(true)}
-                      className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500"
-                    >
-                      + New Plan
-                    </button>
+                  {isProfileSectionOpen("plans") && !showNewTreatmentPlan && !showLegacyTreatmentForm && (
+                    <>
+                      <button
+                        onClick={() => setShowNewTreatmentPlan(true)}
+                        className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500"
+                      >
+                        + New Plan
+                      </button>
+                      <button
+                        onClick={() => setShowLegacyTreatmentForm(true)}
+                        className="rounded-xl border border-cyan-200 bg-white px-3 py-1.5 text-xs font-semibold text-cyan-600 transition hover:bg-cyan-50"
+                      >
+                        Add Legacy
+                      </button>
+                    </>
                   )}
                 </div>
 
@@ -1047,6 +1186,143 @@ export function SearchPatientModal({
                           setNewPlanVisits("5");
                           setNewPlanNotes("");
                         }}
+                        className="rounded-xl border border-slate-200 px-4 py-1.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {isProfileSectionOpen("plans") && showLegacyTreatmentForm && (
+                  <div className="mt-3 space-y-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <p className="text-xs font-bold uppercase tracking-wide text-amber-700">Add Legacy Treatment Plan</p>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Service / Treatment</label>
+                      <select
+                        value={legacyServiceId}
+                        onChange={(e) => {
+                          const sId = e.target.value;
+                          setLegacyServiceId(sId);
+                          const svc = clinicServiceOptions.find((item) => item.id === sId);
+                          if (svc && !legacyTitle) setLegacyTitle(svc.name);
+                        }}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                      >
+                        <option value="">Custom treatment…</option>
+                        {clinicServiceOptions.map((s) => (
+                          <option key={s.id} value={s.id}>{s.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Plan Name</label>
+                      <input
+                        value={legacyTitle}
+                        onChange={(e) => setLegacyTitle(e.target.value)}
+                        placeholder="e.g. Denture (Legacy)"
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Agreed Total (AED)</label>
+                        <input
+                          type="number" min="0" step="0.01"
+                          value={legacyAgreedTotal}
+                          onChange={(e) => setLegacyAgreedTotal(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Historical Paid (AED)</label>
+                        <input
+                          type="number" min="0" step="0.01"
+                          value={legacyHistoricalPaid}
+                          onChange={(e) => setLegacyHistoricalPaid(e.target.value)}
+                          placeholder="0.00"
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Total Visits</label>
+                        <input
+                          type="number" min="1" step="1"
+                          value={legacyTotalVisits}
+                          onChange={(e) => setLegacyTotalVisits(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Visits Completed</label>
+                        <input
+                          type="number" min="0" step="1"
+                          value={legacyVisitsCompleted}
+                          onChange={(e) => setLegacyVisitsCompleted(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Start Date</label>
+                        <input
+                          type="date"
+                          value={legacyStartDate}
+                          onChange={(e) => setLegacyStartDate(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Today (AED)</label>
+                        <input
+                          type="number" min="0" step="0.01"
+                          value={legacyPaymentToday}
+                          onChange={(e) => setLegacyPaymentToday(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                        />
+                      </div>
+                    </div>
+                    {Number(legacyPaymentToday) > 0.001 && (
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Method Today</label>
+                        <div className="grid grid-cols-3 gap-2">
+                          {["Cash", "Card", "Visa", "Mastercard", "Bank Transfer"].map((m) => (
+                            <button
+                              key={m}
+                              onClick={() => setLegacyPaymentTodayMethod(m)}
+                              className={`rounded-xl border px-2 py-1.5 text-xs font-semibold transition ${legacyPaymentTodayMethod === m ? "border-amber-300 bg-amber-500 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-amber-200"}`}
+                            >
+                              {m}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Original Reference</label>
+                      <input
+                        value={legacyOriginalRef}
+                        onChange={(e) => setLegacyOriginalRef(e.target.value)}
+                        placeholder="e.g. old receipt number"
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                      />
+                    </div>
+                    <textarea
+                      value={legacyNotes}
+                      onChange={(e) => setLegacyNotes(e.target.value)}
+                      placeholder="Notes or context for this legacy plan"
+                      rows={2}
+                      className="w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={saveLegacyTreatment}
+                        disabled={savingLegacy}
+                        className="rounded-xl bg-amber-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:opacity-50"
+                      >
+                        {savingLegacy ? "Saving…" : "Save Legacy Plan"}
+                      </button>
+                      <button
+                        onClick={resetLegacyForm}
                         className="rounded-xl border border-slate-200 px-4 py-1.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
                       >
                         Cancel
@@ -1582,6 +1858,51 @@ export function SearchPatientModal({
                   </div>
                 ))}
               </div>
+
+              {/* Imported Treatment History */}
+              {historicalVisits.length > 0 && (
+                <div className="rounded-3xl border border-slate-200 bg-white p-5">
+                  <button
+                    type="button"
+                    onClick={() => toggleProfileSection("imported")}
+                    className="flex w-full items-center justify-between text-left"
+                  >
+                    <span className="text-sm font-bold uppercase tracking-wide text-slate-700">Past Treatments (Imported)</span>
+                    <span className="text-xs font-semibold text-slate-500">
+                      {historicalVisits.length} record{historicalVisits.length === 1 ? "" : "s"} {isProfileSectionOpen("imported") ? "▲" : "▼"}
+                    </span>
+                  </button>
+
+                  {isProfileSectionOpen("imported") && (
+                    <div className="mt-3 space-y-3">
+                      {historicalVisits.map((hv) => (
+                        <div key={hv.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                {hv.visit_date
+                                  ? new Date(hv.visit_date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+                                  : "Date unknown"}
+                              </p>
+                              {hv.original_dentist_name && (
+                                <p className="mt-0.5 text-xs text-slate-400">Dr. {hv.original_dentist_name}</p>
+                              )}
+                            </div>
+                            {hv.fee_aed != null && (
+                              <span className="shrink-0 rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-700">
+                                AED {Number(hv.fee_aed).toFixed(2)}
+                              </span>
+                            )}
+                          </div>
+                          {hv.treatment_description && (
+                            <p className="mt-2 text-sm text-slate-700">{hv.treatment_description}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1699,8 +2020,26 @@ export function ReceiptHistoryModal({
       supabase.from("receptionist").select("id, name"),
     ]);
 
-    setReceipts((receiptResult.data as Receipt[]) || []);
-    setPatients((patientResult.data as Patient[]) || []);
+    const loadedReceipts = (receiptResult.data as Receipt[]) || [];
+    const loadedPatients = ((patientResult.data as Patient[]) || []).map((p) => ({ ...p }));
+    const patientIds = [...new Set(loadedReceipts.map((r) => String(r.patient_id || "")).filter(Boolean))];
+    if (patientIds.length > 0) {
+      const { data: clinicFiles } = await supabase
+        .from("clinic_patient_files")
+        .select("patient_id, file_no")
+        .eq("clinic_id", clinicId)
+        .in("patient_id", patientIds);
+      const fileNoByPatientId = new Map<string, string>();
+      (clinicFiles || []).forEach((f: any) => {
+        fileNoByPatientId.set(String(f.patient_id), String(f.file_no || ""));
+      });
+      loadedPatients.forEach((p) => {
+        p.clinic_file_no = fileNoByPatientId.get(String(p.id)) || null;
+      });
+    }
+
+    setReceipts(loadedReceipts);
+    setPatients(loadedPatients);
     setServices((servicesResult.data as LookupItem[]) || []);
     setDoctors((doctorsResult.data as LookupItem[]) || []);
     setAllReceptionists((receptionistsResult.data as LookupItem[]) || []);
@@ -1890,7 +2229,9 @@ export function ReceiptHistoryModal({
     const patient = patients.find((p) => p.id === receipt.patient_id);
     const patientName = patient?.name || "-";
     const patientPhone = patient?.phone || "-";
-    const patientIdStr = patient?.patient_number
+    const patientIdStr = patient?.clinic_file_no
+      ? `#${String(patient.clinic_file_no)}`
+      : patient?.patient_number
       ? `#${String(patient.patient_number).padStart(5, "0")}`
       : "-";
     const doctorName = doctors.find((d) => d.id === receipt.doctor_id)?.name || "-";
