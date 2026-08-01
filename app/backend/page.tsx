@@ -11,6 +11,7 @@ import { effectiveServiceCategory } from "../../lib/service-categories";
 import { getReceiptLogoPath, receiptLogoOptions } from "../../lib/receipt-branding";
 
 const BACKEND_PIN = "0404";
+const BACKEND_SELECTED_CLINIC_KEY = "backendSelectedClinicId";
 
 export default function BackendPage() {
   const [pinInput, setPinInput] = useState("");
@@ -67,12 +68,14 @@ export default function BackendPage() {
   const [serviceCategory, setServiceCategory] = useState("");
   const [serviceBillingUnit, setServiceBillingUnit] = useState("Session");
   const [serviceRequiresQuantity, setServiceRequiresQuantity] = useState(false);
+  const [serviceToothSelectionMode, setServiceToothSelectionMode] = useState<"none" | "optional" | "required">("none");
   const [editingServiceId, setEditingServiceId] = useState("");
   const [editingServiceName, setEditingServiceName] = useState("");
   const [editingServicePrice, setEditingServicePrice] = useState("");
   const [editingServiceCategory, setEditingServiceCategory] = useState("");
   const [editingServiceBillingUnit, setEditingServiceBillingUnit] = useState("Session");
   const [editingServiceRequiresQuantity, setEditingServiceRequiresQuantity] = useState(false);
+  const [editingServiceToothSelectionMode, setEditingServiceToothSelectionMode] = useState<"none" | "optional" | "required">("none");
   const [servicePage, setServicePage] = useState(1);
 
   const [receptionistName, setReceptionistName] = useState("");
@@ -271,6 +274,12 @@ export default function BackendPage() {
 
   useEffect(() => { setServicePage(1); }, [selectedClinicId]);
 
+  useEffect(() => {
+    if (!selectedClinicId) return;
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(BACKEND_SELECTED_CLINIC_KEY, selectedClinicId);
+  }, [selectedClinicId]);
+
   const displayedReceptionists = useMemo(() =>
     selectedClinicId ? receptionists.filter(r => r.clinic_id === selectedClinicId) : [],
     [receptionists, selectedClinicId]
@@ -298,75 +307,96 @@ export default function BackendPage() {
     startOfDay.setHours(0, 0, 0, 0);
 
     const [
-      patientsResult,
-      doctorsResult,
-      servicesResult,
-      receptionistsResult,
-      cashSessionsResult,
       clinicsResult,
+      servicesResult,
+      doctorsResult,
+      receptionistsResult,
+    ] = await Promise.all([
+      supabase.from("clinics").select("*").order("name"),
+      supabase.from("services").select("*"),
+      supabase.from("doctors").select("*"),
+      supabase.from("receptionist").select("*"),
+    ]);
+
+    const clinicRows = (clinicsResult.data || []) as Clinic[];
+    setClinics(clinicRows);
+    setSelectedClinicId((prev) => {
+      if (prev && prev !== "all" && clinicRows.some((c) => c.id === prev)) return prev;
+      if (typeof window !== "undefined") {
+        const saved = window.localStorage.getItem(BACKEND_SELECTED_CLINIC_KEY);
+        if (saved && clinicRows.some((c) => c.id === saved)) return saved;
+      }
+      return clinicRows[0]?.id ?? "";
+    });
+    setServices((servicesResult.data || []) as Service[]);
+    setDoctors((doctorsResult.data || []) as Doctor[]);
+    setReceptionists((receptionistsResult.data || []) as Receptionist[]);
+
+    const [
+      patientsResult,
+      cashSessionsResult,
       sessionsResult,
       logsResult,
       balancesResult,
       balancePaymentsResult,
-    ] = await Promise.all([
+    ] = await Promise.allSettled([
       supabase.from("patients").select("*"),
-      supabase.from("doctors").select("*"),
-      supabase.from("services").select("*"),
-      supabase.from("receptionist").select("*"),
       supabase
         .from("cash_register_sessions")
         .select("*")
         .gte("opened_at", startOfDay.toISOString())
         .order("opened_at", { ascending: false }),
-      supabase.from("clinics").select("*").order("name"),
       supabase.from("active_sessions").select("*").order("created_at", { ascending: false }),
       supabase.from("login_logs").select("*").order("created_at", { ascending: false }).limit(20),
       supabase.from("outstanding_balances").select("*").order("original_date", { ascending: false }),
       supabase.from("balance_payments").select("*").order("created_at", { ascending: false }),
     ]);
 
-    setPatients((patientsResult.data || []) as Patient[]);
-    setDoctors((doctorsResult.data || []) as Doctor[]);
-    setServices((servicesResult.data || []) as Service[]);
-    setReceptionists((receptionistsResult.data || []) as Receptionist[]);
-    const clinicRows = (clinicsResult.data || []) as Clinic[];
-    setClinics(clinicRows);
-    setSelectedClinicId((prev) => {
-      if (prev && prev !== "all" && clinicRows.some((c) => c.id === prev)) return prev;
-      return clinicRows[0]?.id ?? "";
-    });
-    setActiveSessions((sessionsResult.data || []) as typeof activeSessions);
-    setLoginLogs((logsResult.data || []) as typeof loginLogs);
-
-    if (balancesResult.error) {
-      if (balancesResult.error.code !== "42P01") {
-        console.warn("Failed loading outstanding balances", balancesResult.error);
-      }
-      setOutstandingBalances([]);
-    } else {
-      setOutstandingBalances((balancesResult.data || []) as OutstandingBalance[]);
+    if (patientsResult.status === "fulfilled") {
+      setPatients((patientsResult.value.data || []) as Patient[]);
+    }
+    if (sessionsResult.status === "fulfilled") {
+      setActiveSessions((sessionsResult.value.data || []) as typeof activeSessions);
+    }
+    if (logsResult.status === "fulfilled") {
+      setLoginLogs((logsResult.value.data || []) as typeof loginLogs);
     }
 
-    if (balancePaymentsResult.error) {
-      if (balancePaymentsResult.error.code !== "42P01") {
-        console.warn("Failed loading balance payments", balancePaymentsResult.error);
+    if (balancesResult.status === "fulfilled") {
+      if (balancesResult.value.error) {
+        if (balancesResult.value.error.code !== "42P01") {
+          console.warn("Failed loading outstanding balances", balancesResult.value.error);
+        }
+        setOutstandingBalances([]);
+      } else {
+        setOutstandingBalances((balancesResult.value.data || []) as OutstandingBalance[]);
       }
-      setBalancePayments([]);
-    } else {
-      setBalancePayments((balancePaymentsResult.data || []) as BalancePayment[]);
     }
 
-    if (cashSessionsResult.error) {
-      setCashRegisterSessions([]);
-      if (cashSessionsResult.error.code === "42P01") {
-        setIsRegisterTableReady(false);
+    if (balancePaymentsResult.status === "fulfilled") {
+      if (balancePaymentsResult.value.error) {
+        if (balancePaymentsResult.value.error.code !== "42P01") {
+          console.warn("Failed loading balance payments", balancePaymentsResult.value.error);
+        }
+        setBalancePayments([]);
+      } else {
+        setBalancePayments((balancePaymentsResult.value.data || []) as BalancePayment[]);
+      }
+    }
+
+    if (cashSessionsResult.status === "fulfilled") {
+      if (cashSessionsResult.value.error) {
+        setCashRegisterSessions([]);
+        if (cashSessionsResult.value.error.code === "42P01") {
+          setIsRegisterTableReady(false);
+        } else {
+          setIsRegisterTableReady(true);
+          console.warn("Failed loading cash register sessions", cashSessionsResult.value.error);
+        }
       } else {
         setIsRegisterTableReady(true);
-        console.warn("Failed loading cash register sessions", cashSessionsResult.error);
+        setCashRegisterSessions((cashSessionsResult.value.data || []) as CashRegisterSession[]);
       }
-    } else {
-      setIsRegisterTableReady(true);
-      setCashRegisterSessions((cashSessionsResult.data || []) as CashRegisterSession[]);
     }
   }
 
@@ -686,6 +716,7 @@ export default function BackendPage() {
         category: canonicalServiceCategory(serviceCategory),
         requires_quantity: serviceRequiresQuantity,
         billing_unit: serviceBillingUnit,
+        tooth_selection_mode: serviceToothSelectionMode,
       },
     ]);
 
@@ -699,6 +730,7 @@ export default function BackendPage() {
     setServiceCategory("");
     setServiceBillingUnit("Session");
     setServiceRequiresQuantity(false);
+    setServiceToothSelectionMode("none");
     loadAll();
   }
 
@@ -722,6 +754,7 @@ export default function BackendPage() {
         category: canonicalServiceCategory(editingServiceCategory),
         requires_quantity: editingServiceRequiresQuantity,
         billing_unit: editingServiceBillingUnit,
+        tooth_selection_mode: editingServiceToothSelectionMode,
       })
       .eq("id", id);
 
@@ -735,6 +768,7 @@ export default function BackendPage() {
     setEditingServicePrice("");
     setEditingServiceBillingUnit("Session");
     setEditingServiceRequiresQuantity(false);
+    setEditingServiceToothSelectionMode("none");
     loadAll();
   }
 
@@ -1668,6 +1702,18 @@ export default function BackendPage() {
                 ))}
               </select>
             </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-slate-500">Tooth Selection</label>
+              <select
+                value={serviceToothSelectionMode}
+                onChange={(e) => setServiceToothSelectionMode(e.target.value as "none" | "optional" | "required")}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
+              >
+                <option value="none">Off</option>
+                <option value="optional">Optional</option>
+                <option value="required">Required</option>
+              </select>
+            </div>
             <label className="flex cursor-pointer items-center gap-2">
               <input
                 type="checkbox"
@@ -1723,6 +1769,18 @@ export default function BackendPage() {
                           ))}
                         </select>
                       </div>
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs font-semibold text-slate-500">Tooth Selection</label>
+                        <select
+                          value={editingServiceToothSelectionMode}
+                          onChange={(e) => setEditingServiceToothSelectionMode(e.target.value as "none" | "optional" | "required")}
+                          className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300"
+                        >
+                          <option value="none">Off</option>
+                          <option value="optional">Optional</option>
+                          <option value="required">Required</option>
+                        </select>
+                      </div>
                       <label className="flex cursor-pointer items-center gap-2">
                         <input
                           type="checkbox"
@@ -1760,6 +1818,11 @@ export default function BackendPage() {
                         {service.requires_quantity && (
                           <span className="rounded-full bg-cyan-100 px-1.5 py-0.5 text-xs font-semibold text-cyan-700">Qty</span>
                         )}
+                        {service.tooth_selection_mode && service.tooth_selection_mode !== "none" && (
+                          <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-semibold text-amber-700">
+                            Teeth {service.tooth_selection_mode === "required" ? "On" : "Opt"}
+                          </span>
+                        )}
                       </p>
                     </div>
                     <div className="flex gap-2">
@@ -1771,6 +1834,7 @@ export default function BackendPage() {
                           setEditingServiceCategory(service.category || "");
                           setEditingServiceBillingUnit(service.billing_unit || "Session");
                           setEditingServiceRequiresQuantity(service.requires_quantity ?? false);
+                          setEditingServiceToothSelectionMode((service.tooth_selection_mode as "none" | "optional" | "required") || "none");
                         }}
                         className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600"
                       >

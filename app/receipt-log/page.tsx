@@ -41,6 +41,23 @@ export default function ReceiptLogPage() {
   const [refundedItems, setRefundedItems] = useState<any[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  async function fetchAllRows(table: string, select: string): Promise<any[]> {
+    const BATCH = 1000;
+    let all: any[] = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from(table)
+        .select(select)
+        .range(from, from + BATCH - 1);
+      if (error || !data || data.length === 0) break;
+      all = all.concat(data);
+      if (data.length < BATCH) break;
+      from += BATCH;
+    }
+    return all;
+  }
+
   useEffect(() => {
     if (!isLoaded) return;
     loadData();
@@ -59,7 +76,7 @@ export default function ReceiptLogPage() {
     setIsLoading(true);
     const [receiptsRes, patientsRes, receptionistsRes, clinicsRes, doctorsRes, servicesRes, refundsRes] = await Promise.allSettled([
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
-      supabase.from("patients").select("id, name, phone, patient_number"),
+      fetchAllRows("patients", "id, name, phone, patient_number"),
       supabase.from("receptionist").select("*"),
       supabase.from("clinics").select("*"),
       supabase.from("doctors").select("*"),
@@ -67,7 +84,7 @@ export default function ReceiptLogPage() {
       supabase.from("refunds").select("*"),
     ]);
     if (receiptsRes.status === "fulfilled") setReceipts(receiptsRes.value.data || []);
-    if (patientsRes.status === "fulfilled") setPatients(patientsRes.value.data || []);
+    if (patientsRes.status === "fulfilled") setPatients(patientsRes.value || []);
     if (receptionistsRes.status === "fulfilled") setReceptionists(receptionistsRes.value.data || []);
     if (clinicsRes.status === "fulfilled") {
       const clinicRows = filterClinicsForAccess((clinicsRes.value.data || []) as any[], accessSession);

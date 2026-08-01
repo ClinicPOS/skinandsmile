@@ -24,6 +24,7 @@ export default function SearchPatientsPage() {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [selectedClinicId, setSelectedClinicId] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
 
   const loadClinicsAndPatients = useCallback(async () => {
     if (!isLoaded) return;
@@ -47,41 +48,56 @@ export default function SearchPatientsPage() {
     loadClinicsAndPatients();
   }, [loadClinicsAndPatients]);
 
+  useEffect(() => {
+    if (!selectedClinicId) return;
+
+    const handle = setTimeout(() => {
+      loadPatients(selectedClinicId, query);
+    }, 300);
+
+    return () => clearTimeout(handle);
+  }, [query, selectedClinicId]);
+
   async function loadPatients(clinicId: string, search?: string) {
     const trimmed = (search || "").trim();
+    setIsSearching(true);
 
-    let q = supabase
-      .from("clinic_patient_files")
-      .select("file_no, patients!inner(id, name, phone)")
-      .eq("clinic_id", clinicId)
-      .order("file_no", { ascending: true })
-      .limit(200);
+    try {
+      let q = supabase
+        .from("clinic_patient_files")
+        .select("file_no, patients!inner(id, name, phone)")
+        .eq("clinic_id", clinicId)
+        .order("file_no", { ascending: true })
+        .limit(200);
 
-    if (trimmed) {
-      // Search by file number exact match first, then name/phone contains
-      if (/^\d+$/.test(trimmed)) {
-        q = q.eq("file_no", trimmed);
-      } else {
-        q = q.or(`name.ilike.%${trimmed}%,phone.ilike.%${trimmed}%`, { referencedTable: "patients" });
+      if (trimmed) {
+        // Search by file number exact match first, then name/phone contains
+        if (/^\d+$/.test(trimmed)) {
+          q = q.eq("file_no", trimmed);
+        } else {
+          q = q.or(`name.ilike.%${trimmed}%,phone.ilike.%${trimmed}%`, { referencedTable: "patients" });
+        }
       }
+
+      const { data } = await q;
+
+      const mapped = ((data || []) as Array<{ file_no: string; patients: { id: string; name: string; phone: string | null } | { id: string; name: string; phone: string | null }[] }>)
+        .map((row) => {
+          const p = Array.isArray(row.patients) ? row.patients[0] : row.patients;
+          if (!p?.id) return null;
+          return {
+            id: p.id as string,
+            name: String(p.name || ""),
+            phone: (p.phone as string | null) ?? null,
+            clinic_file_no: String(row.file_no || ""),
+          } as Patient;
+        })
+        .filter((row): row is Patient => row !== null);
+
+      setPatients(mapped);
+    } finally {
+      setIsSearching(false);
     }
-
-    const { data } = await q;
-
-    const mapped = ((data || []) as Array<{ file_no: string; patients: { id: string; name: string; phone: string | null } | { id: string; name: string; phone: string | null }[] }>)
-      .map((row) => {
-        const p = Array.isArray(row.patients) ? row.patients[0] : row.patients;
-        if (!p?.id) return null;
-        return {
-          id: p.id as string,
-          name: String(p.name || ""),
-          phone: (p.phone as string | null) ?? null,
-          clinic_file_no: String(row.file_no || ""),
-        } as Patient;
-      })
-      .filter((row): row is Patient => row !== null);
-
-    setPatients(mapped);
   }
 
   const filteredPatients = useMemo(() => patients, [patients]);
@@ -121,14 +137,13 @@ export default function SearchPatientsPage() {
           <input
             type="text"
             value={query}
-            onChange={async (e) => {
-              const val = e.target.value;
-              setQuery(val);
-              if (selectedClinicId) await loadPatients(selectedClinicId, val);
-            }}
+            onChange={(e) => setQuery(e.target.value)}
             placeholder="Type file number, name, or phone to search"
             className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
           />
+          {isSearching && (
+            <p className="mt-2 text-xs text-slate-400">Searching…</p>
+          )}
         </div>
 
         <div className="grid gap-3">

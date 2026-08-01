@@ -552,6 +552,29 @@ export default function ReceiptsPage() {
     return cartItemTeeth[index] || [];
   }
 
+  function serviceToothSelectionMode(service: any): "none" | "optional" | "required" {
+    return (service?.tooth_selection_mode || "none") as "none" | "optional" | "required";
+  }
+
+  function shouldShowTeethInput(service: any): boolean {
+    return serviceToothSelectionMode(service) !== "none";
+  }
+
+  function normalizeTeethForItem(service: any, index: number): string[] {
+    return shouldShowTeethInput(service) ? getTeethForItem(index) : [];
+  }
+
+  function validateTeethSelection(): boolean {
+    for (let i = 0; i < selectedServices.length; i++) {
+      const service = selectedServices[i];
+      if (serviceToothSelectionMode(service) === "required" && getTeethForItem(i).length === 0) {
+        alert(`Please enter tooth numbers for ${service.name}.`);
+        return false;
+      }
+    }
+    return true;
+  }
+
   function getTeethDisplay(index: number): string {
     const teeth = getTeethForItem(index);
     if (teeth.length === 0) return "";
@@ -572,6 +595,7 @@ export default function ReceiptsPage() {
     if (!isPosUnlocked) { alert("Open the register first."); return; }
     if (!patientName.trim()) { alert("Enter a patient name before holding."); return; }
     if (!activeClinic?.id) { alert("Open the register for a clinic first."); return; }
+    if (!validateTeethSelection()) return;
 
     setIsSavingHold(true);
     try {
@@ -608,7 +632,7 @@ export default function ReceiptsPage() {
           price: Number(s.price),
           original_price: s.originalPrice != null ? Number(s.originalPrice) : null,
           quantity: s.quantity ?? 1,
-          teeth: getTeethForItem(i),
+          teeth: normalizeTeethForItem(s, i),
         }));
         await supabase.from("pos_hold_services").insert(holdServices);
       }
@@ -2145,6 +2169,10 @@ export default function ReceiptsPage() {
       return;
     }
 
+    if (!validateTeethSelection()) {
+      return;
+    }
+
     if (!activeClinic?.id) {
       alert("Open the register for a clinic first.");
       return;
@@ -2487,6 +2515,10 @@ export default function ReceiptsPage() {
       return false;
     }
 
+    if (!validateTeethSelection()) {
+      return false;
+    }
+
     setIsSavingReceipt(true);
 
     const amountPaidToday = Math.round((getAmountDueToday() + installmentFee) * 100) / 100;
@@ -2572,7 +2604,7 @@ export default function ReceiptsPage() {
         quantity: qty,
         price: service.price,
         total: service.price * qty,
-        teeth: getTeethForItem(i),
+        teeth: normalizeTeethForItem(service, i),
       };
     });
 
@@ -3493,7 +3525,7 @@ export default function ReceiptsPage() {
         const qtyLabel = service.requires_quantity && qty > 1
           ? ` <span style="font-size:9px;">×${qty} ${service.billing_unit || "Unit"}</span>`
           : "";
-        const teethLabel = getTeethForItem(index);
+        const teethLabel = normalizeTeethForItem(service, index);
         const teethDisplay = teethLabel.length > 0 ? ` (Tooth #${teethLabel.join(", #")})` : "";
         return service.originalPrice != null
           ? `
@@ -4422,15 +4454,17 @@ export default function ReceiptsPage() {
                             )}
                           </div>
                         )}
-                        <div className="mt-1.5">
-                            <input
-                              type="text"
-                              placeholder="Tooth # (e.g. 14, 20)"
-                              value={getTeethForItem(index).join(", ")}
-                              onChange={(e) => updateCartItemTeeth(index, e.target.value)}
-                              className="w-full rounded-lg border border-teal-100 bg-teal-50 px-2 py-1 text-xs text-teal-700 outline-none placeholder:text-teal-300 focus:border-teal-300"
-                            />
-                        </div>
+                        {shouldShowTeethInput(service) && (
+                          <div className="mt-1.5">
+                              <input
+                                type="text"
+                                placeholder={serviceToothSelectionMode(service) === "required" ? "Tooth # (required)" : "Tooth # (e.g. 14, 20)"}
+                                value={getTeethForItem(index).join(", ")}
+                                onChange={(e) => updateCartItemTeeth(index, e.target.value)}
+                                className="w-full rounded-lg border border-teal-100 bg-teal-50 px-2 py-1 text-xs text-teal-700 outline-none placeholder:text-teal-300 focus:border-teal-300"
+                              />
+                          </div>
+                        )}
                       </div>
                     </div>
                     <button

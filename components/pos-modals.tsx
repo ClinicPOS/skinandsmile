@@ -1992,6 +1992,23 @@ export function ReceiptHistoryModal({
     }
   }, [isOpen]);
 
+  async function fetchAllRows(table: string, select: string): Promise<any[]> {
+    const BATCH = 1000;
+    let all: any[] = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from(table)
+        .select(select)
+        .range(from, from + BATCH - 1);
+      if (error || !data || data.length === 0) break;
+      all = all.concat(data);
+      if (data.length < BATCH) break;
+      from += BATCH;
+    }
+    return all;
+  }
+
   async function loadHistory() {
     if (!clinicId) {
       setReceipts([]);
@@ -2014,14 +2031,14 @@ export function ReceiptHistoryModal({
 
     const [receiptResult, patientResult, servicesResult, doctorsResult, receptionistsResult] = await Promise.all([
       supabase.from("receipts").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
-      supabase.from("patients").select("id, name, phone, patient_number"),
+      fetchAllRows("patients", "id, name, phone, patient_number"),
       supabase.from("services").select("id, name"),
       supabase.from("doctors").select("id, name"),
       supabase.from("receptionist").select("id, name"),
     ]);
 
     const loadedReceipts = (receiptResult.data as Receipt[]) || [];
-    const loadedPatients = ((patientResult.data as Patient[]) || []).map((p) => ({ ...p }));
+    const loadedPatients = ((patientResult as Patient[]) || []).map((p) => ({ ...p }));
     const patientIds = [...new Set(loadedReceipts.map((r) => String(r.patient_id || "")).filter(Boolean))];
     if (patientIds.length > 0) {
       const { data: clinicFiles } = await supabase
