@@ -44,7 +44,7 @@ async function logAttempt(req: NextRequest, success: boolean) {
 }
 
 export async function POST(req: NextRequest) {
-  const { password } = await req.json();
+  const { password, selectedScope } = await req.json();
   const raw = req.cookies.get("login-state")?.value;
   const state = parseState(raw);
   const now = Date.now();
@@ -83,8 +83,19 @@ export async function POST(req: NextRequest) {
   const token = crypto.randomUUID();
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
   const userAgent = req.headers.get("user-agent") ?? "unknown";
+  const sessionMode = selectedScope === "manager" ? "manager" : "clinic";
+  const clinicId = sessionMode === "clinic" ? String(selectedScope || "").trim() : null;
 
-  await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/active_sessions`, {
+  const sessionPayload = {
+    token,
+    ip,
+    user_agent: userAgent,
+    session_mode: sessionMode,
+    clinic_id: clinicId,
+    user_role: sessionMode === "manager" ? "administrator" : "receptionist",
+  };
+
+  const sessionRes = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/active_sessions`, {
     method: "POST",
     headers: {
       apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -92,8 +103,20 @@ export async function POST(req: NextRequest) {
       "Content-Type": "application/json",
       Prefer: "return=minimal",
     },
-    body: JSON.stringify({ token, ip, user_agent: userAgent }),
+    body: JSON.stringify(sessionPayload),
   });
+  if (!sessionRes.ok) {
+    await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/active_sessions`, {
+      method: "POST",
+      headers: {
+        apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({ token, ip, user_agent: userAgent }),
+    });
+  }
 
   const response = NextResponse.json({ ok: true });
   const thirtyDaysMs = 60 * 60 * 24 * 30 * 1000;

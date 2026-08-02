@@ -44,13 +44,28 @@ export type Doctor = {
 export type Service = {
   id: string;
   name: string;
+  description?: string | null;
+  display_name?: string | null;
+  variant?: string | null;
+  search_keywords?: string | null;
+  common_aliases?: string | null;
   price: number;
+  standard_price?: number | null;
+  promo_price?: number | null;
   clinic_id?: string | null;
   category?: string | null;
+  category_id?: string | null;
   requires_quantity?: boolean;
   billing_unit?: string | null;
   tooth_selection_mode?: 'none' | 'optional' | 'required';
   default_visit_count?: number;
+  active_plan_recommended?: boolean;
+  is_active?: boolean;
+  sort_order?: number | null;
+  canonical_service_id?: string | null;
+  pricing_type?: 'fixed' | 'variable';
+  min_price?: number | null;
+  max_price?: number | null;
 };
 
 export type Receptionist = {

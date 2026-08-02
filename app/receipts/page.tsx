@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx-js-style";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Clinic, OutstandingBalance, BalancePayment, PatientCredit } from "../../lib/types";
+import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal } from "../../components/pos-modals";
 import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
@@ -26,6 +26,10 @@ const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Ca
 const POS_REGISTER_SESSION_KEY = "posRegisterSession";
 const POS_RECENT_SERVICES_KEY = "posRecentServices";
 const REGISTER_TABLE = "cash_register_sessions";
+
+function recentServicesStorageKey(clinicId: string) {
+  return `${POS_RECENT_SERVICES_KEY}:${clinicId}`;
+}
 
 function getDubaiDateParts(date: Date) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -184,49 +188,34 @@ function extractTransactionReference(paymentMethodRaw: string, channel: "card" |
   return "";
 }
 
-function matchesServiceCategory(serviceName: string, category: string) {
-  if (category === "all") {
-    return true;
-  }
-
-  const name = serviceName.toLowerCase();
-
-  if (category === "cleaning") {
-    return name.includes("cleaning") || name.includes("whitening") || name.includes("filling");
-  }
-
-  if (category === "surgery") {
-    return name.includes("extraction") || name.includes("root canal") || name.includes("surgical");
-  }
-
-  if (category === "cosmetic") {
-    return name.includes("veneer") || name.includes("crown") || name.includes("bridge");
-  }
-
-  if (category === "braces") {
-    return name.includes("braces") || name.includes("retainer");
-  }
-
-  if (category === "denture") {
-    return name.includes("denture");
-  }
-
-  if (category === "xray") {
-    return name.includes("xray") || name.includes("x-ray") || name.includes("cbct") || name.includes("iopa") || name.includes("opg");
-  }
-
-  return true;
+function normalizeServiceText(value: unknown): string {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-const serviceCategories = [
-  { key: "all", label: "All" },
-  { key: "cleaning", label: "Cleaning" },
-  { key: "surgery", label: "Surgery" },
-  { key: "cosmetic", label: "Cosmetic" },
-  { key: "braces", label: "Braces" },
-  { key: "denture", label: "Denture" },
-  { key: "xray", label: "X-Ray" },
-];
+function getServiceDisplayName(service: Service): string {
+  return String(service.display_name || service.name || "").trim();
+}
+
+function getServiceVariant(service: Service): string {
+  return String(service.variant || service.description || "").trim();
+}
+
+function buildServiceSearchText(service: Service): string {
+  return normalizeServiceText([
+    service.display_name,
+    service.name,
+    service.variant,
+    service.description,
+    service.category,
+    service.category_id,
+    service.search_keywords,
+    service.common_aliases,
+  ].filter(Boolean).join(" "));
+}
 
 export default function ReceiptsPage() {
   const { accessSession, isLoaded, isManager, allowedClinicId } = useClinicAccess();
@@ -234,7 +223,7 @@ export default function ReceiptsPage() {
   const [clinicPatientFiles, setClinicPatientFiles] = useState<any[]>([]);
   const [doctors, setDoctors] = useState<any[]>([]);
   const [receptionists, setReceptionists] = useState<any[]>([]);
-  const [services, setServices] = useState<any[]>([]);
+  const [services, setServices] = useState<Service[]>([]);
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [activeClinic, setActiveClinic] = useState<Clinic | null>(null);
 
@@ -271,22 +260,12 @@ export default function ReceiptsPage() {
   const [selectedServices, setSelectedServices] = useState<any[]>([]);
   const [serviceSearch, setServiceSearch] = useState("");
   const [serviceCategory, setServiceCategory] = useState("all");
-  const [recentServiceIds, setRecentServiceIds] = useState<string[]>(() => {
-    if (typeof window === "undefined") {
-      return [];
-    }
-
-    try {
-      const raw = localStorage.getItem(POS_RECENT_SERVICES_KEY);
-      if (!raw) {
-        return [];
-      }
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed.map((id) => String(id)) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [serviceUsageFilter, setServiceUsageFilter] = useState<"all" | "frequent" | "recent" | "favorites">("all");
+  const [recentServiceIds, setRecentServiceIds] = useState<string[]>([]);
+  const [frequentlyUsedServiceIds, setFrequentlyUsedServiceIds] = useState<string[]>([]);
+  const [favoriteServiceIds, setFavoriteServiceIds] = useState<string[]>([]);
+  const [isLoadingFavorites, setIsLoadingFavorites] = useState(false);
+  const [collapsedServiceCategories, setCollapsedServiceCategories] = useState<Record<string, boolean>>({});
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("");
   const [tabbyReferenceInput, setTabbyReferenceInput] = useState("");
@@ -309,6 +288,16 @@ export default function ReceiptsPage() {
   const [registerOpenedAt, setRegisterOpenedAt] = useState("");
   const [showCloseRegisterModal, setShowCloseRegisterModal] = useState(false);
   const [closingCashInput, setClosingCashInput] = useState("");
+  const [showPatientBackupModal, setShowPatientBackupModal] = useState(false);
+  const [isLoadingPatientBackupSummary, setIsLoadingPatientBackupSummary] = useState(false);
+  const [isDownloadingPatientBackup, setIsDownloadingPatientBackup] = useState(false);
+  const [patientBackupError, setPatientBackupError] = useState("");
+  const [patientBackupSummary, setPatientBackupSummary] = useState<{
+    clinicName: string;
+    patientCount: number;
+    treatmentRecordCount: number;
+    filename: string;
+  } | null>(null);
   const [registerSessionId, setRegisterSessionId] = useState("");
   const [cashSalesTotal, setCashSalesTotal] = useState(0);
   const [expectedCashAmount, setExpectedCashAmount] = useState(0);
@@ -328,6 +317,7 @@ export default function ReceiptsPage() {
   const [isProceeding, setIsProceeding] = useState(false);
   // Tooth numbers per cart item (parallel array matching selectedServices)
   const [cartItemTeeth, setCartItemTeeth] = useState<string[][]>([]);
+  const [cartItemToothDrafts, setCartItemToothDrafts] = useState<string[]>([]);
   // Transaction type step
   const [showTransactionTypeModal, setShowTransactionTypeModal] = useState(false);
   // Treatment plan checkout
@@ -399,6 +389,165 @@ export default function ReceiptsPage() {
     loadHoldCount();
   }, [activeClinic?.id]);
 
+  useEffect(() => {
+    if (!activeClinic?.id) {
+      setRecentServiceIds([]);
+      setFrequentlyUsedServiceIds([]);
+      setFavoriteServiceIds([]);
+      return;
+    }
+    try {
+      const raw = window.localStorage.getItem(recentServicesStorageKey(activeClinic.id));
+      if (!raw) {
+        setRecentServiceIds([]);
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      setRecentServiceIds(Array.isArray(parsed) ? parsed.map((id) => String(id)) : []);
+    } catch {
+      setRecentServiceIds([]);
+    }
+  }, [activeClinic?.id]);
+
+  useEffect(() => {
+    loadFrequentlyUsedServices();
+    loadFavoriteServices();
+  }, [activeClinic?.id, receptionistId, loginReceptionistId, receptionists]);
+
+  async function loadFavoriteServices() {
+    if (!activeClinic?.id) {
+      setFavoriteServiceIds([]);
+      return;
+    }
+    const activeReceptionistId = receptionistId || loginReceptionistId;
+    if (!activeReceptionistId) {
+      setFavoriteServiceIds([]);
+      return;
+    }
+
+    setIsLoadingFavorites(true);
+    const { data, error } = await supabase
+      .from("service_favorites")
+      .select("service_id")
+      .eq("clinic_id", activeClinic.id)
+      .or(`receptionist_id.eq.${activeReceptionistId},receptionist_id.is.null`);
+    setIsLoadingFavorites(false);
+
+    if (error) {
+      console.warn("Failed loading service favorites", error);
+      setFavoriteServiceIds([]);
+      return;
+    }
+
+    const ids = new Set<string>();
+    for (const row of data || []) {
+      if (row.service_id) ids.add(String(row.service_id));
+    }
+    setFavoriteServiceIds([...ids]);
+  }
+
+  async function toggleFavorite(serviceId: string) {
+    if (!activeClinic?.id) return;
+    const activeReceptionistId = receptionistId || loginReceptionistId;
+    if (!activeReceptionistId) {
+      alert("Open the register first.");
+      return;
+    }
+
+    const isFavorite = favoriteServiceIds.includes(serviceId);
+    if (isFavorite) {
+      const { error } = await supabase
+        .from("service_favorites")
+        .delete()
+        .eq("clinic_id", activeClinic.id)
+        .eq("receptionist_id", activeReceptionistId)
+        .eq("service_id", serviceId);
+      if (error) {
+        alert(`Could not remove favorite: ${error.message || "unknown error"}`);
+        return;
+      }
+      setFavoriteServiceIds((current) => current.filter((id) => id !== serviceId));
+      return;
+    }
+
+    const { error } = await supabase
+      .from("service_favorites")
+      .insert([
+        {
+          clinic_id: activeClinic.id,
+          receptionist_id: activeReceptionistId,
+          service_id: serviceId,
+        },
+      ]);
+    if (error) {
+      alert(`Could not save favorite: ${error.message || "unknown error"}`);
+      return;
+    }
+    setFavoriteServiceIds((current) => [...current, serviceId]);
+  }
+
+  async function loadFrequentlyUsedServices() {
+    if (!activeClinic?.id) {
+      setFrequentlyUsedServiceIds([]);
+      return;
+    }
+
+    const clinicReceptionistIds = receptionists
+      .filter((r) => r.clinic_id === activeClinic.id)
+      .map((r) => String(r.id));
+    if (clinicReceptionistIds.length === 0) {
+      setFrequentlyUsedServiceIds([]);
+      return;
+    }
+
+    const since = new Date();
+    since.setDate(since.getDate() - 60);
+
+    const { data: receiptsData, error: receiptsError } = await supabase
+      .from("receipts")
+      .select("id")
+      .in("receptionist_id", clinicReceptionistIds)
+      .gte("created_at", since.toISOString())
+      .order("created_at", { ascending: false })
+      .limit(600);
+
+    if (receiptsError) {
+      console.warn("Failed loading recent receipts for frequent services", receiptsError);
+      setFrequentlyUsedServiceIds([]);
+      return;
+    }
+
+    const receiptIds = (receiptsData || []).map((r) => String(r.id || "")).filter(Boolean);
+    if (receiptIds.length === 0) {
+      setFrequentlyUsedServiceIds([]);
+      return;
+    }
+
+    const { data: receiptItemsData, error: itemsError } = await supabase
+      .from("receipt_items")
+      .select("service_id, quantity")
+      .in("receipt_id", receiptIds);
+
+    if (itemsError) {
+      console.warn("Failed loading receipt items for frequent services", itemsError);
+      setFrequentlyUsedServiceIds([]);
+      return;
+    }
+
+    const usageByServiceId = new Map<string, number>();
+    for (const row of receiptItemsData || []) {
+      const serviceId = String(row.service_id || "");
+      if (!serviceId) continue;
+      const qty = Math.max(1, Number(row.quantity || 1));
+      usageByServiceId.set(serviceId, (usageByServiceId.get(serviceId) || 0) + qty);
+    }
+    const ranked = [...usageByServiceId.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 16)
+      .map(([serviceId]) => serviceId);
+    setFrequentlyUsedServiceIds(ranked);
+  }
+
   // Loads all rows from a table by paginating through 1 000-row batches, working
   // around PostgREST's default max-rows cap.
   async function fetchAllRows(table: string, select: string): Promise<any[]> {
@@ -410,7 +559,11 @@ export default function ReceiptsPage() {
         .from(table)
         .select(select)
         .range(from, from + BATCH - 1);
-      if (error || !data || data.length === 0) break;
+      if (error) {
+        console.error(`fetchAllRows error on table "${table}" at range ${from}–${from + BATCH - 1}:`, error.message);
+        break;
+      }
+      if (!data || data.length === 0) break;
       all = all.concat(data);
       if (data.length < BATCH) break;
       from += BATCH;
@@ -451,7 +604,7 @@ export default function ReceiptsPage() {
     }
 
     if (serviceResult.status === "fulfilled") {
-      setServices((serviceResult.value.data || []) as any[]);
+      setServices((serviceResult.value.data || []) as Service[]);
     }
 
     if (clinicResult.status === "fulfilled") {
@@ -485,14 +638,25 @@ export default function ReceiptsPage() {
   }
 
   function addService(service: any) {
-    setSelectedServices((current) => [...current, service]);
+    const isVariable = service.pricing_type === 'variable';
+    const cartItem = isVariable
+      ? {
+          ...service,
+          price: Number(service.standard_price ?? service.price ?? 0),
+          isVariablePriced: true,
+          minPrice: service.min_price != null ? Number(service.min_price) : null,
+          maxPrice: service.max_price != null ? Number(service.max_price) : null,
+        }
+      : service;
+    setSelectedServices((current) => [...current, cartItem]);
     setCartItemTeeth((current) => [...current, []]);
+    setCartItemToothDrafts((current) => [...current, ""]);
 
     const serviceId = String(service.id);
     setRecentServiceIds((current) => {
       const updated = [serviceId, ...current.filter((id) => id !== serviceId)].slice(0, 8);
-      if (typeof window !== "undefined") {
-        localStorage.setItem(POS_RECENT_SERVICES_KEY, JSON.stringify(updated));
+      if (typeof window !== "undefined" && activeClinic?.id) {
+        localStorage.setItem(recentServicesStorageKey(activeClinic.id), JSON.stringify(updated));
       }
       return updated;
     });
@@ -509,6 +673,11 @@ export default function ReceiptsPage() {
       updated.splice(index, 1);
       return updated;
     });
+    setCartItemToothDrafts((current) => {
+      const updated = [...current];
+      updated.splice(index, 1);
+      return updated;
+    });
   }
 
   function updateCartItemPrice(index: number, newPriceStr: string) {
@@ -517,13 +686,21 @@ export default function ReceiptsPage() {
     setSelectedServices((current) => {
       const updated = [...current];
       const item = { ...updated[index] };
-      const original = item.originalPrice ?? Number(item.price);
-      if (parsed !== original) {
-        item.originalPrice = original;
-      } else {
+      if (item.isVariablePriced) {
+        // Variable-range: clamp to allowed range, never treat as a discount/promo.
+        const lo = item.minPrice != null ? Number(item.minPrice) : 0;
+        const hi = item.maxPrice != null ? Number(item.maxPrice) : Number.MAX_SAFE_INTEGER;
+        item.price = Math.min(hi, Math.max(lo, parsed));
         delete item.originalPrice;
+      } else {
+        const original = item.originalPrice ?? Number(item.price);
+        if (parsed !== original) {
+          item.originalPrice = original;
+        } else {
+          delete item.originalPrice;
+        }
+        item.price = parsed;
       }
-      item.price = parsed;
       updated[index] = item;
       return updated;
     });
@@ -538,12 +715,49 @@ export default function ReceiptsPage() {
     });
   }
 
-  function updateCartItemTeeth(index: number, teethStr: string) {
-    const parsed = teethStr.split(/[\s,]+/).map((t) => t.trim()).filter((t) => t.length > 0);
+  function parseToothTokens(raw: string): string[] {
+    return raw
+      .replace(/#/g, " ")
+      .split(/[\s,،;]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+  }
+
+  function setCartItemToothDraft(index: number, value: string) {
+    setCartItemToothDrafts((current) => {
+      const updated = [...current];
+      while (updated.length <= index) updated.push("");
+      updated[index] = value;
+      return updated;
+    });
+  }
+
+  function addToothToCartItem(index: number) {
+    const draft = String(cartItemToothDrafts[index] || "");
+    const tokens = parseToothTokens(draft);
+    if (tokens.length === 0) return;
     setCartItemTeeth((current) => {
       const updated = [...current];
       while (updated.length <= index) updated.push([]);
-      updated[index] = parsed;
+      const existing = updated[index] || [];
+      const seen = new Set(existing);
+      for (const tooth of tokens) {
+        if (!seen.has(tooth)) {
+          existing.push(tooth);
+          seen.add(tooth);
+        }
+      }
+      updated[index] = existing;
+      return updated;
+    });
+    setCartItemToothDraft(index, "");
+  }
+
+  function removeToothFromCartItem(index: number, tooth: string) {
+    setCartItemTeeth((current) => {
+      const updated = [...current];
+      while (updated.length <= index) updated.push([]);
+      updated[index] = (updated[index] || []).filter((item) => item !== tooth);
       return updated;
     });
   }
@@ -662,6 +876,7 @@ export default function ReceiptsPage() {
     setNotes("");
     setSelectedServices([]);
     setCartItemTeeth([]);
+    setCartItemToothDrafts([]);
     setDiscountInput("");
     setDiscountType("AED");
     setTransactionPatientId("");
@@ -747,6 +962,7 @@ export default function ReceiptsPage() {
       }));
       setSelectedServices(svcs);
       setCartItemTeeth(hold.services.map((s: any) => s.teeth || []));
+      setCartItemToothDrafts(hold.services.map(() => ""));
     }
   }
 
@@ -797,38 +1013,52 @@ export default function ReceiptsPage() {
   const totalWithInstallmentFee = Math.round((total + installmentFee) * 100) / 100;
 
   const clinicServices = useMemo(() => {
-    if (!activeClinic) return [];
-    return services.filter((s) => s.clinic_id === activeClinic.id);
+    if (!activeClinic) return [] as Service[];
+    return services
+      .filter((s) => s.clinic_id === activeClinic.id && s.is_active !== false)
+      .sort((a, b) => {
+        const sortA = Number(a.sort_order ?? 0);
+        const sortB = Number(b.sort_order ?? 0);
+        if (sortA !== sortB) return sortA - sortB;
+        return getServiceDisplayName(a).localeCompare(getServiceDisplayName(b));
+      });
   }, [services, activeClinic]);
 
-  // Real categories (managed in Backend) for the active clinic's services.
-  // When any exist, the POS tabs are built from them instead of the legacy
-  // name-keyword tabs.
+  const selectedServiceCountById = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const service of selectedServices) {
+      const id = String(service.id || "");
+      if (!id) continue;
+      counts.set(id, (counts.get(id) || 0) + 1);
+    }
+    return counts;
+  }, [selectedServices]);
+
+  function getServiceCategoryName(service: Service): string {
+    const normalized = String(service.category || service.category_id || "").trim();
+    if (normalized) return normalized;
+    const inferred = getAestheticServiceCategory(getServiceDisplayName(service));
+    return inferred || "Other Services";
+  }
+
   const clinicDbCategories = useMemo(() => {
     const set = new Set<string>();
     for (const s of clinicServices) {
-      const c = String(s.category || "").trim();
+      const c = getServiceCategoryName(s);
       if (c) set.add(c);
     }
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [clinicServices]);
 
-  const clinicHasUncategorized = useMemo(
-    () => clinicServices.some((s) => !String(s.category || "").trim()),
-    [clinicServices]
+  const categoryTabs = useMemo(
+    () => [{ key: "all", label: "All categories" }, ...clinicDbCategories.map((c) => ({ key: `cat:${c}`, label: c }))],
+    [clinicDbCategories]
   );
-
-  const categoryTabs = useMemo(() => {
-    if (clinicDbCategories.length === 0) return serviceCategories;
-    return [
-      { key: "all", label: "All" },
-      ...clinicDbCategories.map((c) => ({ key: `db:${c}`, label: c })),
-      ...(clinicHasUncategorized ? [{ key: "db:__other__", label: "Other" }] : []),
-    ];
-  }, [clinicDbCategories, clinicHasUncategorized]);
 
   useEffect(() => {
     setServiceCategory("all");
+    setServiceUsageFilter("all");
+    setCollapsedServiceCategories({});
   }, [activeClinic?.id]);
 
   const clinicDoctors = useMemo(() => {
@@ -845,56 +1075,92 @@ export default function ReceiptsPage() {
       .filter((file) => file.clinic_id === activeClinic.id)
       .map((file) => {
         const p = patientById.get(String(file.patient_id));
-        if (!p) return null;
+        // If the patients row is missing (data gap from import or deleted record),
+        // still surface the file so receptionists can find it by file number or MRN.
+        const base = p ?? {
+          id: String(file.patient_id || file.id),
+          name: `(File #${file.file_no} — record missing)`,
+          phone: null,
+          email: null,
+          emirates_id: null,
+          passport_number: null,
+          patient_number: null,
+          notes: null,
+        };
         return {
-          ...p,
+          ...base,
           clinic_patient_file_id: file.id,
           clinic_file_no: file.file_no,
           clinic_file_mrn: file.mrn,
         };
-      })
-      .filter(Boolean);
+      });
   }, [activeClinic, patients, clinicPatientFiles]);
 
   const filteredServices = useMemo(() => {
-    const query = serviceSearch.trim().toLowerCase();
-    const filtered = clinicServices.filter((service) => {
-      const name = String(service.name || "");
-      let inCategory: boolean;
-      if (serviceCategory.startsWith("db:")) {
-        const dbCategory = String(service.category || "").trim();
-        inCategory =
-          serviceCategory === "db:__other__"
-            ? !dbCategory
-            : dbCategory === serviceCategory.slice(3);
-      } else {
-        inCategory = matchesServiceCategory(name, serviceCategory);
-      }
-      const inSearch = !query || name.toLowerCase().includes(query);
-      return inCategory && inSearch;
-    });
+    const queryTokens = normalizeServiceText(serviceSearch).split(" ").filter(Boolean);
+    const usageSet = new Set<string>(
+      serviceUsageFilter === "recent"
+        ? recentServiceIds
+        : serviceUsageFilter === "frequent"
+          ? frequentlyUsedServiceIds
+          : serviceUsageFilter === "favorites"
+            ? favoriteServiceIds
+            : []
+    );
 
-    if (!query) {
-      return filtered.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
-    }
+    const filtered = clinicServices.filter((service) => {
+      const serviceId = String(service.id || "");
+      if (serviceUsageFilter !== "all" && !usageSet.has(serviceId)) return false;
+
+      const categoryName = getServiceCategoryName(service);
+      const inCategory = serviceCategory === "all" || categoryName === serviceCategory.slice(4);
+      if (!inCategory) return false;
+
+      if (queryTokens.length === 0) return true;
+      const haystack = buildServiceSearchText(service);
+      return queryTokens.every((token) => haystack.includes(token));
+    });
 
     return filtered.sort((a, b) => {
-      const aName = String(a.name || "").toLowerCase();
-      const bName = String(b.name || "").toLowerCase();
-      const aStarts = aName.startsWith(query) ? 0 : 1;
-      const bStarts = bName.startsWith(query) ? 0 : 1;
-      if (aStarts !== bStarts) {
-        return aStarts - bStarts;
+      const aName = normalizeServiceText(getServiceDisplayName(a));
+      const bName = normalizeServiceText(getServiceDisplayName(b));
+      const queryPrefix = normalizeServiceText(serviceSearch);
+      if (queryPrefix) {
+        const aStarts = aName.startsWith(queryPrefix) ? 0 : 1;
+        const bStarts = bName.startsWith(queryPrefix) ? 0 : 1;
+        if (aStarts !== bStarts) return aStarts - bStarts;
       }
+      const sortA = Number(a.sort_order ?? 0);
+      const sortB = Number(b.sort_order ?? 0);
+      if (sortA !== sortB) return sortA - sortB;
       return aName.localeCompare(bName);
     });
-  }, [clinicServices, serviceCategory, serviceSearch]);
+  }, [
+    clinicServices,
+    serviceCategory,
+    serviceSearch,
+    serviceUsageFilter,
+    recentServiceIds,
+    frequentlyUsedServiceIds,
+    favoriteServiceIds,
+  ]);
 
-  const recentServices = useMemo(() => {
-    return recentServiceIds
-      .map((serviceId) => clinicServices.find((service) => String(service.id) === serviceId))
-      .filter(Boolean);
-  }, [recentServiceIds, clinicServices]);
+  const groupedFilteredServices = useMemo(() => {
+    const groups = new Map<string, Service[]>();
+    for (const service of filteredServices) {
+      const categoryName = getServiceCategoryName(service);
+      const arr = groups.get(categoryName) || [];
+      arr.push(service);
+      groups.set(categoryName, arr);
+    }
+    const categoryOrder = [...groups.keys()].sort((a, b) =>
+      a === "Other Services" ? 1 : b === "Other Services" ? -1 : a.localeCompare(b)
+    );
+    return categoryOrder.map((categoryName) => ({
+      categoryName,
+      services: groups.get(categoryName) || [],
+    }));
+  }, [filteredServices]);
 
   const balancePaymentsByBalanceId = useMemo(() => {
     const map = new Map<string, BalancePayment[]>();
@@ -2154,30 +2420,110 @@ export default function ReceiptsPage() {
     XLSX.writeFile(workbook, fileName);
   }
 
+  function filenameFromDisposition(headerValue: string | null): string {
+    if (!headerValue) return "";
+    const match = headerValue.match(/filename="([^"]+)"/i);
+    return match?.[1] || "";
+  }
+
+  async function openPatientBackupModal() {
+    if (!activeClinic?.id) {
+      alert("No active clinic found for this register.");
+      return;
+    }
+    setPatientBackupError("");
+    setPatientBackupSummary(null);
+    setShowPatientBackupModal(true);
+    setIsLoadingPatientBackupSummary(true);
+    try {
+      const res = await fetch("/api/patient-backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "preview",
+          clinicId: activeClinic.id,
+          receptionistId: receptionistId || loginReceptionistId || null,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setPatientBackupError(String(data?.error || "Could not prepare backup preview."));
+        return;
+      }
+      setPatientBackupSummary({
+        clinicName: String(data.clinicName || activeClinic.name || ""),
+        patientCount: Number(data.patientCount || 0),
+        treatmentRecordCount: Number(data.treatmentRecordCount || 0),
+        filename: String(data.filename || ""),
+      });
+    } catch {
+      setPatientBackupError("Could not prepare backup preview.");
+    } finally {
+      setIsLoadingPatientBackupSummary(false);
+    }
+  }
+
+  async function downloadPatientBackup() {
+    if (!activeClinic?.id || isDownloadingPatientBackup) return;
+    setPatientBackupError("");
+    setIsDownloadingPatientBackup(true);
+    try {
+      const res = await fetch("/api/patient-backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "download",
+          clinicId: activeClinic.id,
+          receptionistId: receptionistId || loginReceptionistId || null,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setPatientBackupError(String(data?.error || "Could not download backup."));
+        return;
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const fallbackName = patientBackupSummary?.filename || "Patient_Backup.xlsx";
+      a.href = url;
+      a.download = filenameFromDisposition(res.headers.get("Content-Disposition")) || fallbackName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setShowPatientBackupModal(false);
+      alert("Patient backup downloaded successfully.");
+    } catch {
+      setPatientBackupError("Could not download backup.");
+    } finally {
+      setIsDownloadingPatientBackup(false);
+    }
+  }
+
   async function proceedToPayment() {
     if (isProceedingRef.current) return;
-    isProceedingRef.current = true;
-    setIsProceeding(true);
-    try {
+
+    // Guard checks before locking — these never need rollback
     if (!isPosUnlocked) {
       alert("Open the register first to use POS.");
       return;
     }
-
     if (!patientName.trim() || !receptionistId || selectedServices.length === 0) {
       alert("Please fill in patient name and add at least one service.");
       return;
     }
-
-    if (!validateTeethSelection()) {
-      return;
-    }
-
+    if (!validateTeethSelection()) return;
     if (!activeClinic?.id) {
       alert("Open the register for a clinic first.");
       return;
     }
 
+    isProceedingRef.current = true;
+    setIsProceeding(true);
+    try {
     let finalPatientId = patientId;
     let finalPatientFileId = transactionPatientFileId || "";
     let finalClinicFileNo = patientFileNumberInput.trim();
@@ -2216,41 +2562,67 @@ export default function ReceiptsPage() {
         .eq("id", patientId);
     }
 
-    // If patientId is empty but patientName exists, create new patient
+    // NEW PATIENT — use the atomic RPC so patients + clinic_patient_files
+    // are always created together in a single transaction. If either insert
+    // fails the whole operation rolls back; no orphaned patient records.
     if (!patientId && patientName.trim()) {
-      let newPatient = null;
-      let lastError: any = null;
-      const { data, error } = await supabase
-        .from("patients")
-        .insert([
-          {
-            name: patientName.trim(),
-            phone: patientPhoneInput.trim() || "",
-            email: patientEmailInput.trim() || null,
-            date_of_birth: patientDobInput || null,
-            sex: patientSexInput || null,
-            nationality: patientNationalityInput.trim() || null,
-            emirates_id: patientEmiratesIdInput.trim() || null,
-            passport_number: patientPassportInput.trim() || null,
-            mrn: null,
-          },
-        ])
-        .select()
-        .single();
-      if (!error) {
-        newPatient = data;
-      } else {
-        lastError = error;
-      }
+      const { data: rpcData, error: rpcError } = await supabase.rpc(
+        "create_patient_with_clinic_file",
+        {
+          p_name:            patientName.trim(),
+          p_phone:           patientPhoneInput.trim() || "",
+          p_email:           patientEmailInput.trim() || "",
+          p_date_of_birth:   patientDobInput || "",
+          p_sex:             patientSexInput || "",
+          p_nationality:     patientNationalityInput.trim() || "",
+          p_emirates_id:     patientEmiratesIdInput.trim() || "",
+          p_passport_number: patientPassportInput.trim() || "",
+          p_mrn_input:       patientMrnInput.trim() || "",
+          p_clinic_id:       activeClinic.id,
+          p_file_no:         finalClinicFileNo || "",
+        }
+      );
 
-      if (!newPatient) {
-        console.error("Create patient error", lastError);
-        alert(`Error creating new patient: ${lastError?.message || "unknown error"}`);
+      if (rpcError || !rpcData) {
+        const msg = rpcError?.message || "Could not create patient. Please try again.";
+        console.error("create_patient_with_clinic_file error:", rpcError);
+        alert(`Error creating patient: ${msg}`);
         return;
       }
 
-      finalPatientId = newPatient.id;
-      setPatients([...patients, newPatient]);
+      const result = rpcData as { patient_id: string; clinic_patient_file_id: string; file_no: string };
+      finalPatientId = result.patient_id;
+      finalPatientFileId = result.clinic_patient_file_id;
+      finalClinicFileNo = result.file_no;
+
+      // Update local state so the new patient is immediately searchable
+      setPatients((prev) => [
+        ...prev,
+        {
+          id: result.patient_id,
+          name: patientName.trim(),
+          phone: patientPhoneInput.trim() || null,
+          email: patientEmailInput.trim() || null,
+          date_of_birth: patientDobInput || null,
+          sex: patientSexInput || null,
+          nationality: patientNationalityInput.trim() || null,
+          emirates_id: patientEmiratesIdInput.trim() || null,
+          passport_number: patientPassportInput.trim() || null,
+          notes: null,
+          patient_number: null,
+          mrn: patientMrnInput.trim() || null,
+        },
+      ]);
+      setClinicPatientFiles((prev) => [
+        ...prev,
+        {
+          id: result.clinic_patient_file_id,
+          clinic_id: activeClinic.id,
+          patient_id: result.patient_id,
+          file_no: result.file_no,
+          mrn: patientMrnInput.trim() || null,
+        },
+      ]);
     }
 
     if (!finalPatientId) {
@@ -2258,6 +2630,7 @@ export default function ReceiptsPage() {
       return;
     }
 
+    // EXISTING PATIENT — ensure they have a clinic file record at this clinic
     if (!finalPatientFileId) {
       const existingClinicFile = await getClinicPatientFile(activeClinic.id, finalPatientId);
       if (existingClinicFile) {
@@ -3841,8 +4214,8 @@ export default function ReceiptsPage() {
           </div>
         </div>
       ) : (
-      <div className="grid gap-8 xl:grid-cols-[1.45fr_0.95fr]">
-        <div className="space-y-6">
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.95fr)]">
+        <div className="min-w-0 space-y-6">
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
             <div className="mb-4 rounded-2xl border border-teal-200 bg-teal-50/70 p-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -3860,6 +4233,13 @@ export default function ReceiptsPage() {
                   </p>
                 </div>
                 <div className="flex flex-col gap-2">
+                  <button
+                    onClick={openPatientBackupModal}
+                    disabled={isLoadingPatientBackupSummary || isDownloadingPatientBackup}
+                    className="inline-flex items-center justify-center rounded-2xl bg-cyan-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-600 disabled:opacity-50"
+                  >
+                    {isLoadingPatientBackupSummary ? "Preparing Backup..." : "Download Patient Backup"}
+                  </button>
                   <button
                     onClick={downloadDailyIncomeReport}
                     className="inline-flex items-center justify-center rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
@@ -4248,17 +4628,59 @@ export default function ReceiptsPage() {
               <p className="text-sm text-slate-500">{filteredServices.length} shown</p>
             </div>
 
-            <div className="space-y-3">
+            <div className="sticky top-2 z-10 space-y-3 bg-slate-50 pb-2">
               <input
                 type="text"
                 value={serviceSearch}
                 onChange={(e) => setServiceSearch(e.target.value)}
-                placeholder="Search service name..."
+                placeholder="Search by name, variant, category, keyword, or alias"
                 className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
               />
 
-              {activeClinic?.name !== "Skin & Smile Aesthetic Clinic" ? (
-                <div className="flex gap-2 overflow-x-auto pb-1">
+              <div className="grid gap-2">
+                {isLoadingFavorites && (
+                  <p className="text-xs text-slate-500">Refreshing favorites…</p>
+                )}
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { key: "all", label: "All", count: clinicServices.length },
+                    { key: "frequent", label: "Frequently Used", count: frequentlyUsedServiceIds.length },
+                    { key: "recent", label: "Recently Used", count: recentServiceIds.length },
+                    { key: "favorites", label: "Favorites", count: favoriteServiceIds.length },
+                  ].map((mode) => {
+                    const isActive = serviceUsageFilter === mode.key;
+                    return (
+                      <button
+                        key={mode.key}
+                        type="button"
+                        onClick={() => setServiceUsageFilter(mode.key as "all" | "frequent" | "recent" | "favorites")}
+                        className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                          isActive
+                            ? "bg-cyan-600 text-white"
+                            : "border border-slate-200 bg-white text-slate-600 hover:border-cyan-300"
+                        }`}
+                      >
+                        {mode.label} <span className="opacity-80">({mode.count})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="sm:hidden">
+                  <select
+                    value={serviceCategory}
+                    onChange={(e) => setServiceCategory(e.target.value)}
+                    className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
+                  >
+                    {categoryTabs.map((category) => (
+                      <option key={category.key} value={category.key}>
+                        {category.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="hidden flex-wrap gap-2 sm:flex">
                   {categoryTabs.map((category) => {
                     const isActive = serviceCategory === category.key;
                     return (
@@ -4266,9 +4688,9 @@ export default function ReceiptsPage() {
                         key={category.key}
                         type="button"
                         onClick={() => setServiceCategory(category.key)}
-                        className={`whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                        className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
                           isActive
-                            ? "bg-cyan-600 text-white"
+                            ? "bg-slate-900 text-white"
                             : "border border-slate-200 bg-white text-slate-600 hover:border-cyan-300"
                         }`}
                       >
@@ -4277,94 +4699,210 @@ export default function ReceiptsPage() {
                     );
                   })}
                 </div>
-              ) : null}
-
+              </div>
             </div>
 
-            {filteredServices.length === 0 ? (
-              <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500">
-                No services found. Try a different search or category.
-              </div>
-            ) : activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? (
-              <div className="mt-4 space-y-6">
-                {(() => {
-                  // Group by the service's category column (managed in Backend),
-                  // fall back to legacy name keywords, and always render
-                  // unmatched services under "Other Services" so no service is
-                  // ever hidden from the picker.
-                  const groups = new Map<string, any[]>();
-                  for (const s of filteredServices) {
-                    const categoryName =
-                      String(s.category || "").trim() ||
-                      getAestheticServiceCategory(String(s.name || "")) ||
-                      "Other Services";
-                    const arr = groups.get(categoryName) || [];
-                    arr.push(s);
-                    groups.set(categoryName, arr);
-                  }
-                  const groupNames = [...groups.keys()].sort((a, b) =>
-                    a === "Other Services" ? 1 : b === "Other Services" ? -1 : a.localeCompare(b)
-                  );
-                  return groupNames.map((categoryName) => {
-                    const categoryServices = groups.get(categoryName) || [];
+            <div className="mt-4 lg:max-h-[58vh] lg:overflow-y-auto lg:pr-1">
+              {filteredServices.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500">
+                  No services found. Try a different search or filter.
+                </div>
+              ) : serviceCategory === "all" ? (
+                <div className="space-y-4">
+                  {groupedFilteredServices.map(({ categoryName, services: categoryServices }) => {
+                    const isCollapsed = !!collapsedServiceCategories[categoryName];
                     return (
-                      <div key={categoryName}>
-                        <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.15em] text-slate-600">{categoryName}</h3>
-                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
-                          {categoryServices.map((service) => (
+                      <section key={categoryName} className="rounded-2xl border border-slate-200 bg-white p-3 sm:p-4">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCollapsedServiceCategories((current) => ({
+                              ...current,
+                              [categoryName]: !current[categoryName],
+                            }))
+                          }
+                          className="flex w-full items-center justify-between gap-3 text-left"
+                        >
+                          <h3 className="text-sm font-semibold uppercase tracking-[0.12em] text-slate-700">
+                            {categoryName}
+                          </h3>
+                          <span className="text-xs font-semibold text-slate-500">
+                            {categoryServices.length} {categoryServices.length === 1 ? "service" : "services"} {isCollapsed ? "▸" : "▾"}
+                          </span>
+                        </button>
+                        {!isCollapsed && (
+                          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                            {categoryServices.map((service) => {
+                              const serviceId = String(service.id || "");
+                              const selectedCount = selectedServiceCountById.get(serviceId) || 0;
+                              const displayName = getServiceDisplayName(service);
+                              const variant = getServiceVariant(service);
+                              const isVariable = service.pricing_type === 'variable';
+                              const basePrice = Number(service.promo_price ?? service.standard_price ?? service.price ?? 0);
+                              const isFavorite = favoriteServiceIds.includes(serviceId);
+                              return (
+                                <div key={service.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <p className="text-sm font-semibold text-slate-900">{displayName}</p>
+                                      {variant && <p className="mt-0.5 text-xs text-slate-500">{variant}</p>}
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleFavorite(serviceId)}
+                                        className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                                          isFavorite ? "bg-amber-100 text-amber-700" : "bg-white text-slate-500"
+                                        }`}
+                                        title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                                      >
+                                        ★
+                                      </button>
+                                      {isVariable ? (
+                                        <span className="rounded-xl bg-violet-100 px-2.5 py-1 text-xs font-semibold text-violet-700">
+                                          {service.min_price != null && service.max_price != null
+                                            ? `AED ${Number(service.min_price).toFixed(0)}–${Number(service.max_price).toFixed(0)}`
+                                            : `AED ${basePrice.toFixed(0)}`}
+                                        </span>
+                                      ) : (
+                                        <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
+                                          {fmtServicePrice(basePrice, 0)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="mt-2 flex flex-wrap gap-1.5">
+                                    {Number(service.default_visit_count || 1) > 1 && (
+                                      <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                        Default visits: {Number(service.default_visit_count)}
+                                      </span>
+                                    )}
+                                    {service.active_plan_recommended && (
+                                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                                        Active Plan recommended
+                                      </span>
+                                    )}
+                                    {service.tooth_selection_mode === "required" && (
+                                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                                        Tooth required
+                                      </span>
+                                    )}
+                                    {service.tooth_selection_mode === "optional" && (
+                                      <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                                        Tooth optional
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="mt-3 flex items-center justify-between gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => addService(service)}
+                                      className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500"
+                                    >
+                                      {selectedCount > 0 ? "Add again" : "Add"}
+                                    </button>
+                                    {selectedCount > 0 && (
+                                      <span className="rounded-full bg-teal-100 px-2.5 py-1 text-xs font-semibold text-teal-700">
+                                        ✓ Selected {selectedCount > 1 ? `(${selectedCount})` : ""}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </section>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {filteredServices.map((service) => {
+                    const serviceId = String(service.id || "");
+                    const selectedCount = selectedServiceCountById.get(serviceId) || 0;
+                    const displayName = getServiceDisplayName(service);
+                    const variant = getServiceVariant(service);
+                    const isVariable = service.pricing_type === 'variable';
+                    const basePrice = Number(service.promo_price ?? service.standard_price ?? service.price ?? 0);
+                    const isFavorite = favoriteServiceIds.includes(serviceId);
+                    return (
+                      <div key={service.id} className="rounded-2xl border border-slate-200 bg-white p-3 text-left shadow-sm">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900">{displayName}</p>
+                            {variant && <p className="mt-0.5 text-xs text-slate-500">{variant}</p>}
+                          </div>
+                          <div className="flex items-center gap-1">
                             <button
-                              key={service.id}
-                              onClick={() => addService(service)}
-                              className="rounded-2xl border border-slate-200 bg-white p-3 text-left shadow-sm transition hover:border-cyan-300 hover:bg-cyan-50 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                              type="button"
+                              onClick={() => toggleFavorite(serviceId)}
+                              className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                                isFavorite ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-500"
+                              }`}
+                              title={isFavorite ? "Remove from favorites" : "Add to favorites"}
                             >
-                              <div className="flex items-start justify-between gap-3">
-                                <p className="text-sm font-semibold text-slate-900">{service.name}</p>
-                                <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
-                                  {fmtServicePrice(Number(service.price || 0), 0)}
-                                </span>
-                              </div>
+                              ★
                             </button>
-                          ))}
+                            {isVariable ? (
+                              <span className="rounded-xl bg-violet-100 px-2.5 py-1 text-xs font-semibold text-violet-700">
+                                {service.min_price != null && service.max_price != null
+                                  ? `AED ${Number(service.min_price).toFixed(0)}–${Number(service.max_price).toFixed(0)}`
+                                  : `AED ${basePrice.toFixed(0)}`}
+                              </span>
+                            ) : (
+                              <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
+                                {fmtServicePrice(basePrice, 0)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {Number(service.default_visit_count || 1) > 1 && (
+                            <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                              Default visits: {Number(service.default_visit_count)}
+                            </span>
+                          )}
+                          {service.active_plan_recommended && (
+                            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                              Active Plan recommended
+                            </span>
+                          )}
+                          {service.tooth_selection_mode === "required" && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                              Tooth required
+                            </span>
+                          )}
+                          {service.tooth_selection_mode === "optional" && (
+                            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                              Tooth optional
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-3 flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            onClick={() => addService(service)}
+                            className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500"
+                          >
+                            {selectedCount > 0 ? "Add again" : "Add"}
+                          </button>
+                          {selectedCount > 0 && (
+                            <span className="rounded-full bg-teal-100 px-2.5 py-1 text-xs font-semibold text-teal-700">
+                              ✓ Selected {selectedCount > 1 ? `(${selectedCount})` : ""}
+                            </span>
+                          )}
                         </div>
                       </div>
                     );
-                  });
-                })()}
-              </div>
-            ) : (
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-2">
-                {filteredServices.map((service) => (
-                  <button
-                    key={service.id}
-                    onClick={() => addService(service)}
-                    className="rounded-2xl border border-slate-200 bg-white p-3 text-left shadow-sm transition hover:border-cyan-300 hover:bg-cyan-50 focus:outline-none focus:ring-4 focus:ring-cyan-100"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-semibold text-slate-900">{service.name}</p>
-                        {service.promo_price != null && (
-                          <span className="text-xs font-semibold text-rose-500">PROMO</span>
-                        )}
-                      </div>
-                      {service.promo_price != null ? (
-                        <div className="text-right">
-                          <span className="block text-xs text-slate-400 line-through">AED {Number(service.price || 0).toFixed(0)}</span>
-                          <span className="rounded-xl bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700">AED {Number(service.promo_price).toFixed(0)}</span>
-                        </div>
-                      ) : (
-                        <span className="rounded-xl bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-700">
-                          {fmtServicePrice(Number(service.price || 0), 0)}
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        <aside className="space-y-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <aside className="space-y-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6 lg:sticky lg:top-24 lg:self-start">
           <div className="rounded-3xl border border-teal-300 bg-gradient-to-br from-teal-100 to-cyan-100 p-4">
             <div className="flex items-center justify-between">
               <div>
@@ -4376,7 +4914,7 @@ export default function ReceiptsPage() {
               </span>
             </div>
 
-            <div className="mt-5 space-y-3">
+            <div className="mt-5 space-y-3 lg:max-h-[44vh] lg:overflow-y-auto lg:pr-1">
               {selectedServices.length === 0 ? (
                 <div className="rounded-3xl border border-dashed border-teal-400 bg-white/50 px-4 py-8 text-center text-sm text-teal-600">
                   Add services to build the receipt.
@@ -4402,7 +4940,8 @@ export default function ReceiptsPage() {
                               <span className="text-teal-600">AED</span>
                               <input
                                 type="number"
-                                min="0"
+                                min={service.isVariablePriced && service.minPrice != null ? service.minPrice : 0}
+                                max={service.isVariablePriced && service.maxPrice != null ? service.maxPrice : undefined}
                                 step="0.01"
                                 value={Number(service.price)}
                                 onChange={(e) => updateCartItemPrice(index, e.target.value)}
@@ -4410,6 +4949,9 @@ export default function ReceiptsPage() {
                               />
                               <span className="text-slate-500">per {service.billing_unit || "Unit"}</span>
                             </div>
+                            {service.isVariablePriced && service.minPrice != null && service.maxPrice != null && (
+                              <p className="text-[10px] text-violet-500">Range: AED {Number(service.minPrice).toFixed(0)}–{Number(service.maxPrice).toFixed(0)}</p>
+                            )}
                             <div className="flex items-center gap-2">
                               <button
                                 onClick={() => updateCartItemQuantity(index, (service.quantity ?? 1) - 1)}
@@ -4433,36 +4975,74 @@ export default function ReceiptsPage() {
                             </div>
                           </div>
                         ) : (
-                          <div className="mt-1 flex items-center gap-1.5">
-                            {service.originalPrice != null && (
-                              <span className="text-xs text-slate-400 line-through">AED {Number(service.originalPrice).toFixed(2)}</span>
-                            )}
-                            {Number(service.price) === 0 ? (
-                              <span className="rounded-lg bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">Free</span>
-                            ) : (
-                              <>
-                                <span className="text-xs font-medium text-teal-600">AED</span>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={Number(service.price)}
-                                  onChange={(e) => updateCartItemPrice(index, e.target.value)}
-                                  className="w-20 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-900 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
-                                />
-                              </>
+                          <div className="mt-1 space-y-0.5">
+                            <div className="flex items-center gap-1.5">
+                              {service.originalPrice != null && (
+                                <span className="text-xs text-slate-400 line-through">AED {Number(service.originalPrice).toFixed(2)}</span>
+                              )}
+                              {Number(service.price) === 0 && !service.isVariablePriced ? (
+                                <span className="rounded-lg bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">Free</span>
+                              ) : (
+                                <>
+                                  <span className="text-xs font-medium text-teal-600">AED</span>
+                                  <input
+                                    type="number"
+                                    min={service.isVariablePriced && service.minPrice != null ? service.minPrice : 0}
+                                    max={service.isVariablePriced && service.maxPrice != null ? service.maxPrice : undefined}
+                                    step="0.01"
+                                    value={Number(service.price)}
+                                    onChange={(e) => updateCartItemPrice(index, e.target.value)}
+                                    className="w-20 rounded-lg border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-900 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                                  />
+                                </>
+                              )}
+                            </div>
+                            {service.isVariablePriced && service.minPrice != null && service.maxPrice != null && (
+                              <p className="text-[10px] text-violet-500">Range: AED {Number(service.minPrice).toFixed(0)}–{Number(service.maxPrice).toFixed(0)}</p>
                             )}
                           </div>
                         )}
                         {shouldShowTeethInput(service) && (
-                          <div className="mt-1.5">
+                          <div className="mt-1.5 space-y-1.5">
+                            {getTeethForItem(index).length > 0 && (
+                              <div className="flex flex-wrap gap-1">
+                                {getTeethForItem(index).map((tooth) => (
+                                  <button
+                                    key={`${index}-${tooth}`}
+                                    type="button"
+                                    onClick={() => removeToothFromCartItem(index, tooth)}
+                                    className="rounded-full bg-teal-100 px-2 py-0.5 text-[11px] font-semibold text-teal-800"
+                                    title="Remove tooth"
+                                  >
+                                    #{tooth} ×
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            <div className="flex items-center gap-1.5">
                               <input
                                 type="text"
-                                placeholder={serviceToothSelectionMode(service) === "required" ? "Tooth # (required)" : "Tooth # (e.g. 14, 20)"}
-                                value={getTeethForItem(index).join(", ")}
-                                onChange={(e) => updateCartItemTeeth(index, e.target.value)}
+                                inputMode="numeric"
+                                placeholder={serviceToothSelectionMode(service) === "required" ? "Add tooth # (required)" : "Add tooth #"}
+                                value={cartItemToothDrafts[index] || ""}
+                                onChange={(e) => setCartItemToothDraft(index, e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    addToothToCartItem(index);
+                                  }
+                                }}
                                 className="w-full rounded-lg border border-teal-100 bg-teal-50 px-2 py-1 text-xs text-teal-700 outline-none placeholder:text-teal-300 focus:border-teal-300"
                               />
+                              <button
+                                type="button"
+                                onClick={() => addToothToCartItem(index)}
+                                className="rounded-lg bg-teal-600 px-2 py-1 text-[11px] font-semibold text-white"
+                              >
+                                Add
+                              </button>
+                            </div>
+                            <p className="text-[11px] text-teal-700/80">Tip: enter one or many (e.g. 14 or 14,15).</p>
                           </div>
                         )}
                       </div>
@@ -4841,6 +5421,123 @@ export default function ReceiptsPage() {
                         setClosingCashInput("");
                       }}
                       className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {showPatientBackupModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                <div className="mx-4 w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl">
+                  <h3 className="text-lg font-semibold text-slate-900">Download Patient Backup</h3>
+
+                  <div className="mt-3 space-y-2 text-sm text-slate-700">
+                    <p>
+                      <span className="font-semibold">Clinic:</span>{" "}
+                      {patientBackupSummary?.clinicName || activeClinic?.name || "-"}
+                    </p>
+                    <p className="flex items-center gap-2">
+                      <span className="font-semibold">Patients:</span>{" "}
+                      {isLoadingPatientBackupSummary && !patientBackupSummary ? (
+                        <span className="flex items-center gap-1.5 text-slate-400">
+                          <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                          </svg>
+                          Loading…
+                        </span>
+                      ) : patientBackupSummary ? (
+                        <span className="font-semibold text-teal-700">{patientBackupSummary.patientCount.toLocaleString()}</span>
+                      ) : "—"}
+                    </p>
+                    <p className="flex items-center gap-2">
+                      <span className="font-semibold">Treatment records:</span>{" "}
+                      {isLoadingPatientBackupSummary && !patientBackupSummary ? (
+                        <span className="flex items-center gap-1.5 text-slate-400">
+                          <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                          </svg>
+                          Loading…
+                        </span>
+                      ) : patientBackupSummary ? (
+                        <span className="font-semibold text-teal-700">{patientBackupSummary.treatmentRecordCount.toLocaleString()}</span>
+                      ) : "—"}
+                    </p>
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                    This file contains confidential patient information.
+                  </div>
+
+                  {/* Download progress bar */}
+                  {isDownloadingPatientBackup && (
+                    <div className="mt-4 space-y-2">
+                      <div className="flex items-center justify-between text-xs font-medium text-cyan-700">
+                        <span className="flex items-center gap-1.5">
+                          <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                          </svg>
+                          Building Excel workbook…
+                        </span>
+                        <span className="text-slate-400">Please wait</span>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                        <div className="h-full animate-[progressBar_1.6s_ease-in-out_infinite] rounded-full bg-cyan-500" />
+                      </div>
+                    </div>
+                  )}
+
+                  {patientBackupError && (
+                    <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                      {patientBackupError}
+                    </div>
+                  )}
+
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      onClick={downloadPatientBackup}
+                      disabled={!patientBackupSummary || isLoadingPatientBackupSummary || isDownloadingPatientBackup}
+                      className="inline-flex items-center justify-center gap-2 rounded-2xl bg-cyan-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-600 disabled:opacity-50"
+                    >
+                      {isDownloadingPatientBackup ? (
+                        <>
+                          <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                          </svg>
+                          Downloading…
+                        </>
+                      ) : isLoadingPatientBackupSummary ? (
+                        <>
+                          <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                          </svg>
+                          Preparing…
+                        </>
+                      ) : (
+                        <>
+                          <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+                          </svg>
+                          Download Excel
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isDownloadingPatientBackup) return;
+                        setShowPatientBackupModal(false);
+                      }}
+                      disabled={isDownloadingPatientBackup}
+                      className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
                     >
                       Cancel
                     </button>

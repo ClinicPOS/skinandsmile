@@ -64,19 +64,40 @@ export default function BackendPage() {
   const [editingDoctorSpecialty, setEditingDoctorSpecialty] = useState("");
 
   const [serviceName, setServiceName] = useState("");
+  const [serviceDisplayName, setServiceDisplayName] = useState("");
+  const [serviceVariant, setServiceVariant] = useState("");
   const [servicePrice, setServicePrice] = useState("");
   const [serviceCategory, setServiceCategory] = useState("");
+  const [serviceSearchKeywords, setServiceSearchKeywords] = useState("");
+  const [serviceCommonAliases, setServiceCommonAliases] = useState("");
+  const [serviceDefaultVisitCount, setServiceDefaultVisitCount] = useState("1");
+  const [serviceSortOrder, setServiceSortOrder] = useState("0");
+  const [serviceActivePlanRecommended, setServiceActivePlanRecommended] = useState(false);
+  const [serviceIsActive, setServiceIsActive] = useState(true);
   const [serviceBillingUnit, setServiceBillingUnit] = useState("Session");
   const [serviceRequiresQuantity, setServiceRequiresQuantity] = useState(false);
   const [serviceToothSelectionMode, setServiceToothSelectionMode] = useState<"none" | "optional" | "required">("none");
   const [editingServiceId, setEditingServiceId] = useState("");
   const [editingServiceName, setEditingServiceName] = useState("");
+  const [editingServiceDisplayName, setEditingServiceDisplayName] = useState("");
+  const [editingServiceVariant, setEditingServiceVariant] = useState("");
   const [editingServicePrice, setEditingServicePrice] = useState("");
   const [editingServiceCategory, setEditingServiceCategory] = useState("");
+  const [editingServiceSearchKeywords, setEditingServiceSearchKeywords] = useState("");
+  const [editingServiceCommonAliases, setEditingServiceCommonAliases] = useState("");
+  const [editingServiceDefaultVisitCount, setEditingServiceDefaultVisitCount] = useState("1");
+  const [editingServiceSortOrder, setEditingServiceSortOrder] = useState("0");
+  const [editingServiceActivePlanRecommended, setEditingServiceActivePlanRecommended] = useState(false);
+  const [editingServiceIsActive, setEditingServiceIsActive] = useState(true);
+  const [editingServiceCanonicalId, setEditingServiceCanonicalId] = useState("");
   const [editingServiceBillingUnit, setEditingServiceBillingUnit] = useState("Session");
   const [editingServiceRequiresQuantity, setEditingServiceRequiresQuantity] = useState(false);
   const [editingServiceToothSelectionMode, setEditingServiceToothSelectionMode] = useState<"none" | "optional" | "required">("none");
+  const [editingServicePricingType, setEditingServicePricingType] = useState<"fixed" | "variable">("fixed");
+  const [editingServiceMinPrice, setEditingServiceMinPrice] = useState("");
+  const [editingServiceMaxPrice, setEditingServiceMaxPrice] = useState("");
   const [servicePage, setServicePage] = useState(1);
+  const [duplicateCanonicalTargets, setDuplicateCanonicalTargets] = useState<Record<string, string>>({});
 
   const [receptionistName, setReceptionistName] = useState("");
   const [receptionistShift, setReceptionistShift] = useState("");
@@ -232,6 +253,9 @@ export default function BackendPage() {
     return services
       .filter(s => s.clinic_id === selectedClinicId)
       .sort((a, b) => {
+        const sortA = Number(a.sort_order ?? 0);
+        const sortB = Number(b.sort_order ?? 0);
+        if (sortA !== sortB) return sortA - sortB;
         const catA = (a.category || "").toLowerCase();
         const catB = (b.category || "").toLowerCase();
         if (catA !== catB) {
@@ -239,9 +263,77 @@ export default function BackendPage() {
           if (!catB) return -1;
           return catA < catB ? -1 : 1;
         }
-        return (a.name || "").localeCompare(b.name || "");
+        const nameA = String(a.display_name || a.name || "");
+        const nameB = String(b.display_name || b.name || "");
+        return nameA.localeCompare(nameB);
       });
   }, [services, selectedClinicId]);
+
+  function normalizeReviewName(value: string): string {
+    return value
+      .toLowerCase()
+      .replace(/[^\w\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  const duplicateReview = useMemo(() => {
+    const exactNameGroups = new Map<string, Service[]>();
+    const caseInsensitiveNameGroups = new Map<string, Service[]>();
+    const normalizedNameGroups = new Map<string, Service[]>();
+    const missingCategory: Service[] = [];
+    const missingOrZeroPrice: Service[] = [];
+    const inconsistentSpacingOrPunctuation: Service[] = [];
+
+    for (const service of displayedServices) {
+      const displayName = String(service.display_name || service.name || "").trim();
+      const exactName = displayName;
+      const lowerName = displayName.toLowerCase();
+      const normalizedName = normalizeReviewName(displayName);
+
+      if (!exactNameGroups.has(exactName)) exactNameGroups.set(exactName, []);
+      exactNameGroups.get(exactName)?.push(service);
+
+      if (!caseInsensitiveNameGroups.has(lowerName)) caseInsensitiveNameGroups.set(lowerName, []);
+      caseInsensitiveNameGroups.get(lowerName)?.push(service);
+
+      if (!normalizedNameGroups.has(normalizedName)) normalizedNameGroups.set(normalizedName, []);
+      normalizedNameGroups.get(normalizedName)?.push(service);
+
+      if (!String(service.category || "").trim()) missingCategory.push(service);
+      if (!Number(service.price || 0)) missingOrZeroPrice.push(service);
+
+      const hasSpacingIssue =
+        displayName !== displayName.trim() ||
+        /\s{2,}/.test(displayName) ||
+        /\s+[.,/-]/.test(displayName) ||
+        /[.,/-]\S/.test(displayName);
+      if (hasSpacingIssue) {
+        inconsistentSpacingOrPunctuation.push(service);
+      }
+    }
+
+    const exactDuplicates = [...exactNameGroups.entries()]
+      .filter(([name, rows]) => name && rows.length > 1)
+      .map(([, rows]) => rows);
+    const caseOnlyDuplicates = [...caseInsensitiveNameGroups.values()]
+      .filter((rows) => rows.length > 1 && new Set(rows.map((s) => String(s.display_name || s.name || "").trim())).size > 1);
+    const similarDifferentPrice = [...normalizedNameGroups.values()]
+      .filter((rows) => rows.length > 1)
+      .filter((rows) => {
+        const prices = new Set(rows.map((s) => Number(s.price || 0).toFixed(2)));
+        return prices.size > 1;
+      });
+
+    return {
+      exactDuplicates,
+      caseOnlyDuplicates,
+      similarDifferentPrice,
+      missingCategory,
+      missingOrZeroPrice,
+      inconsistentSpacingOrPunctuation,
+    };
+  }, [displayedServices]);
 
   const existingServiceCategories = useMemo(() => {
     // Categories are per-clinic: only suggest what the selected clinic's
@@ -702,6 +794,16 @@ export default function BackendPage() {
       alert("Please enter a valid service price.");
       return;
     }
+    const parsedVisitCount = Math.max(1, Number(serviceDefaultVisitCount || 1));
+    if (!Number.isFinite(parsedVisitCount)) {
+      alert("Please enter a valid default visit count.");
+      return;
+    }
+    const parsedSortOrder = Number(serviceSortOrder || 0);
+    if (!Number.isFinite(parsedSortOrder)) {
+      alert("Please enter a valid sort order.");
+      return;
+    }
 
     if (!selectedClinicId) {
       alert("Please select a specific clinic before adding a service.");
@@ -711,9 +813,19 @@ export default function BackendPage() {
     const { error } = await supabase.from("services").insert([
       {
         name: serviceName,
+        display_name: serviceDisplayName.trim() || serviceName.trim(),
+        variant: serviceVariant.trim() || null,
         price: parsedPrice,
+        standard_price: parsedPrice,
         clinic_id: selectedClinicId,
         category: canonicalServiceCategory(serviceCategory),
+        category_id: canonicalServiceCategory(serviceCategory),
+        search_keywords: serviceSearchKeywords.trim() || null,
+        common_aliases: serviceCommonAliases.trim() || null,
+        default_visit_count: Math.round(parsedVisitCount),
+        sort_order: Math.round(parsedSortOrder),
+        active_plan_recommended: serviceActivePlanRecommended,
+        is_active: serviceIsActive,
         requires_quantity: serviceRequiresQuantity,
         billing_unit: serviceBillingUnit,
         tooth_selection_mode: serviceToothSelectionMode,
@@ -726,8 +838,16 @@ export default function BackendPage() {
     }
 
     setServiceName("");
+    setServiceDisplayName("");
+    setServiceVariant("");
     setServicePrice("");
     setServiceCategory("");
+    setServiceSearchKeywords("");
+    setServiceCommonAliases("");
+    setServiceDefaultVisitCount("1");
+    setServiceSortOrder("0");
+    setServiceActivePlanRecommended(false);
+    setServiceIsActive(true);
     setServiceBillingUnit("Session");
     setServiceRequiresQuantity(false);
     setServiceToothSelectionMode("none");
@@ -745,30 +865,111 @@ export default function BackendPage() {
       alert("Please enter a valid service price.");
       return;
     }
+    const parsedVisitCount = Math.max(1, Number(editingServiceDefaultVisitCount || 1));
+    if (!Number.isFinite(parsedVisitCount)) {
+      alert("Please enter a valid default visit count.");
+      return;
+    }
+    const parsedSortOrder = Number(editingServiceSortOrder || 0);
+    if (!Number.isFinite(parsedSortOrder)) {
+      alert("Please enter a valid sort order.");
+      return;
+    }
 
-    const { error } = await supabase
+    let parsedMinPrice: number | null = null;
+    let parsedMaxPrice: number | null = null;
+    if (editingServicePricingType === "variable") {
+      parsedMinPrice = editingServiceMinPrice !== "" ? Number(editingServiceMinPrice) : null;
+      parsedMaxPrice = editingServiceMaxPrice !== "" ? Number(editingServiceMaxPrice) : null;
+      if (parsedMinPrice !== null && (!Number.isFinite(parsedMinPrice) || parsedMinPrice < 0)) {
+        alert("Please enter a valid minimum price.");
+        return;
+      }
+      if (parsedMaxPrice !== null && (!Number.isFinite(parsedMaxPrice) || parsedMaxPrice < 0)) {
+        alert("Please enter a valid maximum price.");
+        return;
+      }
+      if (parsedMinPrice !== null && parsedMaxPrice !== null && parsedMinPrice > parsedMaxPrice) {
+        alert("Minimum price cannot exceed maximum price.");
+        return;
+      }
+    }
+
+    const baseUpdate = {
+      name: editingServiceName,
+      display_name: editingServiceDisplayName.trim() || editingServiceName.trim(),
+      variant: editingServiceVariant.trim() || null,
+      price: parsedPrice,
+      standard_price: parsedPrice,
+      category: canonicalServiceCategory(editingServiceCategory),
+      category_id: canonicalServiceCategory(editingServiceCategory),
+      search_keywords: editingServiceSearchKeywords.trim() || null,
+      common_aliases: editingServiceCommonAliases.trim() || null,
+      default_visit_count: Math.round(parsedVisitCount),
+      sort_order: Math.round(parsedSortOrder),
+      active_plan_recommended: editingServiceActivePlanRecommended,
+      is_active: editingServiceIsActive,
+      canonical_service_id: editingServiceCanonicalId || null,
+      requires_quantity: editingServiceRequiresQuantity,
+      billing_unit: editingServiceBillingUnit,
+      tooth_selection_mode: editingServiceToothSelectionMode,
+    };
+
+    const pricingFields = {
+      pricing_type: editingServicePricingType,
+      min_price: editingServicePricingType === "variable" ? parsedMinPrice : null,
+      max_price: editingServicePricingType === "variable" ? parsedMaxPrice : null,
+    };
+
+    let { error } = await supabase
       .from("services")
-      .update({
-        name: editingServiceName,
-        price: parsedPrice,
-        category: canonicalServiceCategory(editingServiceCategory),
-        requires_quantity: editingServiceRequiresQuantity,
-        billing_unit: editingServiceBillingUnit,
-        tooth_selection_mode: editingServiceToothSelectionMode,
-      })
+      .update({ ...baseUpdate, ...pricingFields })
       .eq("id", id);
 
     if (error) {
-      alert("Error updating service");
-      return;
+      // If the variable-pricing migration hasn't been applied yet, fall back
+      // to saving the base fields so existing services still update correctly.
+      const isMissingColumn =
+        error.message?.includes("column") &&
+        (error.message?.includes("pricing_type") ||
+          error.message?.includes("min_price") ||
+          error.message?.includes("max_price"));
+      if (isMissingColumn) {
+        const fallback = await supabase
+          .from("services")
+          .update(baseUpdate)
+          .eq("id", id);
+        if (fallback.error) {
+          alert(`Error updating service: ${fallback.error.message}`);
+          return;
+        }
+        alert(
+          "Service saved (without pricing range — please apply the variable-pricing migration to Supabase to enable min/max price)."
+        );
+      } else {
+        alert(`Error updating service: ${error.message}`);
+        return;
+      }
     }
 
     setEditingServiceId("");
     setEditingServiceName("");
+    setEditingServiceDisplayName("");
+    setEditingServiceVariant("");
     setEditingServicePrice("");
+    setEditingServiceSearchKeywords("");
+    setEditingServiceCommonAliases("");
+    setEditingServiceDefaultVisitCount("1");
+    setEditingServiceSortOrder("0");
+    setEditingServiceActivePlanRecommended(false);
+    setEditingServiceIsActive(true);
+    setEditingServiceCanonicalId("");
     setEditingServiceBillingUnit("Session");
     setEditingServiceRequiresQuantity(false);
     setEditingServiceToothSelectionMode("none");
+    setEditingServicePricingType("fixed");
+    setEditingServiceMinPrice("");
+    setEditingServiceMaxPrice("");
     loadAll();
   }
 
@@ -788,6 +989,35 @@ export default function BackendPage() {
       setEditingServiceId("");
       setEditingServiceName("");
       setEditingServicePrice("");
+    }
+    loadAll();
+  }
+
+  async function markServiceInactive(id: string) {
+    const { error } = await supabase
+      .from("services")
+      .update({ is_active: false })
+      .eq("id", id);
+    if (error) {
+      alert(`Could not mark inactive: ${error.message || "unknown error"}`);
+      return;
+    }
+    loadAll();
+  }
+
+  async function mapServiceToCanonical(serviceId: string, canonicalServiceId: string) {
+    if (!canonicalServiceId || canonicalServiceId === serviceId) {
+      alert("Choose a different canonical service.");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("services")
+      .update({ canonical_service_id: canonicalServiceId })
+      .eq("id", serviceId);
+    if (error) {
+      alert(`Could not map canonical service: ${error.message || "unknown error"}`);
+      return;
     }
     loadAll();
   }
@@ -1666,7 +1896,13 @@ export default function BackendPage() {
             <input
               value={serviceName}
               onChange={(e) => setServiceName(e.target.value)}
-              placeholder="Service name"
+              placeholder="Internal service name"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
+            <input
+              value={serviceDisplayName}
+              onChange={(e) => setServiceDisplayName(e.target.value)}
+              placeholder="Display name (shown in POS)"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
             <input
@@ -1677,10 +1913,28 @@ export default function BackendPage() {
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
             <input
+              value={serviceVariant}
+              onChange={(e) => setServiceVariant(e.target.value)}
+              placeholder="Variant / short description (optional)"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+            />
+            <input
               list="service-category-options"
               value={serviceCategory}
               onChange={(e) => setServiceCategory(e.target.value)}
               placeholder="Category (pick existing or type a new one)"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
+            />
+            <input
+              value={serviceSearchKeywords}
+              onChange={(e) => setServiceSearchKeywords(e.target.value)}
+              placeholder="Search keywords (comma-separated)"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
+            />
+            <input
+              value={serviceCommonAliases}
+              onChange={(e) => setServiceCommonAliases(e.target.value)}
+              placeholder="Common aliases (comma-separated)"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
             />
             <datalist id="service-category-options">
@@ -1690,6 +1944,25 @@ export default function BackendPage() {
             </datalist>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-slate-500">Default Visits</label>
+              <input
+                type="number"
+                min="1"
+                value={serviceDefaultVisitCount}
+                onChange={(e) => setServiceDefaultVisitCount(e.target.value)}
+                className="w-20 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-slate-500">Sort Order</label>
+              <input
+                type="number"
+                value={serviceSortOrder}
+                onChange={(e) => setServiceSortOrder(e.target.value)}
+                className="w-20 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
+              />
+            </div>
             <div className="flex items-center gap-2">
               <label className="text-xs font-semibold text-slate-500">Billing Unit</label>
               <select
@@ -1723,6 +1996,24 @@ export default function BackendPage() {
               />
               <span className="text-sm text-slate-700">Requires Quantity</span>
             </label>
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={serviceActivePlanRecommended}
+                onChange={(e) => setServiceActivePlanRecommended(e.target.checked)}
+                className="h-4 w-4 rounded accent-cyan-600"
+              />
+              <span className="text-sm text-slate-700">Active Plan recommended</span>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={serviceIsActive}
+                onChange={(e) => setServiceIsActive(e.target.checked)}
+                className="h-4 w-4 rounded accent-cyan-600"
+              />
+              <span className="text-sm text-slate-700">Active</span>
+            </label>
           </div>
           <button
             onClick={addService}
@@ -1739,14 +2030,68 @@ export default function BackendPage() {
                     <input
                       value={editingServiceName}
                       onChange={(e) => setEditingServiceName(e.target.value)}
-                      placeholder="Service name"
+                      placeholder="Internal service name"
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
+                    <input
+                      value={editingServiceDisplayName}
+                      onChange={(e) => setEditingServiceDisplayName(e.target.value)}
+                      placeholder="Display name"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
                     <input
                       type="number"
                       value={editingServicePrice}
                       onChange={(e) => setEditingServicePrice(e.target.value)}
-                      placeholder="Price"
+                      placeholder={editingServicePricingType === "variable" ? "Suggested price" : "Price"}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
+                    <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex items-center gap-3">
+                        <label className="text-xs font-semibold text-slate-500">Pricing Type</label>
+                        <select
+                          value={editingServicePricingType}
+                          onChange={(e) => setEditingServicePricingType(e.target.value as "fixed" | "variable")}
+                          className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none"
+                        >
+                          <option value="fixed">Fixed price</option>
+                          <option value="variable">Variable range</option>
+                        </select>
+                      </div>
+                      {editingServicePricingType === "variable" && (
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1">
+                            <label className="mb-1 block text-[11px] font-semibold text-violet-600">Min Price</label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={editingServiceMinPrice}
+                              onChange={(e) => setEditingServiceMinPrice(e.target.value)}
+                              placeholder="Min"
+                              className="w-full rounded-xl border border-violet-200 px-3 py-2 text-sm outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"
+                            />
+                          </div>
+                          <span className="mt-5 text-slate-400">–</span>
+                          <div className="flex-1">
+                            <label className="mb-1 block text-[11px] font-semibold text-violet-600">Max Price</label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={editingServiceMaxPrice}
+                              onChange={(e) => setEditingServiceMaxPrice(e.target.value)}
+                              placeholder="Max"
+                              className="w-full rounded-xl border border-violet-200 px-3 py-2 text-sm outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <input
+                      value={editingServiceVariant}
+                      onChange={(e) => setEditingServiceVariant(e.target.value)}
+                      placeholder="Variant / short description"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
                     <input
@@ -1756,7 +2101,52 @@ export default function BackendPage() {
                       placeholder="Category (pick existing or type a new one)"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
+                    <input
+                      value={editingServiceSearchKeywords}
+                      onChange={(e) => setEditingServiceSearchKeywords(e.target.value)}
+                      placeholder="Search keywords"
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
+                    <input
+                      value={editingServiceCommonAliases}
+                      onChange={(e) => setEditingServiceCommonAliases(e.target.value)}
+                      placeholder="Common aliases"
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    />
+                    <select
+                      value={editingServiceCanonicalId}
+                      onChange={(e) => setEditingServiceCanonicalId(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                    >
+                      <option value="">Canonical service: none</option>
+                      {displayedServices
+                        .filter((s) => s.id !== service.id)
+                        .map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {String(s.display_name || s.name || "")}
+                          </option>
+                        ))}
+                    </select>
                     <div className="flex flex-wrap items-center gap-4">
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs font-semibold text-slate-500">Default Visits</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={editingServiceDefaultVisitCount}
+                          onChange={(e) => setEditingServiceDefaultVisitCount(e.target.value)}
+                          className="w-20 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs font-semibold text-slate-500">Sort Order</label>
+                        <input
+                          type="number"
+                          value={editingServiceSortOrder}
+                          onChange={(e) => setEditingServiceSortOrder(e.target.value)}
+                          className="w-20 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
+                        />
+                      </div>
                       <div className="flex items-center gap-2">
                         <label className="text-xs font-semibold text-slate-500">Billing Unit</label>
                         <select
@@ -1790,6 +2180,24 @@ export default function BackendPage() {
                         />
                         <span className="text-sm text-slate-700">Requires Quantity</span>
                       </label>
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={editingServiceActivePlanRecommended}
+                          onChange={(e) => setEditingServiceActivePlanRecommended(e.target.checked)}
+                          className="h-4 w-4 rounded accent-cyan-600"
+                        />
+                        <span className="text-sm text-slate-700">Plan recommended</span>
+                      </label>
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={editingServiceIsActive}
+                          onChange={(e) => setEditingServiceIsActive(e.target.checked)}
+                          className="h-4 w-4 rounded accent-cyan-600"
+                        />
+                        <span className="text-sm text-slate-700">Active</span>
+                      </label>
                     </div>
                     <div className="flex gap-2">
                       <button
@@ -1809,11 +2217,22 @@ export default function BackendPage() {
                 ) : (
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="text-sm font-semibold text-slate-900">{service.name}</p>
+                      <p className="text-sm font-semibold text-slate-900">
+                        {service.display_name || service.name}
+                        {service.is_active === false && (
+                          <span className="ml-2 rounded-full bg-slate-200 px-1.5 py-0.5 text-[11px] font-semibold text-slate-600">Inactive</span>
+                        )}
+                      </p>
+                      {service.variant && (
+                        <p className="text-xs text-slate-500">{service.variant}</p>
+                      )}
                       <p className="flex items-center gap-1.5 text-sm text-slate-500">
                         AED {Number(service.price || 0).toFixed(2)} / {service.billing_unit || "Session"}
                         {service.category && (
                           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-semibold text-slate-600">{service.category}</span>
+                        )}
+                        {Number(service.default_visit_count || 1) > 1 && (
+                          <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-xs font-semibold text-indigo-700">Visits {Number(service.default_visit_count)}</span>
                         )}
                         {service.requires_quantity && (
                           <span className="rounded-full bg-cyan-100 px-1.5 py-0.5 text-xs font-semibold text-cyan-700">Qty</span>
@@ -1823,6 +2242,9 @@ export default function BackendPage() {
                             Teeth {service.tooth_selection_mode === "required" ? "On" : "Opt"}
                           </span>
                         )}
+                        {service.active_plan_recommended && (
+                          <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-xs font-semibold text-emerald-700">Plan</span>
+                        )}
                       </p>
                     </div>
                     <div className="flex gap-2">
@@ -1830,11 +2252,23 @@ export default function BackendPage() {
                         onClick={() => {
                           setEditingServiceId(service.id);
                           setEditingServiceName(service.name || "");
+                          setEditingServiceDisplayName(service.display_name || service.name || "");
+                          setEditingServiceVariant(service.variant || service.description || "");
                           setEditingServicePrice(String(service.price ?? ""));
                           setEditingServiceCategory(service.category || "");
+                          setEditingServiceSearchKeywords(service.search_keywords || "");
+                          setEditingServiceCommonAliases(service.common_aliases || "");
+                          setEditingServiceDefaultVisitCount(String(service.default_visit_count || 1));
+                          setEditingServiceSortOrder(String(service.sort_order ?? 0));
+                          setEditingServiceActivePlanRecommended(Boolean(service.active_plan_recommended));
+                          setEditingServiceIsActive(service.is_active !== false);
+                          setEditingServiceCanonicalId(service.canonical_service_id || "");
                           setEditingServiceBillingUnit(service.billing_unit || "Session");
                           setEditingServiceRequiresQuantity(service.requires_quantity ?? false);
                           setEditingServiceToothSelectionMode((service.tooth_selection_mode as "none" | "optional" | "required") || "none");
+                          setEditingServicePricingType((service.pricing_type as "fixed" | "variable") || "fixed");
+                          setEditingServiceMinPrice(service.min_price != null ? String(service.min_price) : "");
+                          setEditingServiceMaxPrice(service.max_price != null ? String(service.max_price) : "");
                         }}
                         className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600"
                       >
@@ -1846,6 +2280,14 @@ export default function BackendPage() {
                       >
                         Delete
                       </button>
+                      {service.is_active !== false && (
+                        <button
+                          onClick={() => markServiceInactive(service.id)}
+                          className="rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white"
+                        >
+                          Inactivate
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1871,6 +2313,78 @@ export default function BackendPage() {
               </button>
             </div>
           )}
+
+          <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <h3 className="text-sm font-semibold text-amber-900">Duplicate & Quality Review</h3>
+            <p className="mt-1 text-xs text-amber-800">
+              Review only. Historical receipts may reference old rows, so do not delete duplicates blindly.
+            </p>
+
+            <div className="mt-3 space-y-3 text-xs text-slate-700">
+              <p>Exact duplicate names: <span className="font-semibold">{duplicateReview.exactDuplicates.length}</span></p>
+              <p>Case-only duplicates: <span className="font-semibold">{duplicateReview.caseOnlyDuplicates.length}</span></p>
+              <p>Similar names, different prices: <span className="font-semibold">{duplicateReview.similarDifferentPrice.length}</span></p>
+              <p>Missing categories: <span className="font-semibold">{duplicateReview.missingCategory.length}</span></p>
+              <p>Missing/zero prices: <span className="font-semibold">{duplicateReview.missingOrZeroPrice.length}</span></p>
+              <p>Inconsistent spacing/punctuation: <span className="font-semibold">{duplicateReview.inconsistentSpacingOrPunctuation.length}</span></p>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {[...duplicateReview.exactDuplicates, ...duplicateReview.caseOnlyDuplicates, ...duplicateReview.similarDifferentPrice]
+                .slice(0, 12)
+                .map((group, index) => (
+                  <div key={`dup-${index}`} className="rounded-xl border border-amber-200 bg-white p-3">
+                    <p className="text-xs font-semibold text-slate-700">
+                      {group.map((s) => String(s.display_name || s.name || "")).join(" · ")}
+                    </p>
+                    <div className="mt-2 space-y-2">
+                      {group.map((service) => {
+                        const mappedValue = duplicateCanonicalTargets[service.id] || service.canonical_service_id || "";
+                        return (
+                          <div key={service.id} className="rounded-lg border border-slate-200 p-2">
+                            <p className="text-xs text-slate-700">
+                              {String(service.display_name || service.name || "")} — AED {Number(service.price || 0).toFixed(2)}
+                            </p>
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => markServiceInactive(service.id)}
+                                className="rounded-lg bg-amber-500 px-2 py-1 text-[11px] font-semibold text-white"
+                              >
+                                Mark inactive
+                              </button>
+                              <select
+                                value={mappedValue}
+                                onChange={(e) =>
+                                  setDuplicateCanonicalTargets((current) => ({ ...current, [service.id]: e.target.value }))
+                                }
+                                className="rounded-lg border border-slate-200 px-2 py-1 text-[11px]"
+                              >
+                                <option value="">Map to canonical service</option>
+                                {displayedServices
+                                  .filter((s) => s.id !== service.id)
+                                  .map((s) => (
+                                    <option key={s.id} value={s.id}>
+                                      {String(s.display_name || s.name || "")}
+                                    </option>
+                                  ))}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => mapServiceToCanonical(service.id, mappedValue)}
+                                className="rounded-lg bg-slate-900 px-2 py-1 text-[11px] font-semibold text-white"
+                              >
+                                Save mapping
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </div>
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-5">
