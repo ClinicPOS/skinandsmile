@@ -1609,7 +1609,7 @@ export default function ReceiptsPage() {
     if (receiptIds.length > 0) {
       const { data: receiptItemsData, error: receiptItemsError } = await supabase
         .from("receipt_items")
-        .select("receipt_id, service_id")
+        .select("receipt_id, service_id, quantity")
         .in("receipt_id", receiptIds);
 
       if (receiptItemsError) {
@@ -1639,12 +1639,14 @@ export default function ReceiptsPage() {
           if (!receiptId || !serviceName) {
             return;
           }
+          const qty = Math.max(1, Number(item.quantity || 1));
+          const serviceLabel = qty > 1 ? `${serviceName} x${qty}` : serviceName;
 
           if (!treatmentMap.has(receiptId)) {
             treatmentMap.set(receiptId, []);
           }
 
-          treatmentMap.get(receiptId)?.push(serviceName);
+          treatmentMap.get(receiptId)?.push(serviceLabel);
         });
       }
     }
@@ -3895,7 +3897,7 @@ export default function ReceiptsPage() {
       .map((service, index) => {
         const qty = service.quantity ?? 1;
         const lineTotal = Number(service.price) * qty;
-        const qtyLabel = service.requires_quantity && qty > 1
+        const qtyLabel = qty > 1
           ? ` <span style="font-size:9px;">×${qty} ${service.billing_unit || "Unit"}</span>`
           : "";
         const teethLabel = normalizeTeethForItem(service, index);
@@ -4902,7 +4904,7 @@ export default function ReceiptsPage() {
           </div>
         </div>
 
-        <aside className="space-y-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6 lg:sticky lg:top-24 lg:self-start">
+        <aside className="space-y-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6 lg:sticky lg:top-24 lg:self-start lg:z-20">
           <div className="rounded-3xl border border-teal-300 bg-gradient-to-br from-teal-100 to-cyan-100 p-4">
             <div className="flex items-center justify-between">
               <div>
