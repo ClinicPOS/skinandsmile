@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx-js-style";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service } from "../../lib/types";
+import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service, PaymentAllocation, PaymentAllocationRefund, PaymentRecord } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal } from "../../components/pos-modals";
 import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
@@ -16,12 +16,30 @@ import { printPaymentReceipt } from "../../lib/print-payment-receipt";
 import { availableCredit } from "../../lib/patient-credits";
 import { COUNTRIES } from "../../lib/countries";
 import { getAestheticServiceCategory } from "../../lib/service-categories";
-import { calculateInstallmentFee, getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
+import {
+  buildPaymentAllocations,
+  paymentSummaryLabel,
+  paymentVariantLabel,
+  normalizeProviderReference,
+  PaymentAllocationDraft,
+  PaymentMethodVariant,
+  referenceRequiredForVariant,
+  validatePaymentAllocations,
+} from "../../lib/payment-allocation";
+import { fromMinorUnits, toMinorUnits } from "../../lib/money";
+import { getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
 import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 
-const paymentOptions = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Split Payment"];
+const paymentOptions = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"];
+const allocationMethodOptions: Array<{ value: PaymentMethodVariant; label: string }> = [
+  { value: "cash", label: "Cash" },
+  { value: "card", label: "Card" },
+  { value: "tabby_standard", label: "Tabby" },
+  { value: "tabby_card", label: "Tabby Card" },
+  { value: "tamara", label: "Tamara" },
+];
 
 const POS_REGISTER_SESSION_KEY = "posRegisterSession";
 const POS_RECENT_SERVICES_KEY = "posRecentServices";
@@ -81,7 +99,6 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
     tabby: 0,
     tabbyCard: 0,
     tamara: 0,
-    tamaraCard: 0,
     insurance: 0,
     bankTransfer: 0,
     addOn: 0,
@@ -103,8 +120,6 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
       breakdown.tabbyCard = safeOther;
     } else if (otherMethod.includes("tabby")) {
       breakdown.tabby = safeOther;
-    } else if (otherMethod.includes("tamara card")) {
-      breakdown.tamaraCard = safeOther;
     } else if (otherMethod.includes("tamara")) {
       breakdown.tamara = safeOther;
     } else if (otherMethod.includes("insurance")) {
@@ -127,12 +142,6 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
   if (paymentMethod.includes("tabby")) {
     breakdown.tabby = totalAmount;
     breakdown.mop = "TABBY";
-    return breakdown;
-  }
-
-  if (paymentMethod.includes("tamara card")) {
-    breakdown.tamaraCard = totalAmount;
-    breakdown.mop = "TAMARA CARD";
     return breakdown;
   }
 
@@ -217,6 +226,20 @@ function buildServiceSearchText(service: Service): string {
   ].filter(Boolean).join(" "));
 }
 
+function createAllocationDraftRow(
+  methodVariant: PaymentMethodVariant | "",
+  invoiceAllocationAmountInput = ""
+): PaymentAllocationDraft {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    methodVariant,
+    invoiceAllocationAmountInput,
+    providerReferenceNumber: "",
+    terminalAuthorizationCode: "",
+    cardNetwork: "",
+  };
+}
+
 export default function ReceiptsPage() {
   const { accessSession, isLoaded, isManager, allowedClinicId } = useClinicAccess();
   const [patients, setPatients] = useState<any[]>([]);
@@ -268,14 +291,9 @@ export default function ReceiptsPage() {
   const [collapsedServiceCategories, setCollapsedServiceCategories] = useState<Record<string, boolean>>({});
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("");
-  const [tabbyReferenceInput, setTabbyReferenceInput] = useState("");
-  const [tamaraReferenceInput, setTamaraReferenceInput] = useState("");
-  const [cashReceivedInput, setCashReceivedInput] = useState("");
-  const [payTodayInput, setPayTodayInput] = useState("");
+  const [paymentAllocationDrafts, setPaymentAllocationDrafts] = useState<PaymentAllocationDraft[]>([]);
+  const [paymentValidationErrors, setPaymentValidationErrors] = useState<string[]>([]);
   const [applyCreditChecked, setApplyCreditChecked] = useState(false);
-  const [mixedCashInput, setMixedCashInput] = useState("");
-  const [mixedOtherMethod, setMixedOtherMethod] = useState("Card");
-  const [mixedOtherAmountInput, setMixedOtherAmountInput] = useState("");
   const [discountInput, setDiscountInput] = useState("");
   const [discountType, setDiscountType] = useState<"AED" | "%">("AED");
   const [showPrintModal, setShowPrintModal] = useState(false);
@@ -572,7 +590,17 @@ export default function ReceiptsPage() {
   }
 
   async function loadData() {
-    const [patientRows, clinicFileRows, doctorResult, receptionistResult, serviceResult, clinicResult, balancesResult, balancePaymentsResult, patientCreditsResult] = await Promise.allSettled([
+    const [
+      patientRows,
+      clinicFileRows,
+      doctorResult,
+      receptionistResult,
+      serviceResult,
+      clinicResult,
+      balancesResult,
+      balancePaymentsResult,
+      patientCreditsResult,
+    ] = await Promise.allSettled([
       fetchAllRows("patients", "*"),
       fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no, mrn"),
       supabase.from("doctors").select("*"),
@@ -1001,16 +1029,12 @@ export default function ReceiptsPage() {
   const preVatTotal = subtotal - discountAmount;
   const vat = activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? Math.round(preVatTotal * 0.05 * 100) / 100 : 0;
   const total = preVatTotal + vat;
-  const installmentFeeProvider = selectedPaymentMethod === "Split Payment"
-    ? getInstallmentFeeProvider(mixedOtherMethod)
-    : getInstallmentFeeProvider(selectedPaymentMethod);
-  const installmentFeeBase = installmentFeeProvider
-    ? selectedPaymentMethod === "Split Payment"
-      ? getMixedOtherAmount()
-      : getAmountDueToday()
-    : 0;
-  const installmentFee = calculateInstallmentFee(installmentFeeBase);
-  const totalWithInstallmentFee = Math.round((total + installmentFee) * 100) / 100;
+  const previewAllocations = buildPaymentAllocations(paymentAllocationDrafts, getAmountDueToday(), total, vat);
+  const livePaymentValidation = validatePaymentAllocations(paymentAllocationDrafts, getAmountDueToday());
+  const isAllocationBalanced = toMinorUnits(getAmountDueToday()) === previewAllocations.reduce((sum, row) => sum + toMinorUnits(row.invoiceAllocationAmount), 0);
+  const paymentFeeTotal = previewAllocations.reduce((sum, row) => sum + row.feeAmount, 0);
+  const paymentFeeTotalRounded = Math.round(paymentFeeTotal * 100) / 100;
+  const totalCustomerChargedToday = Math.round((getAmountDueToday() + paymentFeeTotalRounded) * 100) / 100;
 
   const clinicServices = useMemo(() => {
     if (!activeClinic) return [] as Service[];
@@ -1436,9 +1460,8 @@ export default function ReceiptsPage() {
     setActiveHoldId("");
     setDoctorId("");
     setSelectedPaymentMethod("");
-    setTabbyReferenceInput("");
-    setTamaraReferenceInput("");
-    setPayTodayInput("");
+    setPaymentAllocationDrafts([]);
+    setPaymentValidationErrors([]);
     setApplyCreditChecked(false);
     setNotes("");
     setSelectedServices([]);
@@ -1556,6 +1579,39 @@ export default function ReceiptsPage() {
 
     const receipts = receiptsData || [];
     const receiptIds = receipts.map((r) => r.id).filter(Boolean);
+    let paymentRecordsForDay: PaymentRecord[] = [];
+    let paymentAllocationsForDay: PaymentAllocation[] = [];
+    let paymentAllocationRefundsForDay: PaymentAllocationRefund[] = [];
+
+    const { data: paymentRecordsData, error: paymentRecordsError } = await supabase
+      .from("payment_records")
+      .select("*")
+      .eq("clinic_id", activeClinic.id)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso)
+      .order("created_at", { ascending: true });
+    if (paymentRecordsError) {
+      console.warn("Failed loading payment records for report", paymentRecordsError);
+    } else {
+      paymentRecordsForDay = (paymentRecordsData || []) as PaymentRecord[];
+      const paymentRecordIds = paymentRecordsForDay.map((row) => row.id);
+      if (paymentRecordIds.length > 0) {
+        const [allocRes, refundRes] = await Promise.all([
+          supabase.from("payment_allocations").select("*").in("payment_id", paymentRecordIds),
+          supabase.from("payment_allocation_refunds").select("*").in("payment_id", paymentRecordIds),
+        ]);
+        if (allocRes.error) {
+          console.warn("Failed loading payment allocations for report", allocRes.error);
+        } else {
+          paymentAllocationsForDay = (allocRes.data || []) as PaymentAllocation[];
+        }
+        if (refundRes.error) {
+          console.warn("Failed loading allocation refunds for report", refundRes.error);
+        } else {
+          paymentAllocationRefundsForDay = (refundRes.data || []) as PaymentAllocationRefund[];
+        }
+      }
+    }
     const patientIds = [...new Set(receipts.map((r) => r.patient_id).filter(Boolean))];
     const doctorIds = [...new Set(receipts.map((r) => r.doctor_id).filter(Boolean))];
     const patientMap = new Map<string, { 
@@ -1929,7 +1985,6 @@ export default function ReceiptsPage() {
       "Tabby Fee",
       "Tamara",
       "Tamara Transaction Reference",
-      "Tamara Card",
       "Tamara Fee",
       "Insurance",
       "Refund Amount",
@@ -1956,7 +2011,6 @@ export default function ReceiptsPage() {
     let tabbyCardTotal = 0;
     let tabbyFeeTotal = 0;
     let tamaraTotal = 0;
-    let tamaraCardTotal = 0;
     let tamaraFeeTotal = 0;
     let insuranceTotal = 0;
     let bankTransferTotal = 0;
@@ -1997,7 +2051,6 @@ export default function ReceiptsPage() {
       tabbyCardTotal += breakdown.tabbyCard;
       tabbyFeeTotal += gatewayProvider.includes("tabby") ? gatewayFee : 0;
       tamaraTotal += breakdown.tamara;
-      tamaraCardTotal += breakdown.tamaraCard;
       tamaraFeeTotal += gatewayProvider.includes("tamara") ? gatewayFee : 0;
       insuranceTotal += breakdown.insurance;
       bankTransferTotal += breakdown.bankTransfer;
@@ -2031,7 +2084,6 @@ export default function ReceiptsPage() {
         gatewayProvider.includes("tabby") ? gatewayFee : 0,
         breakdown.tamara,
         extractTransactionReference(paymentMethodRaw, "tamara"),
-        breakdown.tamaraCard,
         gatewayProvider.includes("tamara") ? gatewayFee : 0,
         breakdown.insurance,
         refundAmount,
@@ -2042,7 +2094,7 @@ export default function ReceiptsPage() {
       ]);
     });
 
-    const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tabbyFeeTotal + tamaraTotal + tamaraCardTotal + tamaraFeeTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal + depositsReceivedTotal + treatmentPlanPaymentsTotal;
+    const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tabbyFeeTotal + tamaraTotal + tamaraFeeTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal + depositsReceivedTotal + treatmentPlanPaymentsTotal;
     const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
 
     const workbook = XLSX.utils.book_new();
@@ -2104,7 +2156,6 @@ export default function ReceiptsPage() {
       ["Tabby Card", tabbyCardTotal],
       ["Tabby Fee", tabbyFeeTotal],
       ["Tamara", tamaraTotal],
-      ["Tamara Card", tamaraCardTotal],
       ["Tamara Fee", tamaraFeeTotal],
       ["Insurance", insuranceTotal],
       ["Bank Transfer", bankTransferTotal],
@@ -2417,6 +2468,214 @@ export default function ReceiptsPage() {
     }
     XLSX.utils.book_append_sheet(workbook, planPaymentSheet, "Treatment Plan Payments");
 
+    if (paymentRecordsForDay.length > 0) {
+      const receiptMap = new Map(receipts.map((receipt) => [String(receipt.id), receipt]));
+      const receptionistNameMap = new Map(receptionistRows.map((row) => [String(row.id), String(row.name || "")]));
+      const allocationsByPaymentId = new Map<string, PaymentAllocation[]>();
+      paymentAllocationsForDay.forEach((row) => {
+        const key = String(row.payment_id || "");
+        if (!allocationsByPaymentId.has(key)) allocationsByPaymentId.set(key, []);
+        allocationsByPaymentId.get(key)?.push(row);
+      });
+      const refundsByPaymentId = new Map<string, PaymentAllocationRefund[]>();
+      paymentAllocationRefundsForDay.forEach((row) => {
+        const key = String(row.payment_id || "");
+        if (!refundsByPaymentId.has(key)) refundsByPaymentId.set(key, []);
+        refundsByPaymentId.get(key)?.push(row);
+      });
+
+      const transactionHeaders = [
+        "Transaction Date & Time",
+        "Payment ID",
+        "Invoice/Treatment ID",
+        "Patient Name",
+        "Patient Number",
+        "Clinic",
+        "Cashier/User",
+        "Treatment Net Amount",
+        "VAT Amount",
+        "Invoice Amount Settled",
+        "Payment Method Summary",
+        "Is Split",
+        "Total Payment Fee",
+        "Total Customer Charged",
+        "Total Refunded",
+        "Payment Status",
+      ];
+      const transactionRows = paymentRecordsForDay.map((payment) => {
+        const receipt = receiptMap.get(String(payment.receipt_id || ""));
+        const patient = patientMap.get(String(receipt?.patient_id || ""));
+        const allocationRows = allocationsByPaymentId.get(String(payment.id || "")) || [];
+        const treatmentNet = allocationRows.reduce((sum, row) => sum + Number(row.treatment_net_amount || 0), 0);
+        const refundedTotal = (refundsByPaymentId.get(String(payment.id || "")) || []).reduce(
+          (sum, row) => sum + Number(row.total_returned_amount || 0),
+          0
+        );
+        return [
+          new Date(payment.created_at || now).toLocaleString("en-GB", { timeZone: "Asia/Dubai" }),
+          payment.id,
+          payment.receipt_id,
+          patient?.name || "",
+          patient?.patient_number || "",
+          activeClinic.name,
+          receptionistNameMap.get(String(payment.receptionist_id || "")) || "",
+          treatmentNet,
+          Number(payment.total_vat_amount || 0),
+          Number(payment.total_invoice_amount_settled || 0),
+          payment.payment_method_summary || "",
+          payment.is_split ? "Yes" : "No",
+          Number(payment.total_payment_fee_amount || 0),
+          Number(payment.total_customer_charged_amount || 0),
+          refundedTotal,
+          payment.status || "",
+        ];
+      });
+      const transactionSheet = XLSX.utils.aoa_to_sheet([transactionHeaders, ...transactionRows]);
+      transactionSheet["!autofilter"] = { ref: `A1:P${Math.max(2, transactionRows.length + 1)}` };
+      transactionSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+      transactionSheet["!cols"] = transactionHeaders.map((header) => ({ wch: Math.max(14, header.length + 2) }));
+      XLSX.utils.book_append_sheet(workbook, transactionSheet, "Transactions");
+
+      const allocationHeaders = [
+        "Transaction Date & Time",
+        "Payment ID",
+        "Allocation ID",
+        "Invoice/Treatment ID",
+        "Clinic",
+        "Cashier/User",
+        "Payment Method Group",
+        "Payment Method Variant",
+        "Card Network",
+        "Treatment Net Amount Allocated",
+        "VAT Allocated",
+        "Invoice Amount Allocated",
+        "Fee Rate",
+        "Fee Amount",
+        "Customer Charged Amount",
+        "Provider Reference Number",
+        "Terminal Authorization Code",
+        "Allocation Status",
+        "Refunded Treatment Amount",
+        "Refunded VAT Amount",
+        "Refunded Fee Amount",
+        "Net Customer Amount After Refunds",
+      ];
+      const allocationRows = paymentAllocationsForDay.map((row) => {
+        const payment = paymentRecordsForDay.find((record) => String(record.id) === String(row.payment_id));
+        const allocationRefunds = paymentAllocationRefundsForDay.filter(
+          (refund) => String(refund.payment_allocation_id) === String(row.id)
+        );
+        const totalAllocationRefunded = allocationRefunds.reduce((sum, refund) => sum + Number(refund.total_returned_amount || 0), 0);
+        return [
+          new Date(payment?.created_at || now).toLocaleString("en-GB", { timeZone: "Asia/Dubai" }),
+          row.payment_id,
+          row.id,
+          payment?.receipt_id || "",
+          activeClinic.name,
+          receptionistNameMap.get(String(payment?.receptionist_id || "")) || "",
+          row.method_group,
+          row.method_variant,
+          row.card_network || "",
+          Number(row.treatment_net_amount || 0),
+          Number(row.vat_amount || 0),
+          Number(row.invoice_allocation_amount || 0),
+          Number(row.fee_rate || 0),
+          Number(row.fee_amount || 0),
+          Number(row.customer_charged_amount || 0),
+          row.provider_reference_number || "",
+          row.terminal_authorization_code || "",
+          row.status || "",
+          Number(row.refunded_treatment_amount || 0),
+          Number(row.refunded_vat_amount || 0),
+          Number(row.refunded_fee_amount || 0),
+          Math.round((Number(row.customer_charged_amount || 0) - totalAllocationRefunded) * 100) / 100,
+        ];
+      });
+      const allocationSheet = XLSX.utils.aoa_to_sheet([allocationHeaders, ...allocationRows]);
+      allocationSheet["!autofilter"] = { ref: `A1:V${Math.max(2, allocationRows.length + 1)}` };
+      allocationSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+      allocationSheet["!cols"] = allocationHeaders.map((header) => ({ wch: Math.max(14, header.length + 2) }));
+      XLSX.utils.book_append_sheet(workbook, allocationSheet, "Payment Allocations");
+
+      const refundHeaders = [
+        "Refund Date & Time",
+        "Refund ID",
+        "Original Payment ID",
+        "Original Allocation ID",
+        "Invoice/Treatment ID",
+        "Payment Method Group",
+        "Payment Method Variant",
+        "Refunded Treatment Amount",
+        "Refunded VAT Amount",
+        "Reversed Payment Fee",
+        "Total Returned To Customer",
+        "Provider Reference",
+        "Refund Reason",
+        "Processed By",
+        "Refund Status",
+      ];
+      const refundRows = paymentAllocationRefundsForDay.map((row) => {
+        const allocation = paymentAllocationsForDay.find((allocationRow) => String(allocationRow.id) === String(row.payment_allocation_id));
+        return [
+          new Date(row.created_at || now).toLocaleString("en-GB", { timeZone: "Asia/Dubai" }),
+          row.id,
+          row.payment_id,
+          row.payment_allocation_id,
+          row.receipt_id,
+          allocation?.method_group || "",
+          allocation?.method_variant || "",
+          Number(row.refunded_treatment_amount || 0),
+          Number(row.refunded_vat_amount || 0),
+          Number(row.reversed_fee_amount || 0),
+          Number(row.total_returned_amount || 0),
+          allocation?.provider_reference_number || "",
+          row.reason || "",
+          receptionistNameMap.get(String(row.processed_by || "")) || "",
+          row.status || "",
+        ];
+      });
+      const refundSheet = XLSX.utils.aoa_to_sheet([refundHeaders, ...refundRows]);
+      refundSheet["!autofilter"] = { ref: `A1:O${Math.max(2, refundRows.length + 1)}` };
+      refundSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+      refundSheet["!cols"] = refundHeaders.map((header) => ({ wch: Math.max(14, header.length + 2) }));
+      XLSX.utils.book_append_sheet(workbook, refundSheet, "Refunds");
+
+      const summaryHeaders = [
+        "Payment Method",
+        "Invoice Amount Allocated",
+        "Payment Fees Charged",
+        "Total Customer Charged",
+        "Refunds",
+        "Net Amount After Refunds",
+        "Number of Payment Allocations",
+      ];
+      const methodRows: Array<{ key: PaymentMethodVariant; label: string }> = [
+        { key: "cash", label: "Cash" },
+        { key: "card", label: "Card" },
+        { key: "tabby_standard", label: "Tabby" },
+        { key: "tabby_card", label: "Tabby Card" },
+        { key: "tamara", label: "Tamara" },
+      ];
+      const dailySummaryRows = methodRows.map((entry) => {
+        const rows = paymentAllocationsForDay.filter((row) => row.method_variant === entry.key);
+        const refunds = paymentAllocationRefundsForDay.filter((row) => {
+          const allocation = paymentAllocationsForDay.find((allocationRow) => String(allocationRow.id) === String(row.payment_allocation_id));
+          return allocation?.method_variant === entry.key;
+        });
+        const invoiceAllocated = rows.reduce((sum, row) => sum + Number(row.invoice_allocation_amount || 0), 0);
+        const fees = rows.reduce((sum, row) => sum + Number(row.fee_amount || 0), 0);
+        const charged = rows.reduce((sum, row) => sum + Number(row.customer_charged_amount || 0), 0);
+        const refunded = refunds.reduce((sum, row) => sum + Number(row.total_returned_amount || 0), 0);
+        return [entry.label, invoiceAllocated, fees, charged, refunded, Math.round((charged - refunded) * 100) / 100, rows.length];
+      });
+      const summarySheetRows = [summaryHeaders, ...dailySummaryRows];
+      const dailySummarySheet = XLSX.utils.aoa_to_sheet(summarySheetRows);
+      dailySummarySheet["!autofilter"] = { ref: `A1:G${summarySheetRows.length}` };
+      dailySummarySheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+      dailySummarySheet["!cols"] = summaryHeaders.map((header) => ({ wch: Math.max(18, header.length + 2) }));
+      XLSX.utils.book_append_sheet(workbook, dailySummarySheet, "Daily Payment Summary");
+    }
+
     const fileDate = formatDubaiFileDate(now);
     const fileName = `EOD RECONCILIATION ${activeClinic.name.toUpperCase()} ${fileDate.day} ${fileDate.month} ${fileDate.year}.xlsx`;
     XLSX.writeFile(workbook, fileName);
@@ -2681,7 +2940,9 @@ export default function ReceiptsPage() {
     setTransactionPatientId(finalPatientId);
     setTransactionPatientFileId(finalPatientFileId);
     if (finalClinicFileNo) setPatientFileNumberInput(finalClinicFileNo);
-    setPayTodayInput("");
+    setSelectedPaymentMethod("");
+    setPaymentAllocationDrafts([]);
+    setPaymentValidationErrors([]);
     setApplyCreditChecked(false);
     setShowTransactionTypeModal(true);
     } finally {
@@ -2692,29 +2953,41 @@ export default function ReceiptsPage() {
 
   function selectPaymentMethod(method: string) {
     setSelectedPaymentMethod(method);
-    if (method !== "Tabby") {
-      setTabbyReferenceInput("");
+    setPaymentValidationErrors([]);
+    const amountDue = getAmountDueToday();
+    const amountDueText = amountDue.toFixed(2);
+    if (method === "Split Payment") {
+      const halfMinor = Math.floor(toMinorUnits(amountDue) / 2);
+      const firstAmount = fromMinorUnits(halfMinor);
+      const secondAmount = fromMinorUnits(Math.max(0, toMinorUnits(amountDue) - halfMinor));
+      setPaymentAllocationDrafts([
+        createAllocationDraftRow("cash", firstAmount.toFixed(2)),
+        createAllocationDraftRow("card", secondAmount.toFixed(2)),
+      ]);
+      return;
     }
-    if (method !== "Tamara") {
-      setTamaraReferenceInput("");
+    if (method === "Cash") {
+      setPaymentAllocationDrafts([createAllocationDraftRow("cash", amountDueText)]);
+      return;
     }
+    if (method === "Card") {
+      setPaymentAllocationDrafts([createAllocationDraftRow("card", amountDueText)]);
+      return;
+    }
+    if (method === "Tabby") {
+      setPaymentAllocationDrafts([createAllocationDraftRow("tabby_standard", amountDueText)]);
+      return;
+    }
+    if (method === "Tamara") {
+      setPaymentAllocationDrafts([createAllocationDraftRow("tamara", amountDueText)]);
+      return;
+    }
+    setPaymentAllocationDrafts([]);
   }
 
   function getNumericInput(value: string) {
     const num = parseMoneyInput(value);
     return Number.isFinite(num) ? num : 0;
-  }
-
-  function getCashReceivedAmount() {
-    if (!cashReceivedInput.trim()) {
-      return getAmountDueToday();
-    }
-    return getNumericInput(cashReceivedInput);
-  }
-
-  function getCashChangeAmount() {
-    const received = getCashReceivedAmount();
-    return Math.max(received - getAmountDueToday(), 0);
   }
 
   // Credit is a payment source, not a payment method: it reduces the amount
@@ -2730,14 +3003,10 @@ export default function ReceiptsPage() {
     return Math.max(0, Math.round((total - getCreditApplied()) * 100) / 100);
   }
 
-  // Money the patient pays at checkout via the payment method (excludes
-  // credit). Empty input = pay the full remaining amount (default flow).
+  // Money the patient pays at checkout via payment methods (excludes credit).
+  // This flow now always settles the full post-credit invoice amount.
   function getAmountDueToday() {
-    const remaining = getRemainingAfterCredit();
-    if (!payTodayInput.trim()) return remaining;
-    const amt = getNumericInput(payTodayInput);
-    if (!Number.isFinite(amt) || amt <= 0) return 0;
-    return Math.min(amt, remaining);
+    return getRemainingAfterCredit();
   }
 
   // Remainder that becomes an outstanding balance when > 0.
@@ -2745,131 +3014,156 @@ export default function ReceiptsPage() {
     return Math.max(0, Math.round((getRemainingAfterCredit() - getAmountDueToday()) * 100) / 100);
   }
 
-  function getMixedCashAmount() {
-    return getNumericInput(mixedCashInput);
+  function updateAllocationDraft(rowId: string, patch: Partial<PaymentAllocationDraft>) {
+    setPaymentAllocationDrafts((current) => {
+      const updated = current.map((row) => (row.id === rowId ? { ...row, ...patch } : row));
+      if (selectedPaymentMethod !== "Split Payment" || updated.length < 2) {
+        return updated;
+      }
+      const changedIndex = updated.findIndex((row) => row.id === rowId);
+      if (changedIndex < 0 || changedIndex >= updated.length - 1 || !Object.prototype.hasOwnProperty.call(patch, "invoiceAllocationAmountInput")) {
+        return updated;
+      }
+
+      const amountDueMinor = toMinorUnits(getAmountDueToday());
+      const usedBeforeLastMinor = updated
+        .slice(0, updated.length - 1)
+        .reduce((sum, row) => sum + Math.max(0, toMinorUnits(getNumericInput(row.invoiceAllocationAmountInput))), 0);
+      const remainingMinor = Math.max(0, amountDueMinor - usedBeforeLastMinor);
+      const lastIndex = updated.length - 1;
+      updated[lastIndex] = {
+        ...updated[lastIndex],
+        invoiceAllocationAmountInput: fromMinorUnits(remainingMinor).toFixed(2),
+      };
+      return updated;
+    });
   }
 
-  function getMixedOtherAmount() {
-    return getNumericInput(mixedOtherAmountInput);
+  function addAnotherPaymentMethodRow() {
+    setPaymentAllocationDrafts((current) => [...current, createAllocationDraftRow("card", "")]);
+  }
+
+  function allowedVariantsForSelectedMethod(method: string): PaymentMethodVariant[] {
+    if (method === "Cash") return ["cash"];
+    if (method === "Card") return ["card"];
+    if (method === "Tabby") return ["tabby_standard", "tabby_card"];
+    if (method === "Tamara") return ["tamara"];
+    return allocationMethodOptions.map((opt) => opt.value);
+  }
+
+  function buildComputedAllocationsForSave() {
+    return buildPaymentAllocations(paymentAllocationDrafts, getAmountDueToday(), total, vat);
   }
 
   function getPaymentSummaryForSave() {
-    if (selectedPaymentMethod === "Cash") {
-      const cash = getCashReceivedAmount();
-      const change = getCashChangeAmount();
-      return `Cash (Received AED ${cash.toFixed(2)}, Change AED ${change.toFixed(2)})`;
+    const rows = buildComputedAllocationsForSave();
+    if (rows.length === 0) {
+      return selectedPaymentMethod;
     }
-
-    if (selectedPaymentMethod === "Split Payment") {
-      const cash = getMixedCashAmount();
-      const other = getMixedOtherAmount();
-      const splitReference = mixedOtherMethod === "Tabby"
-        ? tabbyReferenceInput.trim()
-        : mixedOtherMethod === "Tamara"
-          ? tamaraReferenceInput.trim()
-          : "";
-      const referenceLabel = splitReference ? `, Ref: ${splitReference}` : "";
-      return `Split Payment (Cash AED ${cash.toFixed(2)} + ${mixedOtherMethod} AED ${other.toFixed(2)}${referenceLabel})`;
-    }
-
-    if (selectedPaymentMethod === "Tabby") {
-      return `Tabby (Ref: ${tabbyReferenceInput.trim()})`;
-    }
-
-    if (selectedPaymentMethod === "Tamara") {
-      return `Tamara (Ref: ${tamaraReferenceInput.trim()})`;
-    }
-
-    return selectedPaymentMethod;
+    return rows
+      .map((row) => {
+        const ref = row.providerReferenceNumber ? `, Ref: ${row.providerReferenceNumber}` : "";
+        return `${paymentVariantLabel(row.methodVariant)} AED ${row.invoiceAllocationAmount.toFixed(2)}${ref}`;
+      })
+      .join(" + ");
   }
 
   function buildPaymentDetailsHtml() {
-    if (selectedPaymentMethod === "Cash") {
-      return `
-        <div class="meta-row"><span class="label">Payment / الدفع</span><span>Cash</span></div>
-        <div class="meta-row"><span class="label">Cash / نقداً</span><span>AED ${getCashReceivedAmount().toFixed(2)}</span></div>
-        <div class="meta-row"><span class="label">Change / الباقي</span><span>AED ${getCashChangeAmount().toFixed(2)}</span></div>
-      `;
+    const rows = buildComputedAllocationsForSave();
+    if (rows.length === 0) {
+      return `<div class="meta-row"><span class="label">Payment / الدفع</span><span>${selectedPaymentMethod || "-"}</span></div>`;
     }
-
-    if (selectedPaymentMethod === "Split Payment") {
-      return `
-        <div class="meta-row"><span class="label">Payment / الدفع</span><span>Split Payment</span></div>
-        <div class="meta-row"><span class="label">Cash / نقداً</span><span>AED ${getMixedCashAmount().toFixed(2)}</span></div>
-        <div class="meta-row"><span class="label">${mixedOtherMethod} / ${mixedOtherMethod}</span><span>AED ${getMixedOtherAmount().toFixed(2)}</span></div>
-      `;
-    }
-
-    return `<div class="meta-row"><span class="label">Payment / الدفع</span><span>${selectedPaymentMethod || "-"}</span></div>`;
+    const detailRows = rows
+      .map((row) => {
+        const refHtml = row.providerReferenceNumber
+          ? `<div class="meta-row"><span class="label">${paymentVariantLabel(row.methodVariant)} Ref</span><span>${row.providerReferenceNumber}</span></div>`
+          : "";
+        return `
+          <div class="meta-row"><span class="label">${paymentVariantLabel(row.methodVariant)}</span><span>AED ${row.customerChargedAmount.toFixed(2)}</span></div>
+          <div class="meta-row"><span class="label">Invoice Allocated</span><span>AED ${row.invoiceAllocationAmount.toFixed(2)}</span></div>
+          ${row.feeAmount > 0 ? `<div class="meta-row"><span class="label">Fee (${(row.feeRate * 100).toFixed(1)}%)</span><span>AED ${row.feeAmount.toFixed(2)}</span></div>` : ""}
+          ${refHtml}
+        `;
+      })
+      .join("");
+    return `
+      <div class="meta-row"><span class="label">Payment / الدفع</span><span>${paymentSummaryLabel(rows).toUpperCase()}</span></div>
+      ${detailRows}
+    `;
   }
 
-  function continueFromPaymentModal() {
+  async function continueFromPaymentModal() {
     const remainingAfterCredit = getRemainingAfterCredit();
     const dueToday = getAmountDueToday();
     const outstanding = getOutstandingAfterPayment();
+    const validationMessages: string[] = [];
 
     // Fully covered by patient credit — no payment method needed.
     if (remainingAfterCredit > 0.0049) {
       if (!selectedPaymentMethod) {
-        alert("Please select a payment method.");
-        return;
+        validationMessages.push("Please select a payment method.");
       }
 
       // Free services (e.g. consultations priced at 0) are legitimate — only
       // require a payment amount when there is actually something to pay.
       if (dueToday <= 0) {
-        alert("Amount to pay today must be greater than 0.");
-        return;
+        validationMessages.push("Amount to pay must be greater than 0.");
       }
 
-      if (selectedPaymentMethod === "Cash") {
-        const cash = getCashReceivedAmount();
-        if (cash < dueToday) {
-          alert("Cash received cannot be less than the amount to pay today.");
-          return;
+      const allocationErrors = validatePaymentAllocations(paymentAllocationDrafts, dueToday);
+      allocationErrors.forEach((error) => validationMessages.push(error.message));
+      if (allocationErrors.length === 0) {
+        const computed = buildComputedAllocationsForSave();
+        const invoiceMinor = toMinorUnits(dueToday);
+        const allocatedMinor = computed.reduce((sum, row) => sum + toMinorUnits(row.invoiceAllocationAmount), 0);
+        if (allocatedMinor !== invoiceMinor) {
+          const diffMinor = invoiceMinor - allocatedMinor;
+          if (diffMinor > 0) {
+            validationMessages.push(`Remaining amount is AED ${fromMinorUnits(diffMinor).toFixed(2)}.`);
+          } else {
+            validationMessages.push(`Overallocation by AED ${fromMinorUnits(Math.abs(diffMinor)).toFixed(2)}.`);
+          }
+          const referencesToCheck = computed
+            .filter((row) => row.providerReferenceNumber && (row.methodGroup === "tabby" || row.methodGroup === "tamara"))
+            .map((row) => ({
+              methodGroup: row.methodGroup,
+              normalized: normalizeProviderReference(row.providerReferenceNumber || ""),
+            }))
+            .filter((entry) => entry.normalized);
+          if (referencesToCheck.length > 0) {
+            const { data: existingRefs, error: refError } = await supabase
+              .from("payment_allocations")
+              .select("method_group, provider_reference_normalized")
+              .in("provider_reference_normalized", referencesToCheck.map((entry) => entry.normalized))
+              .in("method_group", [...new Set(referencesToCheck.map((entry) => entry.methodGroup))]);
+            if (refError) {
+              validationMessages.push(`Could not validate provider references: ${refError.message}`);
+            } else {
+              const existingRefKeys = new Set(
+                (existingRefs || []).map((row: any) => `${String(row.method_group || "")}:${String(row.provider_reference_normalized || "")}`)
+              );
+              referencesToCheck.forEach((entry) => {
+                const key = `${entry.methodGroup}:${entry.normalized}`;
+                if (existingRefKeys.has(key)) {
+                  validationMessages.push(`Duplicate provider reference already exists for ${entry.methodGroup.toUpperCase()}: ${entry.normalized}`);
+                }
+              });
+            }
+          }
         }
-      }
-
-      if (selectedPaymentMethod === "Split Payment") {
-        const cash = getMixedCashAmount();
-        const other = getMixedOtherAmount();
-        const mixedTotal = cash + other;
-        if (cash <= 0 || other <= 0) {
-          alert("Please enter both cash and second payment amounts for split payment.");
-          return;
-        }
-        if (Math.abs(mixedTotal - dueToday) > 0.01) {
-          alert(`Split payment amounts must equal the amount to pay today AED ${dueToday.toFixed(2)}.`);
-          return;
-        }
-
-        if (mixedOtherMethod === "Tabby" && !tabbyReferenceInput.trim()) {
-          alert("Please enter Tabby reference number for split payment.");
-          return;
-        }
-
-        if (mixedOtherMethod === "Tamara" && !tamaraReferenceInput.trim()) {
-          alert("Please enter Tamara reference number for split payment.");
-          return;
-        }
-      }
-
-      if (selectedPaymentMethod === "Tabby" && !tabbyReferenceInput.trim()) {
-        alert("Please enter Tabby reference number before continuing.");
-        return;
-      }
-
-      if (selectedPaymentMethod === "Tamara" && !tamaraReferenceInput.trim()) {
-        alert("Please enter Tamara reference number before continuing.");
-        return;
       }
     }
 
     if ((outstanding > 0.0049 || getCreditApplied() > 0.0049) && !activeClinic?.id) {
-      alert("Partial payments and patient credit need an active clinic. Open the register for a clinic first.");
+      validationMessages.push("Partial payments and patient credit need an active clinic. Open the register for a clinic first.");
+    }
+
+    if (validationMessages.length > 0) {
+      setPaymentValidationErrors(validationMessages);
       return;
     }
 
+    setPaymentValidationErrors([]);
     setShowPaymentModal(false);
     setShowPrintModal(true);
   }
@@ -2877,10 +3171,24 @@ export default function ReceiptsPage() {
   async function confirmPaymentAndSave() {
     const creditApplied = getCreditApplied();
     const isFullyCoveredByCredit = getRemainingAfterCredit() <= 0.0049;
+    const dueToday = getAmountDueToday();
 
     if (!selectedPaymentMethod && !isFullyCoveredByCredit) {
       alert("Please select a payment method first.");
       return false;
+    }
+    if (!isFullyCoveredByCredit) {
+      const allocationErrors = validatePaymentAllocations(paymentAllocationDrafts, dueToday);
+      if (allocationErrors.length > 0) {
+        setPaymentValidationErrors(allocationErrors.map((error) => error.message));
+        alert(allocationErrors[0].message);
+        return false;
+      }
+      const allocatedMinor = buildComputedAllocationsForSave().reduce((sum, row) => sum + toMinorUnits(row.invoiceAllocationAmount), 0);
+      if (allocatedMinor !== toMinorUnits(dueToday)) {
+        alert("Payment allocations must equal the amount to pay.");
+        return false;
+      }
     }
 
     const activeReceptionistId = receptionistId || loginReceptionistId;
@@ -2896,9 +3204,18 @@ export default function ReceiptsPage() {
 
     setIsSavingReceipt(true);
 
-    const amountPaidToday = Math.round((getAmountDueToday() + installmentFee) * 100) / 100;
+    const computedAllocations = isFullyCoveredByCredit ? [] : buildComputedAllocationsForSave();
+    const totalPaymentFees = computedAllocations.reduce((sum, row) => sum + row.feeAmount, 0);
+    const roundedPaymentFees = Math.round(totalPaymentFees * 100) / 100;
+    const amountPaidToday = Math.round((getAmountDueToday() + roundedPaymentFees) * 100) / 100;
     const outstandingRemainder = getOutstandingAfterPayment();
     const isPartialPayment = outstandingRemainder > 0.0049;
+    const totalWithPaymentFees = Math.round((total + roundedPaymentFees) * 100) / 100;
+    const feeProviders = [...new Set(computedAllocations
+      .filter((row) => row.feeAmount > 0)
+      .map((row) => (row.methodGroup === "tabby" ? "Tabby" : row.methodGroup === "tamara" ? "Tamara" : ""))
+      .filter(Boolean))];
+    const gatewayFeeProvider = feeProviders.length === 1 ? feeProviders[0] : feeProviders.length > 1 ? "Mixed" : null;
 
     if ((isPartialPayment || creditApplied > 0.0049) && !activeClinic?.id) {
       alert("Partial payments and patient credit need an active clinic. Open the register for a clinic first.");
@@ -2939,10 +3256,10 @@ export default function ReceiptsPage() {
           receptionist_id: activeReceptionistId,
           subtotal: subtotal,
           vat: vat,
-          total: totalWithInstallmentFee,
+          total: totalWithPaymentFees,
           total_before_gateway_fee: total,
-          gateway_fee: installmentFee > 0 ? installmentFee : null,
-          gateway_fee_provider: installmentFeeProvider,
+          gateway_fee: roundedPaymentFees > 0 ? roundedPaymentFees : null,
+          gateway_fee_provider: gatewayFeeProvider,
           discount_amount: (() => {
             const itemDiscount = selectedServices.reduce((sum, s) => s.originalPrice != null ? sum + Math.max(0, Number(s.originalPrice) - Number(s.price)) : sum, 0);
             const total = itemDiscount + discountAmount;
@@ -2956,7 +3273,7 @@ export default function ReceiptsPage() {
           // that haven't run supabase-partial-payments-migration.sql yet.
           // NULL amount_paid = paid in full. When credit is used, amount_paid is
           // always set to the money actually received (credit excluded).
-          ...(isPartialPayment || creditApplied > 0.0049 || installmentFee > 0 ? { amount_paid: amountPaidToday } : {}),
+          ...(isPartialPayment || creditApplied > 0.0049 || roundedPaymentFees > 0 ? { amount_paid: amountPaidToday } : {}),
           // Portion covered by prepaid patient credit; only written when used so
           // databases without supabase-credit-applied-migration.sql keep working.
           ...(creditApplied > 0.0049 ? { credit_applied: creditApplied } : {}),
@@ -2997,6 +3314,48 @@ export default function ReceiptsPage() {
       ? `#${String(receiptData.receipt_number).padStart(5, "0")}`
       : `#${String(receiptData.id).slice(0, 8).toUpperCase()}`;
 
+    if (!isFullyCoveredByCredit && computedAllocations.length > 0 && activeClinic?.id) {
+      const rpcAllocations = computedAllocations.map((row) => ({
+        method_group: row.methodGroup,
+        method_variant: row.methodVariant,
+        treatment_net_amount: row.treatmentNetAmount,
+        vat_amount: row.vatAmount,
+        invoice_allocation_amount: row.invoiceAllocationAmount,
+        fee_rate: row.feeRate,
+        fee_amount: row.feeAmount,
+        customer_charged_amount: row.customerChargedAmount,
+        provider_reference_number: row.providerReferenceNumber,
+        terminal_authorization_code: row.terminalAuthorizationCode,
+        card_network: row.cardNetwork,
+        status: "completed",
+      }));
+      const invoiceSettled = computedAllocations.reduce((sum, row) => sum + row.invoiceAllocationAmount, 0);
+      const vatSettled = computedAllocations.reduce((sum, row) => sum + row.vatAmount, 0);
+      const feeSettled = computedAllocations.reduce((sum, row) => sum + row.feeAmount, 0);
+      const customerChargedSettled = computedAllocations.reduce((sum, row) => sum + row.customerChargedAmount, 0);
+
+      const { data: paymentRecordId, error: paymentRecordError } = await supabase.rpc("create_payment_record_with_allocations", {
+        p_receipt_id: receiptData.id,
+        p_clinic_id: activeClinic.id,
+        p_receptionist_id: activeReceptionistId,
+        p_total_invoice_amount_settled: Math.round(invoiceSettled * 100) / 100,
+        p_total_vat_amount: Math.round(vatSettled * 100) / 100,
+        p_total_payment_fee_amount: Math.round(feeSettled * 100) / 100,
+        p_total_customer_charged_amount: Math.round(customerChargedSettled * 100) / 100,
+        p_payment_method_summary: paymentSummaryLabel(computedAllocations),
+        p_is_split: computedAllocations.length > 1,
+        p_status: "completed",
+        p_allocations: rpcAllocations,
+        p_created_by: activeReceptionistId,
+      });
+      if (paymentRecordError) {
+        console.error("Payment allocation save error", paymentRecordError);
+        alert(`Receipt saved, but payment allocations were not recorded: ${paymentRecordError.message}`);
+      } else if (paymentRecordId) {
+        await supabase.from("payment_records").select("id").eq("id", paymentRecordId).maybeSingle();
+      }
+    }
+
     // Deduct the applied credit from the patient's ledger (negative row).
     if (creditApplied > 0.0049) {
       const { data: creditRow, error: creditError } = await supabase
@@ -3035,8 +3394,8 @@ export default function ReceiptsPage() {
             original_date: new Date().toLocaleDateString("en-CA"),
             original_amount: outstandingRemainder,
             reason: creditApplied > 0.0049
-              ? `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} + credit AED ${creditApplied.toFixed(2)} of AED ${totalWithInstallmentFee.toFixed(2)}`
-              : `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} of AED ${totalWithInstallmentFee.toFixed(2)}`,
+              ? `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} + credit AED ${creditApplied.toFixed(2)} of AED ${totalWithPaymentFees.toFixed(2)}`
+              : `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} of AED ${totalWithPaymentFees.toFixed(2)}`,
             reference_number: receiptRef,
             created_by: activeReceptionistId,
             receipt_id: receiptData.id,
@@ -3105,9 +3464,8 @@ export default function ReceiptsPage() {
     setTransactionPatientFileId("");
     setDoctorId("");
     setSelectedPaymentMethod("");
-    setTabbyReferenceInput("");
-    setTamaraReferenceInput("");
-    setPayTodayInput("");
+    setPaymentAllocationDrafts([]);
+    setPaymentValidationErrors([]);
     setApplyCreditChecked(false);
     setNotes("");
     setSelectedServices([]);
@@ -3919,7 +4277,9 @@ export default function ReceiptsPage() {
       })
       .join("");
 
-    const paidTodayForReceipt = Math.round((getAmountDueToday() + installmentFee) * 100) / 100;
+    const receiptAllocations = buildComputedAllocationsForSave();
+    const allocationFeeTotal = receiptAllocations.reduce((sum, row) => sum + row.feeAmount, 0);
+    const paidTodayForReceipt = Math.round((getAmountDueToday() + allocationFeeTotal) * 100) / 100;
     const creditUsedForReceipt = getCreditApplied();
     const remainingForReceipt = getRemainingAfterCredit();
     const outstandingForReceipt = getOutstandingAfterPayment();
@@ -3946,51 +4306,21 @@ export default function ReceiptsPage() {
       <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${
         creditUsedForReceipt > 0.0049 && remainingForReceipt <= 0.0049
           ? "PATIENT CREDIT"
-          : (selectedPaymentMethod || "-").toUpperCase()
+          : (paymentSummaryLabel(receiptAllocations) || selectedPaymentMethod || "-").toUpperCase()
       }</span></div>
-      ${installmentFee > 0 ? `<div class="row"><span>${installmentFeeProvider} Fee / رسوم ${installmentFeeProvider}</span><span>: AED ${installmentFee.toFixed(2)}</span></div>` : ""}
+      ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee / رسوم الدفع</span><span>: AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
       <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
     `;
-
-    if (selectedPaymentMethod === "Cash" && remainingForReceipt > 0.0049) {
+    if (receiptAllocations.length > 0) {
       paymentSection = `
-        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: CASH</span></div>
-        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${getCashReceivedAmount().toFixed(2)}</span></div>
-        <div class="row"><span>Change / الباقي</span><span>: AED ${getCashChangeAmount().toFixed(2)}</span></div>
-      `;
-    }
-
-    if (selectedPaymentMethod === "Split Payment" && remainingForReceipt > 0.0049) {
-      const splitReference = mixedOtherMethod === "Tabby"
-        ? tabbyReferenceInput.trim()
-        : mixedOtherMethod === "Tamara"
-          ? tamaraReferenceInput.trim()
-          : "";
-
-      paymentSection = `
-        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: SPLIT PAYMENT</span></div>
-        <div class="row"><span>Cash / نقداً</span><span>: AED ${getMixedCashAmount().toFixed(2)}</span></div>
-        <div class="row"><span>${mixedOtherMethod}</span><span>: AED ${getMixedOtherAmount().toFixed(2)}</span></div>
-        ${installmentFee > 0 ? `<div class="row"><span>${installmentFeeProvider} Fee / رسوم ${installmentFeeProvider}</span><span>: AED ${installmentFee.toFixed(2)}</span></div>` : ""}
-        ${splitReference ? `<div class="row"><span>${mixedOtherMethod} Reference</span><span>: ${splitReference}</span></div>` : ""}
-      `;
-    }
-
-    if (selectedPaymentMethod === "Tabby" && remainingForReceipt > 0.0049) {
-      paymentSection = `
-        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: TABBY</span></div>
-        <div class="row"><span>Tabby Reference</span><span>: ${tabbyReferenceInput.trim() || "-"}</span></div>
-        ${installmentFee > 0 ? `<div class="row"><span>Tabby Fee / رسوم Tabby</span><span>: AED ${installmentFee.toFixed(2)}</span></div>` : ""}
-        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
-      `;
-    }
-
-    if (selectedPaymentMethod === "Tamara" && remainingForReceipt > 0.0049) {
-      paymentSection = `
-        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: TAMARA</span></div>
-        <div class="row"><span>Tamara Reference</span><span>: ${tamaraReferenceInput.trim() || "-"}</span></div>
-        ${installmentFee > 0 ? `<div class="row"><span>Tamara Fee / رسوم Tamara</span><span>: AED ${installmentFee.toFixed(2)}</span></div>` : ""}
-        <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
+        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${paymentSummaryLabel(receiptAllocations).toUpperCase()}</span></div>
+        ${receiptAllocations.map((row) => `
+          <div class="row"><span>${paymentVariantLabel(row.methodVariant)}</span><span>: AED ${row.customerChargedAmount.toFixed(2)}</span></div>
+          <div class="row"><span>Invoice Allocated</span><span>: AED ${row.invoiceAllocationAmount.toFixed(2)}</span></div>
+          ${row.feeAmount > 0 ? `<div class="row"><span>Fee (${(row.feeRate * 100).toFixed(1)}%)</span><span>: AED ${row.feeAmount.toFixed(2)}</span></div>` : ""}
+          ${row.providerReferenceNumber ? `<div class="row"><span>Provider Reference</span><span>: ${row.providerReferenceNumber}</span></div>` : ""}
+        `).join("")}
+        <div class="row"><span>Total Customer Pays</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
       `;
     }
 
@@ -4094,9 +4424,9 @@ export default function ReceiptsPage() {
         <div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>
         ${discountAmount > 0 ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
         <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
-        ${installmentFee > 0 ? `<div class="row"><span>${installmentFeeProvider} Fee</span><span>AED ${installmentFee.toFixed(2)}</span></div>` : ""}
+        ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee</span><span>AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
         <div class="hr" style="margin:4px 0;"></div>
-        <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${totalWithInstallmentFee.toFixed(2)}</span></div>
+        <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${(total + allocationFeeTotal).toFixed(2)}</span></div>
 
         <div class="hr"></div>
 
@@ -5077,16 +5407,16 @@ export default function ReceiptsPage() {
                 <span>VAT</span>
                 <span>AED {vat.toFixed(2)}</span>
               </div>
-              {installmentFee > 0 && (
+              {paymentFeeTotalRounded > 0 && (
                 <div className="flex items-center justify-between text-cyan-300">
-                  <span>{installmentFeeProvider} Fee</span>
-                  <span>AED {installmentFee.toFixed(2)}</span>
+                  <span>Payment Fee</span>
+                  <span>AED {paymentFeeTotalRounded.toFixed(2)}</span>
                 </div>
               )}
               <div className="border-t border-white/10 pt-4 text-base font-semibold text-white">
                 <div className="flex items-center justify-between">
-                  <span>Total</span>
-                  <span>AED {totalWithInstallmentFee.toFixed(2)}</span>
+                  <span>Total Customer Charge</span>
+                  <span>AED {Math.max(totalCustomerChargedToday, total).toFixed(2)}</span>
                 </div>
               </div>
             </div>
@@ -5111,12 +5441,20 @@ export default function ReceiptsPage() {
 
             {showPaymentModal && (
               <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50">
-                <div className="rounded-3xl bg-white p-6 shadow-2xl max-w-md w-full mx-4">
+                <div className="rounded-3xl bg-white p-5 shadow-2xl max-w-2xl w-full mx-4">
                   <h3 className="text-lg font-semibold text-slate-900 mb-4">Select Payment Method</h3>
 
-                  <div className="mb-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
                     <div className="flex items-center justify-between text-sm text-slate-700">
-                      <span>Treatment Total</span>
+                      <span>Treatment Subtotal</span>
+                      <span className="font-semibold">AED {preVatTotal.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm text-slate-700">
+                      <span>VAT</span>
+                      <span className="font-semibold">AED {vat.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm text-slate-700">
+                      <span>Invoice Total (before payment fees)</span>
                       <span className="font-semibold">AED {total.toFixed(2)}</span>
                     </div>
                     {checkoutAvailableCredit > 0.0049 && (
@@ -5148,49 +5486,20 @@ export default function ReceiptsPage() {
                         )}
                       </div>
                     )}
-                    {getRemainingAfterCredit() > 0.0049 ? (
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-600">Amount to Pay Today (AED)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          max={getRemainingAfterCredit()}
-                          value={payTodayInput}
-                          onChange={(e) => setPayTodayInput(e.target.value)}
-                          placeholder={getRemainingAfterCredit().toFixed(2)}
-                          className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                        />
-                      </div>
-                    ) : (
+                    {getRemainingAfterCredit() <= 0.0049 ? (
                       <p className="text-xs font-semibold text-emerald-700">
                         Fully covered by patient credit — no payment method needed.
                       </p>
-                    )}
-                    {getRemainingAfterCredit() > 0.0049 && (getOutstandingAfterPayment() > 0.0049 ? (
-                      <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">
-                        <span>Outstanding Balance</span>
-                        <span>AED {getOutstandingAfterPayment().toFixed(2)}</span>
-                      </div>
                     ) : (
                       <p className="text-xs text-slate-500">Paying in full — no outstanding balance.</p>
-                    ))}
-                    {installmentFee > 0 && (
-                      <div className="rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm text-cyan-900">
-                        <div className="flex items-center justify-between">
-                          <span>{installmentFeeProvider} Fee (7.5%)</span>
-                          <span className="font-semibold">AED {installmentFee.toFixed(2)}</span>
-                        </div>
-                        <div className="mt-1 flex items-center justify-between border-t border-cyan-200 pt-1 font-bold">
-                          <span>Total to collect today</span>
-                          <span>AED {(getAmountDueToday() + installmentFee).toFixed(2)}</span>
-                        </div>
-                      </div>
                     )}
                   </div>
 
                   {getRemainingAfterCredit() > 0.0049 && (
                   <>
+                  <p className="mb-2 text-xs text-slate-500">
+                    Allocate the invoice amount across methods. Tabby/Tamara fees are calculated separately.
+                  </p>
                   <div className="grid gap-3">
                     {paymentOptions.map((method) => (
                       <button
@@ -5207,118 +5516,145 @@ export default function ReceiptsPage() {
                     ))}
                   </div>
 
-                  {selectedPaymentMethod === "Cash" && (
-                    <div className="mt-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <label className="block text-xs font-semibold text-slate-600">Cash Received (AED)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={cashReceivedInput}
-                        onChange={(e) => setCashReceivedInput(e.target.value)}
-                        placeholder={getAmountDueToday().toFixed(2)}
-                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                      />
-                      <p className="text-xs text-slate-600">Change: AED {getCashChangeAmount().toFixed(2)}</p>
-                    </div>
-                  )}
-
-                  {selectedPaymentMethod === "Split Payment" && (
+                  {selectedPaymentMethod && (
                     <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-600">Cash Amount (AED)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={mixedCashInput}
-                          onChange={(e) => setMixedCashInput(e.target.value)}
-                          className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-600">Second Method</label>
-                        <select
-                          value={mixedOtherMethod}
-                          onChange={(e) => {
-                            const nextMethod = e.target.value;
-                            setMixedOtherMethod(nextMethod);
-                            if (nextMethod !== "Tabby") {
-                              setTabbyReferenceInput("");
-                            }
-                            if (nextMethod !== "Tamara") {
-                              setTamaraReferenceInput("");
-                            }
-                          }}
-                          className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                      {paymentAllocationDrafts.map((row, index) => {
+                        const allowedVariants = allowedVariantsForSelectedMethod(selectedPaymentMethod);
+                        const computedRow = previewAllocations.find((entry) => entry.id === row.id);
+                        const methodVariant = row.methodVariant as PaymentMethodVariant;
+                        return (
+                          <div key={row.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <div>
+                                <label className="block text-xs font-semibold text-slate-600">Payment Method</label>
+                                <select
+                                  value={row.methodVariant}
+                                  onChange={(e) => updateAllocationDraft(row.id, { methodVariant: e.target.value as PaymentMethodVariant })}
+                                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                                >
+                                  <option value="">Select</option>
+                                  {allocationMethodOptions.filter((opt) => allowedVariants.includes(opt.value)).map((opt) => (
+                                    <option key={opt.value} value={opt.value}>
+                                      {opt.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-xs font-semibold text-slate-600">Invoice Amount Allocated (AED)</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={row.invoiceAllocationAmountInput}
+                                  onChange={(e) => updateAllocationDraft(row.id, { invoiceAllocationAmountInput: e.target.value })}
+                                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                                />
+                              </div>
+                              {referenceRequiredForVariant(methodVariant) && (
+                                <div>
+                                  <label className="block text-xs font-semibold text-slate-600">Provider Reference Number</label>
+                                  <input
+                                    type="text"
+                                    value={row.providerReferenceNumber}
+                                    onChange={(e) => updateAllocationDraft(row.id, { providerReferenceNumber: e.target.value })}
+                                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                                  />
+                                </div>
+                              )}
+                              {methodVariant === "tabby_card" && (
+                                <div>
+                                  <label className="block text-xs font-semibold text-slate-600">Terminal Authorization Code (optional)</label>
+                                  <input
+                                    type="text"
+                                    value={row.terminalAuthorizationCode}
+                                    onChange={(e) => updateAllocationDraft(row.id, { terminalAuthorizationCode: e.target.value })}
+                                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                                  />
+                                </div>
+                              )}
+                              {methodVariant === "card" && (
+                                <div>
+                                  <label className="block text-xs font-semibold text-slate-600">Card Network (optional)</label>
+                                  <div className="mt-2 flex items-center gap-4 text-sm text-slate-700">
+                                    <label className="inline-flex items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={row.cardNetwork.toLowerCase() === "visa"}
+                                        onChange={(e) =>
+                                          updateAllocationDraft(row.id, {
+                                            cardNetwork: e.target.checked ? "Visa" : "",
+                                          })
+                                        }
+                                        className="h-4 w-4 accent-cyan-600"
+                                      />
+                                      Visa
+                                    </label>
+                                    <label className="inline-flex items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={row.cardNetwork.toLowerCase() === "mastercard"}
+                                        onChange={(e) =>
+                                          updateAllocationDraft(row.id, {
+                                            cardNetwork: e.target.checked ? "Mastercard" : "",
+                                          })
+                                        }
+                                        className="h-4 w-4 accent-cyan-600"
+                                      />
+                                      Mastercard
+                                    </label>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                            <div className="mt-2 grid gap-1 text-xs text-slate-600 sm:grid-cols-2">
+                              <p>VAT Portion: AED {(computedRow?.vatAmount || 0).toFixed(2)}</p>
+                              <p>Fee Rate: {computedRow ? `${(computedRow.feeRate * 100).toFixed(1)}%` : "0.0%"}</p>
+                              <p>Payment Fee: AED {(computedRow?.feeAmount || 0).toFixed(2)}</p>
+                              <p className="font-semibold text-slate-800">Amount to Collect: AED {(computedRow?.customerChargedAmount || 0).toFixed(2)}</p>
+                            </div>
+                            {selectedPaymentMethod === "Split Payment" && paymentAllocationDrafts.length > 2 && index > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => setPaymentAllocationDrafts((rows) => rows.filter((draft) => draft.id !== row.id))}
+                                className="mt-2 text-xs font-semibold text-rose-600 hover:text-rose-500"
+                              >
+                                Remove this row
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      {selectedPaymentMethod === "Split Payment" && (
+                        <button
+                          type="button"
+                          onClick={addAnotherPaymentMethodRow}
+                          className="w-full rounded-xl border border-dashed border-cyan-300 bg-cyan-50 px-3 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-100"
                         >
-                          {paymentOptions
-                            .filter((method) => method !== "Cash" && method !== "Split Payment")
-                            .map((method) => (
-                              <option key={method} value={method}>
-                                {method}
-                              </option>
-                            ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-600">Second Method Amount (AED)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={mixedOtherAmountInput}
-                          onChange={(e) => setMixedOtherAmountInput(e.target.value)}
-                          className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                        />
-                      </div>
-                      {(mixedOtherMethod === "Tabby" || mixedOtherMethod === "Tamara") && (
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-600">
-                            {mixedOtherMethod} Reference Number
-                          </label>
-                          <input
-                            type="text"
-                            value={mixedOtherMethod === "Tabby" ? tabbyReferenceInput : tamaraReferenceInput}
-                            onChange={(e) => {
-                              if (mixedOtherMethod === "Tabby") {
-                                setTabbyReferenceInput(e.target.value);
-                              } else {
-                                setTamaraReferenceInput(e.target.value);
-                              }
-                            }}
-                            placeholder={`Enter ${mixedOtherMethod} reference`}
-                            className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                          />
-                        </div>
+                          Add another payment method
+                        </button>
                       )}
-                      <p className="text-xs text-slate-600">Entered total: AED {(getMixedCashAmount() + getMixedOtherAmount()).toFixed(2)} / AED {getAmountDueToday().toFixed(2)}</p>
                     </div>
                   )}
 
-                  {selectedPaymentMethod === "Tabby" && (
-                    <div className="mt-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <label className="block text-xs font-semibold text-slate-600">Tabby Reference Number</label>
-                      <input
-                        type="text"
-                        value={tabbyReferenceInput}
-                        onChange={(e) => setTabbyReferenceInput(e.target.value)}
-                        placeholder="Enter Tabby reference"
-                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                      />
-                    </div>
-                  )}
+                  <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-sm">
+                    <p className="font-semibold text-slate-900">Live Payment Summary</p>
+                    <p className="text-slate-700">Invoice amount being paid: AED {getAmountDueToday().toFixed(2)}</p>
+                    <p className="text-slate-700">Payment fee: AED {paymentFeeTotalRounded.toFixed(2)}</p>
+                    <p className="text-slate-900 font-semibold">Total customer pays: AED {totalCustomerChargedToday.toFixed(2)}</p>
+                    {previewAllocations.map((row) => (
+                      <p key={`summary-${row.id}`} className="text-slate-700">
+                        Collect AED {row.customerChargedAmount.toFixed(2)} in {paymentVariantLabel(row.methodVariant)}
+                      </p>
+                    ))}
+                  </div>
 
-                  {selectedPaymentMethod === "Tamara" && (
-                    <div className="mt-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <label className="block text-xs font-semibold text-slate-600">Tamara Reference Number</label>
-                      <input
-                        type="text"
-                        value={tamaraReferenceInput}
-                        onChange={(e) => setTamaraReferenceInput(e.target.value)}
-                        placeholder="Enter Tamara reference"
-                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                      />
+                  {(paymentValidationErrors.length > 0 || livePaymentValidation.length > 0) && (
+                    <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                      {[...new Set([...paymentValidationErrors, ...livePaymentValidation.map((error) => error.message)])].map((message) => (
+                        <p key={message}>• {message}</p>
+                      ))}
                     </div>
                   )}
                   </>
@@ -5326,7 +5662,8 @@ export default function ReceiptsPage() {
 
                   <button
                     onClick={continueFromPaymentModal}
-                    className="mt-4 w-full rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400"
+                    disabled={!isAllocationBalanced || livePaymentValidation.length > 0}
+                    className="mt-4 w-full rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400 disabled:opacity-50"
                   >
                     Continue
                   </button>
@@ -5653,9 +5990,12 @@ export default function ReceiptsPage() {
         <PosPlanCheckoutModal
           isOpen={showPlanCheckoutModal}
           onClose={() => setShowPlanCheckoutModal(false)}
-          onSaved={(plan, payment) => {
+          onSaved={(plan, payments) => {
             setShowPlanCheckoutModal(false);
-            alert(`Treatment plan "${plan.title}" created successfully!${payment ? ` Payment of AED ${Number(payment.amount).toFixed(2)} recorded.` : ""}`);
+            const totalCollected = (payments || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+            alert(
+              `Treatment plan "${plan.title}" created successfully!${payments.length > 0 ? ` Payment of AED ${totalCollected.toFixed(2)} recorded.` : ""}`
+            );
             clearPosForm();
           }}
           patientId={transactionPatientId}
@@ -5665,6 +6005,9 @@ export default function ReceiptsPage() {
           patientFileNo={patientFileNumberInput}
           doctorId={doctorId}
           receptionistId={receptionistId || loginReceptionistId}
+          receptionistName={
+            receptionists.find((person: any) => person.id === (receptionistId || loginReceptionistId))?.name || "Reception"
+          }
           registerSessionId={registerSessionId}
           services={selectedServices.map((s, i) => ({ ...s, teeth: getTeethForItem(i) }))}
           subtotal={subtotal}

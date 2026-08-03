@@ -100,6 +100,66 @@ create table if not exists public.refunds (
 create index if not exists refunds_receipt_id_idx on public.refunds (receipt_id);
 create index if not exists refunds_created_at_idx on public.refunds (created_at desc);
 
+create table if not exists public.payment_records (
+  id uuid primary key default gen_random_uuid(),
+  receipt_id uuid not null references public.receipts(id) on delete cascade,
+  clinic_id uuid not null references public.clinics(id) on delete restrict,
+  receptionist_id uuid not null references public.receptionist(id) on delete restrict,
+  total_invoice_amount_settled numeric(12,2) not null check (total_invoice_amount_settled >= 0),
+  total_vat_amount numeric(12,2) not null default 0 check (total_vat_amount >= 0),
+  total_payment_fee_amount numeric(12,2) not null default 0 check (total_payment_fee_amount >= 0),
+  total_customer_charged_amount numeric(12,2) not null check (total_customer_charged_amount >= 0),
+  payment_method_summary text not null default '',
+  is_split boolean not null default false,
+  status text not null default 'completed',
+  created_by uuid references public.receptionist(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.payment_allocations (
+  id uuid primary key default gen_random_uuid(),
+  payment_id uuid not null references public.payment_records(id) on delete cascade,
+  method_group text not null,
+  method_variant text not null,
+  treatment_net_amount numeric(12,2) not null,
+  vat_amount numeric(12,2) not null,
+  invoice_allocation_amount numeric(12,2) not null,
+  fee_rate numeric(8,6) not null default 0,
+  fee_amount numeric(12,2) not null default 0,
+  customer_charged_amount numeric(12,2) not null,
+  provider_reference_number text,
+  terminal_authorization_code text,
+  card_network text,
+  status text not null default 'completed',
+  refunded_treatment_amount numeric(12,2) not null default 0,
+  refunded_vat_amount numeric(12,2) not null default 0,
+  refunded_fee_amount numeric(12,2) not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.payment_allocation_refunds (
+  id uuid primary key default gen_random_uuid(),
+  refund_id uuid references public.refunds(id) on delete set null,
+  payment_id uuid not null references public.payment_records(id) on delete cascade,
+  payment_allocation_id uuid not null references public.payment_allocations(id) on delete cascade,
+  receipt_id uuid not null references public.receipts(id) on delete cascade,
+  clinic_id uuid not null references public.clinics(id) on delete restrict,
+  reason text,
+  refunded_treatment_amount numeric(12,2) not null,
+  refunded_vat_amount numeric(12,2) not null,
+  refunded_invoice_amount numeric(12,2) not null,
+  reversed_fee_amount numeric(12,2) not null,
+  total_returned_amount numeric(12,2) not null,
+  original_fee_rate numeric(8,6) not null,
+  processed_by uuid references public.receptionist(id) on delete set null,
+  status text not null default 'completed',
+  idempotency_key text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.cash_register_sessions (
   id uuid primary key default gen_random_uuid(),
   receptionist_id uuid not null references public.receptionist(id),

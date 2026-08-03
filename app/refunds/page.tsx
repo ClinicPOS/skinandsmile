@@ -19,8 +19,9 @@ export default function RefundsPage() {
   const [receiptSearch, setReceiptSearch] = useState("");
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [selectedReceipt, setSelectedReceipt] = useState<any | null>(null);
-  const [receiptItems, setReceiptItems] = useState<any[]>([]);
-  const [checkedItems, setCheckedItems] = useState<Set<string>>(new Set());
+  const [paymentRows, setPaymentRows] = useState<any[]>([]);
+  const [checkedAllocations, setCheckedAllocations] = useState<Set<string>>(new Set());
+  const [refundInvoiceAmountInputs, setRefundInvoiceAmountInputs] = useState<Record<string, string>>({});
   const [refundReason, setRefundReason] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [refundMessage, setRefundMessage] = useState("");
@@ -86,28 +87,42 @@ export default function RefundsPage() {
 
   async function selectReceipt(receipt: any) {
     setSelectedReceipt(receipt);
-    setCheckedItems(new Set());
-    const { data: items } = await supabase
-      .from("receipt_items")
-      .select("*, services(name)")
-      .eq("receipt_id", receipt.id);
-    setReceiptItems(items || []);
+    setCheckedAllocations(new Set());
+    setRefundInvoiceAmountInputs({});
+    const { data: paymentRecords } = await supabase
+      .from("payment_records")
+      .select("id, payment_method_summary, status")
+      .eq("receipt_id", receipt.id)
+      .order("created_at", { ascending: false });
+    const paymentIds = (paymentRecords || []).map((row) => row.id);
+    if (paymentIds.length === 0) {
+      setPaymentRows([]);
+      setRefundMessage("No payment allocations found for this receipt.");
+      return;
+    }
+
+    const { data: allocations } = await supabase
+      .from("payment_allocations")
+      .select("*")
+      .in("payment_id", paymentIds)
+      .order("created_at", { ascending: true });
+    setPaymentRows(allocations || []);
     setRefundMessage("");
   }
 
-  function toggleItem(itemId: string) {
-    const updated = new Set(checkedItems);
-    if (updated.has(itemId)) {
-      updated.delete(itemId);
+  function toggleAllocation(allocationId: string) {
+    const updated = new Set(checkedAllocations);
+    if (updated.has(allocationId)) {
+      updated.delete(allocationId);
     } else {
-      updated.add(itemId);
+      updated.add(allocationId);
     }
-    setCheckedItems(updated);
+    setCheckedAllocations(updated);
   }
 
   async function processRefund() {
-    if (!selectedReceipt || checkedItems.size === 0) {
-      setRefundMessage("Select at least one item to refund.");
+    if (!selectedReceipt || checkedAllocations.size === 0) {
+      setRefundMessage("Select at least one payment allocation to refund.");
       return;
     }
     if (!refundReason.trim()) {
@@ -118,8 +133,47 @@ export default function RefundsPage() {
     setIsProcessing(true);
 
     try {
-      const itemsToRefund = receiptItems.filter((item) => checkedItems.has(item.id));
-      const totalRefund = itemsToRefund.reduce((sum, item) => sum + Number(item.total || item.price || 0), 0);
+      const allocationsToRefund = paymentRows.filter((row) => checkedAllocations.has(row.id));
+      if (allocationsToRefund.length === 0) {
+        setRefundMessage("Select at least one payment allocation to refund.");
+        setIsProcessing(false);
+        return;
+      }
+
+      const invoiceRefundRequests = allocationsToRefund.map((allocation) => {
+        const remainingTreatment = Math.max(
+          0,
+          Number(allocation.treatment_net_amount || 0) - Number(allocation.refunded_treatment_amount || 0)
+        );
+        const remainingVat = Math.max(0, Number(allocation.vat_amount || 0) - Number(allocation.refunded_vat_amount || 0));
+        const remainingInvoice = Math.round((remainingTreatment + remainingVat) * 100) / 100;
+        const input = String(refundInvoiceAmountInputs[allocation.id] || "").trim();
+        const requestedInvoice = input ? Number(input) : remainingInvoice;
+        return {
+          allocation,
+          remainingTreatment,
+          remainingVat,
+          remainingInvoice,
+          requestedInvoice: Math.round(requestedInvoice * 100) / 100,
+        };
+      });
+
+      const invalidRow = invoiceRefundRequests.find(
+        (row) =>
+          !Number.isFinite(row.requestedInvoice) ||
+          row.requestedInvoice <= 0 ||
+          row.requestedInvoice > row.remainingInvoice + 0.0001
+      );
+      if (invalidRow) {
+        setRefundMessage("Refund invoice amount must be greater than 0 and cannot exceed remaining refundable invoice amount.");
+        setIsProcessing(false);
+        return;
+      }
+
+      const totalRefund = invoiceRefundRequests.reduce((sum, row) => {
+        const reversedFee = Math.round(row.requestedInvoice * Number(row.allocation.fee_rate || 0) * 100) / 100;
+        return sum + row.requestedInvoice + reversedFee;
+      }, 0);
 
       const { data: refundData, error: refundError } = await supabase
         .from("refunds")
@@ -129,7 +183,7 @@ export default function RefundsPage() {
             receptionist_id: selectedReceipt.receptionist_id,
             reason: refundReason.trim(),
             total_amount: totalRefund,
-            payment_method: selectedReceipt.payment_method,
+            payment_method: "Allocation Refund",
           },
         ])
         .select()
@@ -141,26 +195,60 @@ export default function RefundsPage() {
         return;
       }
 
-      const refundItems = itemsToRefund.map((item) => ({
-        refund_id: refundData.id,
-        receipt_item_id: item.id,
-        service_id: item.service_id,
-        service_name: item.services?.name || "Unknown",
-        amount: Number(item.total || item.price || 0),
-      }));
+      const refundedBreakdown: any[] = [];
+      for (const row of invoiceRefundRequests) {
+        const ratio = row.remainingInvoice > 0 ? row.requestedInvoice / row.remainingInvoice : 0;
+        const refundedTreatment = Math.round(row.remainingTreatment * ratio * 100) / 100;
+        const refundedVat = Math.round((row.requestedInvoice - refundedTreatment) * 100) / 100;
+        const idempotencyKey = `${refundData.id}:${row.allocation.id}:${row.requestedInvoice.toFixed(2)}`;
+        const { data: allocationRefundId, error: allocationRefundError } = await supabase.rpc("create_payment_allocation_refund", {
+          p_refund_id: refundData.id,
+          p_payment_allocation_id: row.allocation.id,
+          p_refunded_treatment_amount: refundedTreatment,
+          p_refunded_vat_amount: refundedVat,
+          p_reason: refundReason.trim(),
+          p_processed_by: selectedReceipt.receptionist_id,
+          p_idempotency_key: idempotencyKey,
+        });
+        if (allocationRefundError) {
+          setRefundMessage(`Error reversing allocation ${row.allocation.id.slice(0, 8)}: ${allocationRefundError.message}`);
+          setIsProcessing(false);
+          return;
+        }
+        const reversedFee = Math.round(row.requestedInvoice * Number(row.allocation.fee_rate || 0) * 100) / 100;
+        const returnedAmount = Math.round((row.requestedInvoice + reversedFee) * 100) / 100;
+        refundedBreakdown.push({
+          id: allocationRefundId,
+          allocationId: row.allocation.id,
+          methodGroup: row.allocation.method_group,
+          methodVariant: row.allocation.method_variant,
+          refundedTreatment,
+          refundedVat,
+          reversedFee,
+          returnedAmount,
+          providerReference: row.allocation.provider_reference_number || "",
+        });
+      }
 
-      const { error: itemsError } = await supabase.from("refund_items").insert(refundItems);
+      const { error: itemsError } = await supabase.from("refund_items").insert(
+        refundedBreakdown.map((item) => ({
+          refund_id: refundData.id,
+          receipt_item_id: null,
+          service_id: null,
+          service_name: `${item.methodVariant} allocation`,
+          amount: item.returnedAmount,
+        }))
+      );
       if (itemsError) {
-        setRefundMessage(`Error saving refund items: ${itemsError.message}`);
-        setIsProcessing(false);
-        return;
+        setRefundMessage(`Refund created, but refund item rows failed: ${itemsError.message}`);
       }
 
       setRefundMessage(`✓ Refund processed for AED ${totalRefund.toFixed(2)}`);
       setLastRefund(refundData);
-      setRefundedItems(itemsToRefund);
+      setRefundedItems(refundedBreakdown);
       setSelectedReceipt(null);
-      setCheckedItems(new Set());
+      setCheckedAllocations(new Set());
+      setRefundInvoiceAmountInputs({});
       setRefundReason("");
       setReceiptSearch("");
       setSearchResults([]);
@@ -181,8 +269,8 @@ export default function RefundsPage() {
       .map(
         (item) => `
           <div class="row item-row">
-            <span class="item-name">${item.services?.name || "Unknown"}</span>
-            <span class="amount">-AED ${Number(item.total || item.price).toFixed(2)}</span>
+            <span class="item-name">${item.methodVariant || "Allocation"}${item.providerReference ? ` (${item.providerReference})` : ""}</span>
+            <span class="amount">-AED ${Number(item.returnedAmount || 0).toFixed(2)}</span>
           </div>`
       )
       .join("");
@@ -390,36 +478,51 @@ export default function RefundsPage() {
         {/* Selected receipt details */}
         {selectedReceipt && (
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Receipt Items</p>
-            <p className="mt-1 text-sm text-slate-600">Select items to refund</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Payment Allocations</p>
+            <p className="mt-1 text-sm text-slate-600">Select allocations and enter invoice amount to refund</p>
 
             <div className="mt-4 space-y-2">
-              {receiptItems.map((item) => (
+              {paymentRows.map((allocation) => {
+                const remainingTreatment = Math.max(
+                  0,
+                  Number(allocation.treatment_net_amount || 0) - Number(allocation.refunded_treatment_amount || 0)
+                );
+                const remainingVat = Math.max(0, Number(allocation.vat_amount || 0) - Number(allocation.refunded_vat_amount || 0));
+                const remainingInvoice = Math.round((remainingTreatment + remainingVat) * 100) / 100;
+                return (
                 <label
-                  key={item.id}
+                  key={allocation.id}
                   className="flex items-center gap-3 rounded-2xl border border-slate-200 p-3 transition hover:bg-slate-50"
                 >
                   <input
                     type="checkbox"
-                    checked={checkedItems.has(item.id)}
-                    onChange={() => toggleItem(item.id)}
+                    checked={checkedAllocations.has(allocation.id)}
+                    onChange={() => toggleAllocation(allocation.id)}
                     className="h-4 w-4 rounded border-slate-300"
                   />
                   <div className="flex-1">
-                    <p className="font-medium text-slate-900">{item.services?.name || "Unknown"}</p>
-                    <p className="text-xs text-slate-500">AED {Number(item.total || item.price).toFixed(2)}</p>
+                    <p className="font-medium text-slate-900">{String(allocation.method_variant || "").replace("_", " ")}</p>
+                    <p className="text-xs text-slate-500">
+                      Invoice remaining: AED {remainingInvoice.toFixed(2)} · Fee rate: {(Number(allocation.fee_rate || 0) * 100).toFixed(1)}%
+                    </p>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={refundInvoiceAmountInputs[allocation.id] || ""}
+                      onChange={(e) => setRefundInvoiceAmountInputs((current) => ({ ...current, [allocation.id]: e.target.value }))}
+                      placeholder={remainingInvoice.toFixed(2)}
+                      className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                    />
                   </div>
                 </label>
-              ))}
+              )})}
             </div>
 
-            {checkedItems.size > 0 && (
+            {checkedAllocations.size > 0 && (
               <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3">
                 <p className="text-sm font-semibold text-red-900">
-                  Total to Refund: AED {receiptItems
-                    .filter((item) => checkedItems.has(item.id))
-                    .reduce((sum, item) => sum + Number(item.total || item.price || 0), 0)
-                    .toFixed(2)}
+                  Selected allocations: {checkedAllocations.size}
                 </p>
               </div>
             )}
@@ -437,7 +540,7 @@ export default function RefundsPage() {
 
             <button
               onClick={processRefund}
-              disabled={isProcessing || checkedItems.size === 0}
+              disabled={isProcessing || checkedAllocations.size === 0}
               className="mt-5 w-full rounded-2xl bg-red-600 px-5 py-3 text-sm font-semibold text-white transition disabled:opacity-50 hover:bg-red-500"
             >
               {isProcessing ? "Processing..." : "Process Refund"}

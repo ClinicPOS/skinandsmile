@@ -14,10 +14,19 @@ import type {
   Patient as PatientRecord,
 } from "../lib/types";
 import { rollupBalance, formatBalanceReference } from "../lib/outstanding-balances";
-import { availableCredit } from "../lib/patient-credits";
-import { ReceiveDepositModal } from "./patient-credit-modals";
 import { EditPatientModal } from "./edit-patient-modal";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../lib/receipt-branding";
+import {
+  buildPaymentAllocations,
+  paymentSummaryLabel,
+  paymentVariantLabel,
+  referenceRequiredForVariant,
+  validatePaymentAllocations,
+  PaymentAllocationDraft,
+  PaymentMethodVariant,
+} from "../lib/payment-allocation";
+import { toMinorUnits } from "../lib/money";
+import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-payment-receipt";
 
 type Patient = {
   id: string;
@@ -46,7 +55,35 @@ type Receipt = {
   created_at?: string;
 };
 
-const TREATMENT_PLAN_PAYMENT_METHODS = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Bank Transfer"];
+const PLAN_PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"] as const;
+type PlanPaymentMode = (typeof PLAN_PAYMENT_MODE_OPTIONS)[number];
+
+const PLAN_ALLOCATION_METHOD_OPTIONS: Array<{ value: PaymentMethodVariant; label: string }> = [
+  { value: "cash", label: "Cash" },
+  { value: "card", label: "Card" },
+  { value: "tabby_standard", label: "Tabby" },
+  { value: "tabby_card", label: "Tabby Card" },
+  { value: "tamara", label: "Tamara" },
+];
+
+function newPlanAllocationDraft(methodVariant: PaymentMethodVariant | "" = "", amount = ""): PaymentAllocationDraft {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    methodVariant,
+    invoiceAllocationAmountInput: amount,
+    providerReferenceNumber: "",
+    terminalAuthorizationCode: "",
+    cardNetwork: "",
+  };
+}
+
+function planModeToVariant(mode: PlanPaymentMode): PaymentMethodVariant {
+  if (mode === "Cash") return "cash";
+  if (mode === "Card") return "card";
+  if (mode === "Tabby") return "tabby_standard";
+  if (mode === "Tamara") return "tamara";
+  return "cash";
+}
 
 type LookupItem = {
   id: string;
@@ -181,7 +218,6 @@ export function SearchPatientModal({
   const [view, setView] = useState<"search" | "profile">("search");
   const [query, setQuery] = useState("");
   const [selectedPatient, setSelectedPatient] = useState<FullPatient | null>(null);
-  const [showDepositModal, setShowDepositModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [notes, setNotes] = useState<PatientNote[]>([]);
   const [profileReceipts, setProfileReceipts] = useState<Receipt[]>([]);
@@ -232,8 +268,9 @@ export function SearchPatientModal({
   const [savingTreatmentVisit, setSavingTreatmentVisit] = useState(false);
   const [paymentPlanId, setPaymentPlanId] = useState<string | null>(null);
   const [planPaymentAmount, setPlanPaymentAmount] = useState("");
-  const [planPaymentMethod, setPlanPaymentMethod] = useState("Cash");
-  const [planPaymentNotes, setPlanPaymentNotes] = useState("");
+  const [planPaymentMode, setPlanPaymentMode] = useState<PlanPaymentMode>("Cash");
+  const [planPaymentDrafts, setPlanPaymentDrafts] = useState<PaymentAllocationDraft[]>([]);
+  const [planPaymentValidationErrors, setPlanPaymentValidationErrors] = useState<string[]>([]);
   const [savingTreatmentPayment, setSavingTreatmentPayment] = useState(false);
 
   useEffect(() => {
@@ -244,7 +281,6 @@ export function SearchPatientModal({
       setExpandedNoteIds(new Set());
       setShowAddNote(false);
       setNewNoteText("");
-      setShowDepositModal(false);
       setShowEditModal(false);
       setExpandedProfileSections(new Set());
       resetTreatmentPlanForms();
@@ -296,39 +332,6 @@ export function SearchPatientModal({
       .sort((a, b) => (a.original_date < b.original_date ? 1 : -1));
   }, [outstandingBalances, selectedPatient]);
 
-  // Total still owed by the selected patient across all clinics — shown in the
-  // profile header alongside available credit.
-  const selectedPatientOutstandingTotal = useMemo(() => {
-    return selectedPatientBalances.reduce(
-      (sum, b) => sum + rollupBalance(b, paymentsByBalanceId.get(b.id) || []).remaining,
-      0
-    );
-  }, [selectedPatientBalances, paymentsByBalanceId]);
-
-  const selectedPatientCredits = useMemo(() => {
-    if (!selectedPatient) return [];
-    return patientCredits
-      .filter((c) => c.patient_id === selectedPatient.id)
-      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  }, [patientCredits, selectedPatient]);
-
-  const selectedPatientAvailableCredit = useMemo(
-    () => availableCredit(selectedPatientCredits),
-    [selectedPatientCredits]
-  );
-
-  const clinicNameById = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const c of clinicsList) map.set(c.id, c.name);
-    return map;
-  }, [clinicsList]);
-
-  const clinicServiceOptions = useMemo(() => {
-    return profileServices
-      .filter((service) => !clinicId || !service.clinic_id || service.clinic_id === clinicId)
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [profileServices, clinicId]);
-
   const treatmentPlanPaymentsByPlanId = useMemo(() => {
     const map = new Map<string, TreatmentPlanPayment[]>();
     for (const payment of treatmentPlanPayments) {
@@ -351,6 +354,32 @@ export function SearchPatientModal({
     }
     return map;
   }, [treatmentPlanVisits]);
+
+  // Outstanding total = unpaid outstanding-balance records + unpaid treatment-plan balances.
+  const selectedPatientOutstandingTotal = useMemo(() => {
+    const balanceTotal = selectedPatientBalances.reduce(
+      (sum, b) => sum + rollupBalance(b, paymentsByBalanceId.get(b.id) || []).remaining,
+      0
+    );
+    const planTotal = treatmentPlans.reduce((sum, plan) => {
+      const paid = (treatmentPlanPaymentsByPlanId.get(plan.id) || [])
+        .reduce((s, p) => s + Number(p.amount || 0), 0);
+      return sum + Math.max(0, Number(plan.total_amount || 0) - paid);
+    }, 0);
+    return balanceTotal + planTotal;
+  }, [selectedPatientBalances, paymentsByBalanceId, treatmentPlans, treatmentPlanPaymentsByPlanId]);
+
+  const clinicNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const c of clinicsList) map.set(c.id, c.name);
+    return map;
+  }, [clinicsList]);
+
+  const clinicServiceOptions = useMemo(() => {
+    return profileServices
+      .filter((service) => !clinicId || !service.clinic_id || service.clinic_id === clinicId)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [profileServices, clinicId]);
 
   const treatmentPlanSummary = useMemo(() => {
     return treatmentPlans.reduce(
@@ -384,8 +413,9 @@ export function SearchPatientModal({
     setVisitNotes("");
     setPaymentPlanId(null);
     setPlanPaymentAmount("");
-    setPlanPaymentMethod("Cash");
-    setPlanPaymentNotes("");
+    setPlanPaymentMode("Cash");
+    setPlanPaymentDrafts([]);
+    setPlanPaymentValidationErrors([]);
   }
 
   function resetLegacyForm() {
@@ -495,10 +525,12 @@ export function SearchPatientModal({
   function startPlanPayment(plan: TreatmentPlan) {
     if (!receptionistId) { alert("Open the register first."); return; }
     const remaining = planRemaining(plan);
+    const amountStr = remaining > 0 ? remaining.toFixed(2) : "";
     setPaymentPlanId(plan.id);
-    setPlanPaymentAmount(remaining > 0 ? remaining.toFixed(2) : "");
-    setPlanPaymentMethod("Cash");
-    setPlanPaymentNotes("");
+    setPlanPaymentAmount(amountStr);
+    setPlanPaymentMode("Cash");
+    setPlanPaymentDrafts([newPlanAllocationDraft("cash", amountStr)]);
+    setPlanPaymentValidationErrors([]);
     setVisitPlanId(null);
   }
 
@@ -795,32 +827,54 @@ export function SearchPatientModal({
     if (!selectedPatient) return;
     if (!clinic?.id) { alert("Treatment plan payments need an active clinic."); return; }
     if (!receptionistId) { alert("Open the register first."); return; }
-    const amount = parseMoney(planPaymentAmount);
+
+    const invoiceAmount = parseMoney(planPaymentAmount);
     const remaining = planRemaining(plan);
-    if (amount <= 0) { alert("Payment amount must be greater than 0."); return; }
-    if (amount > remaining + 0.0049) {
+    if (invoiceAmount <= 0) { alert("Payment amount must be greater than 0."); return; }
+    if (invoiceAmount > remaining + 0.0049) {
       alert(`Amount exceeds remaining balance (AED ${remaining.toFixed(2)}).`);
+      return;
+    }
+
+    const validationErrors = validatePaymentAllocations(planPaymentDrafts, invoiceAmount);
+    if (validationErrors.length > 0) {
+      setPlanPaymentValidationErrors(validationErrors.map((e) => e.message));
       return;
     }
 
     setSavingTreatmentPayment(true);
     try {
+      const allocations = buildPaymentAllocations(planPaymentDrafts, invoiceAmount, invoiceAmount, 0);
+      const paymentRows = allocations.map((allocation) => {
+        const methodName = paymentVariantLabel(allocation.methodVariant);
+        const networkLabel = allocation.methodVariant === "card" && allocation.cardNetwork
+          ? ` (${allocation.cardNetwork})`
+          : "";
+        const refLabel = allocation.providerReferenceNumber ? ` (Ref: ${allocation.providerReferenceNumber})` : "";
+        const methodLabel = `${methodName}${networkLabel}${refLabel}`;
+        const noteParts = [
+          `Plan payment: ${plan.title}`,
+          `Invoice settled AED ${allocation.invoiceAllocationAmount.toFixed(2)}`,
+          `Fee AED ${allocation.feeAmount.toFixed(2)} @ ${(allocation.feeRate * 100).toFixed(1)}%`,
+          `Customer charged AED ${allocation.customerChargedAmount.toFixed(2)}`,
+        ];
+        return {
+          treatment_plan_id: plan.id,
+          patient_id: selectedPatient.id,
+          clinic_id: clinic.id,
+          // Store invoice allocation amount so plan balance tracks cleanly.
+          amount: allocation.invoiceAllocationAmount,
+          payment_method: methodLabel,
+          receptionist_id: receptionistId,
+          register_session_id: registerSessionId,
+          notes: noteParts.join(" | "),
+        };
+      });
+
       const { data, error } = await supabase
         .from("treatment_plan_payments")
-        .insert([
-          {
-            treatment_plan_id: plan.id,
-            patient_id: selectedPatient.id,
-            clinic_id: clinic.id,
-            amount,
-            payment_method: planPaymentMethod,
-            receptionist_id: receptionistId,
-            register_session_id: registerSessionId,
-            notes: planPaymentNotes.trim() || null,
-          },
-        ])
-        .select()
-        .single();
+        .insert(paymentRows)
+        .select();
 
       if (error) {
         console.error("Collect treatment plan payment failed:", error);
@@ -828,11 +882,40 @@ export function SearchPatientModal({
         return;
       }
 
-      setTreatmentPlanPayments((prev) => [data as TreatmentPlanPayment, ...prev]);
+      const savedPayments = (data as TreatmentPlanPayment[]) || [];
+      setTreatmentPlanPayments((prev) => [...savedPayments, ...prev]);
       setPaymentPlanId(null);
       setPlanPaymentAmount("");
-      setPlanPaymentMethod("Cash");
-      setPlanPaymentNotes("");
+      setPlanPaymentMode("Cash");
+      setPlanPaymentDrafts([]);
+      setPlanPaymentValidationErrors([]);
+
+      // Print receipt
+      const totalFee = allocations.reduce((sum, a) => sum + a.feeAmount, 0);
+      const totalCustomerPaid = allocations.reduce((sum, a) => sum + a.customerChargedAmount, 0);
+      const newRemaining = Math.max(0, remaining - invoiceAmount);
+      printTreatmentPlanPaymentReceipt({
+        clinic: clinic as any,
+        patientName: selectedPatient.name,
+        patientFileNo: selectedPatient.clinic_file_no || (selectedPatient.patient_number != null ? String(selectedPatient.patient_number) : undefined),
+        planTitle: plan.title,
+        paymentArrangement: plan.payment_arrangement || "—",
+        agreedTotal: Number(plan.total_amount || 0),
+        amountSettledToday: invoiceAmount,
+        remainingAfterToday: newRemaining,
+        totalFeeAmount: totalFee,
+        totalCustomerPaid,
+        cashierName: receptionistName || "Reception",
+        services: [],
+        allocations: allocations.map((a) => ({
+          methodLabel: paymentVariantLabel(a.methodVariant),
+          invoiceAllocationAmount: a.invoiceAllocationAmount,
+          feeAmount: a.feeAmount,
+          customerChargedAmount: a.customerChargedAmount,
+        })),
+        createdAt: savedPayments[0]?.created_at,
+        referenceNo: savedPayments[0]?.id ? `TPP-${String(savedPayments[0].id).slice(0, 8).toUpperCase()}` : undefined,
+      });
     } finally {
       setSavingTreatmentPayment(false);
     }
@@ -984,16 +1067,6 @@ export function SearchPatientModal({
                   </div>
                   <div className="flex shrink-0 gap-2">
                     <button
-                      onClick={() => {
-                        if (!receptionistId) { alert("Open the register first."); return; }
-                        if (!clinic?.id) { alert("Deposits need an active clinic. Open the register for a clinic first."); return; }
-                        setShowDepositModal(true);
-                      }}
-                      className="rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500"
-                    >
-                      Receive Deposit
-                    </button>
-                    <button
                       onClick={() => setShowEditModal(true)}
                       className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
                     >
@@ -1001,14 +1074,10 @@ export function SearchPatientModal({
                     </button>
                   </div>
                 </div>
-                <div className="mb-3 grid grid-cols-2 gap-2">
+                <div className="mb-3">
                   <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
                     <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">Outstanding Balance</p>
                     <p className="text-base font-bold text-amber-800">AED {selectedPatientOutstandingTotal.toFixed(2)}</p>
-                  </div>
-                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Available Credit</p>
-                    <p className="text-base font-bold text-emerald-800">AED {selectedPatientAvailableCredit.toFixed(2)}</p>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
@@ -1440,48 +1509,246 @@ export function SearchPatientModal({
                           )}
 
                           {paymentPlanId === plan.id && (
-                            <div className="mt-3 space-y-2 rounded-2xl border border-emerald-100 bg-emerald-50 p-3">
-                              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                                <div>
-                                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Amount Received</label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="0.01"
-                                    value={planPaymentAmount}
-                                    onChange={(e) => setPlanPaymentAmount(e.target.value)}
-                                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Method</label>
-                                  <select
-                                    value={planPaymentMethod}
-                                    onChange={(e) => setPlanPaymentMethod(e.target.value)}
-                                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-                                  >
-                                    {TREATMENT_PLAN_PAYMENT_METHODS.map((method) => (
-                                      <option key={method} value={method}>{method}</option>
-                                    ))}
-                                  </select>
+                            <div className="mt-3 space-y-3 rounded-2xl border border-emerald-100 bg-emerald-50 p-3">
+                              <p className="text-xs font-bold uppercase text-emerald-700">Collect Payment</p>
+                              {/* Invoice amount to collect */}
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Invoice amount to collect (AED)</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={planPaymentAmount}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setPlanPaymentAmount(val);
+                                    const amt = parseFloat(val) || 0;
+                                    if (planPaymentMode !== "Split Payment") {
+                                      const variant = planModeToVariant(planPaymentMode);
+                                      setPlanPaymentDrafts([newPlanAllocationDraft(variant, amt > 0 ? amt.toFixed(2) : "")]);
+                                    }
+                                  }}
+                                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-300"
+                                />
+                                <p className="mt-0.5 text-xs text-slate-500">Max: AED {remaining.toFixed(2)}</p>
+                              </div>
+                              {/* Payment mode selector */}
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Mode</label>
+                                <div className="grid grid-cols-3 gap-2">
+                                  {PLAN_PAYMENT_MODE_OPTIONS.map((mode) => (
+                                    <button
+                                      key={mode}
+                                      type="button"
+                                      onClick={() => {
+                                        setPlanPaymentMode(mode);
+                                        const amt = parseFloat(planPaymentAmount) || 0;
+                                        if (mode === "Split Payment") {
+                                          setPlanPaymentDrafts([
+                                            newPlanAllocationDraft("cash", amt > 0 ? amt.toFixed(2) : ""),
+                                            newPlanAllocationDraft("card", "0.00"),
+                                          ]);
+                                        } else {
+                                          const variant = planModeToVariant(mode);
+                                          setPlanPaymentDrafts([newPlanAllocationDraft(variant, amt > 0 ? amt.toFixed(2) : "")]);
+                                        }
+                                        setPlanPaymentValidationErrors([]);
+                                      }}
+                                      className={`rounded-xl border px-2 py-1.5 text-xs font-semibold transition ${planPaymentMode === mode ? "border-emerald-300 bg-emerald-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-emerald-200"}`}
+                                    >
+                                      {mode}
+                                    </button>
+                                  ))}
                                 </div>
                               </div>
-                              <input
-                                value={planPaymentNotes}
-                                onChange={(e) => setPlanPaymentNotes(e.target.value)}
-                                placeholder="Payment note, optional"
-                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-                              />
+                              {/* Allocation rows */}
+                              {planPaymentDrafts.map((row, draftIndex) => {
+                                const variant = row.methodVariant as PaymentMethodVariant;
+                                const invoiceAmt = parseFloat(planPaymentAmount) || 0;
+                                const rowAllocations = invoiceAmt > 0 ? buildPaymentAllocations(planPaymentDrafts, invoiceAmt, invoiceAmt, 0) : [];
+                                const rowComputed = rowAllocations.find((a) => a.id === row.id);
+                                const needsRef = variant ? referenceRequiredForVariant(variant) : false;
+                                const isCard = variant === "card";
+                                const isTabbyCard = variant === "tabby_card";
+                                return (
+                                  <div key={row.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                                    {planPaymentMode === "Split Payment" && (
+                                      <div className="mb-2 flex items-center justify-between">
+                                        <span className="text-xs font-semibold uppercase text-slate-500">Payment #{draftIndex + 1}</span>
+                                        {planPaymentDrafts.length > 1 && (
+                                          <button type="button" onClick={() => {
+                                            setPlanPaymentDrafts((prev) => prev.filter((d) => d.id !== row.id));
+                                          }} className="text-xs font-semibold text-rose-600 hover:text-rose-700">Remove</button>
+                                        )}
+                                      </div>
+                                    )}
+                                    <div className="grid gap-2 sm:grid-cols-2">
+                                      {planPaymentMode === "Split Payment" && (
+                                        <div>
+                                          <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Method</label>
+                                          <select
+                                            value={row.methodVariant}
+                                            onChange={(e) => {
+                                              const val = e.target.value as PaymentMethodVariant | "";
+                                              setPlanPaymentDrafts((prev) => {
+                                                const next = [...prev];
+                                                next[draftIndex] = { ...next[draftIndex], methodVariant: val };
+                                                return next;
+                                              });
+                                            }}
+                                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-300"
+                                          >
+                                            <option value="">Select method</option>
+                                            {PLAN_ALLOCATION_METHOD_OPTIONS.map((opt) => (
+                                              <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      )}
+                                      {planPaymentMode === "Split Payment" && (
+                                        <div>
+                                          <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Invoice amount</label>
+                                          <input
+                                            type="number" min="0" step="0.01"
+                                            value={row.invoiceAllocationAmountInput}
+                                            onChange={(e) => {
+                                              const val = e.target.value;
+                                              setPlanPaymentDrafts((prev) => {
+                                                const next = [...prev];
+                                                next[draftIndex] = { ...next[draftIndex], invoiceAllocationAmountInput: val };
+                                                // auto-fill last row
+                                                if (draftIndex < next.length - 1) return next;
+                                                return next;
+                                              });
+                                            }}
+                                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-300"
+                                          />
+                                        </div>
+                                      )}
+                                    </div>
+                                    {isCard && (
+                                      <div className="mt-2">
+                                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Card network (optional)</label>
+                                        <div className="flex items-center gap-4 text-sm text-slate-700">
+                                          {["Visa", "Mastercard"].map((network) => (
+                                            <label key={network} className="inline-flex items-center gap-2">
+                                              <input
+                                                type="checkbox"
+                                                checked={String(row.cardNetwork || "").toLowerCase() === network.toLowerCase()}
+                                                onChange={(e) => {
+                                                  const checked = e.target.checked;
+                                                  setPlanPaymentDrafts((prev) => {
+                                                    const next = [...prev];
+                                                    next[draftIndex] = { ...next[draftIndex], cardNetwork: checked ? network : "" };
+                                                    return next;
+                                                  });
+                                                }}
+                                                className="h-4 w-4 accent-emerald-600"
+                                              />
+                                              {network}
+                                            </label>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                    {needsRef && (
+                                      <div className="mt-2">
+                                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">
+                                          {variant === "tamara" ? "Tamara reference" : "Tabby reference"}
+                                        </label>
+                                        <input
+                                          value={row.providerReferenceNumber}
+                                          onChange={(e) => {
+                                            const val = e.target.value;
+                                            setPlanPaymentDrafts((prev) => {
+                                              const next = [...prev];
+                                              next[draftIndex] = { ...next[draftIndex], providerReferenceNumber: val };
+                                              return next;
+                                            });
+                                          }}
+                                          placeholder={variant === "tamara" ? "Tamara reference number" : "Tabby reference number"}
+                                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-300"
+                                        />
+                                      </div>
+                                    )}
+                                    {isTabbyCard && (
+                                      <div className="mt-2">
+                                        <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Terminal auth (optional)</label>
+                                        <input
+                                          value={row.terminalAuthorizationCode}
+                                          onChange={(e) => {
+                                            const val = e.target.value;
+                                            setPlanPaymentDrafts((prev) => {
+                                              const next = [...prev];
+                                              next[draftIndex] = { ...next[draftIndex], terminalAuthorizationCode: val };
+                                              return next;
+                                            });
+                                          }}
+                                          placeholder="Authorization code"
+                                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-300"
+                                        />
+                                      </div>
+                                    )}
+                                    {rowComputed && (rowComputed.feeAmount > 0 || rowComputed.customerChargedAmount > 0) && (
+                                      <div className="mt-2 rounded-xl border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900">
+                                        {rowComputed.feeAmount > 0 && (
+                                          <div className="flex justify-between">
+                                            <span>Fee ({(rowComputed.feeRate * 100).toFixed(1)}%)</span>
+                                            <span className="font-semibold">AED {rowComputed.feeAmount.toFixed(2)}</span>
+                                          </div>
+                                        )}
+                                        <div className="mt-1 flex justify-between border-t border-cyan-200 pt-1 font-bold">
+                                          <span>Collect</span>
+                                          <span>AED {rowComputed.customerChargedAmount.toFixed(2)}</span>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {planPaymentMode === "Split Payment" && (
+                                <button
+                                  type="button"
+                                  onClick={() => setPlanPaymentDrafts((prev) => [...prev, newPlanAllocationDraft("", "0.00")])}
+                                  className="w-full rounded-xl border border-dashed border-emerald-300 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+                                >
+                                  + Add method
+                                </button>
+                              )}
+                              {/* Summary */}
+                              {planPaymentDrafts.length > 0 && (() => {
+                                const invoiceAmt = parseFloat(planPaymentAmount) || 0;
+                                if (invoiceAmt <= 0) return null;
+                                const allocs = buildPaymentAllocations(planPaymentDrafts, invoiceAmt, invoiceAmt, 0);
+                                const totalFee = allocs.reduce((sum, a) => sum + a.feeAmount, 0);
+                                const totalCharged = allocs.reduce((sum, a) => sum + a.customerChargedAmount, 0);
+                                if (totalFee <= 0 && allocs.length < 2) return null;
+                                return (
+                                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
+                                    <div className="flex justify-between"><span>Invoice settled</span><span>AED {invoiceAmt.toFixed(2)}</span></div>
+                                    {totalFee > 0 && <div className="flex justify-between text-cyan-700"><span>Total fee</span><span>AED {totalFee.toFixed(2)}</span></div>}
+                                    <div className="mt-1 flex justify-between border-t border-slate-200 pt-1 font-bold text-slate-900">
+                                      <span>Total customer pays</span><span>AED {totalCharged.toFixed(2)}</span>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                              {/* Validation errors */}
+                              {planPaymentValidationErrors.length > 0 && (
+                                <div className="rounded-xl border border-rose-200 bg-rose-50 p-2 text-xs text-rose-700">
+                                  {[...new Set(planPaymentValidationErrors)].map((msg) => <p key={msg}>• {msg}</p>)}
+                                </div>
+                              )}
                               <div className="flex gap-2">
                                 <button
                                   onClick={() => saveTreatmentPayment(plan)}
                                   disabled={savingTreatmentPayment}
                                   className="rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
                                 >
-                                  {savingTreatmentPayment ? "Saving…" : "Collect Payment"}
+                                  {savingTreatmentPayment ? "Saving…" : "Collect & Print Receipt"}
                                 </button>
                                 <button
-                                  onClick={() => setPaymentPlanId(null)}
+                                  onClick={() => { setPaymentPlanId(null); setPlanPaymentValidationErrors([]); }}
                                   className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
                                 >
                                   Cancel
@@ -1595,61 +1862,6 @@ export function SearchPatientModal({
                         </div>
                       );
                     })}
-                  </div>
-                  )
-                )}
-              </div>
-
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-                <button
-                  type="button"
-                  onClick={() => toggleProfileSection("credits")}
-                  className="flex w-full items-center justify-between text-left"
-                >
-                  <span className="text-xs font-bold uppercase tracking-wide text-emerald-700">Patient Credit / Deposits</span>
-                  <span className="text-xs font-semibold text-emerald-800">
-                    Available: AED {selectedPatientAvailableCredit.toFixed(2)} {isProfileSectionOpen("credits") ? "▲" : "▼"}
-                  </span>
-                </button>
-                {isProfileSectionOpen("credits") && (
-                  selectedPatientCredits.length === 0 ? (
-                    <p className="mt-3 text-sm text-emerald-700">No deposits or credit activity.</p>
-                  ) : (
-                  <div className="space-y-2">
-                    {selectedPatientCredits.map((credit) => (
-                      <div key={credit.id} className="rounded-xl border border-emerald-200 bg-white p-3">
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p className="text-xs font-semibold text-slate-500">
-                              {clinicNameById.get(credit.clinic_id) || "Clinic"} · {new Date(credit.created_at).toLocaleDateString("en-GB")}
-                            </p>
-                            <p className="text-sm font-semibold text-slate-800">
-                              {Number(credit.amount) > 0
-                                ? credit.reason || "Deposit"
-                                : "Applied to treatment"}
-                            </p>
-                            {credit.expected_treatment_date && (
-                              <p className="mt-0.5 text-xs text-slate-500">
-                                Expected treatment: {new Date(credit.expected_treatment_date).toLocaleDateString("en-GB")}
-                              </p>
-                            )}
-                            {credit.notes && <p className="mt-0.5 text-xs text-slate-500">{credit.notes}</p>}
-                          </div>
-                          <div className="text-right">
-                            <p className={
-                              Number(credit.amount) > 0
-                                ? "text-sm font-bold text-emerald-700"
-                                : "text-sm font-bold text-slate-600"
-                            }>
-                              {Number(credit.amount) > 0 ? "+" : "−"} AED {Math.abs(Number(credit.amount)).toFixed(2)}
-                            </p>
-                            {credit.payment_method && (
-                              <p className="text-[10px] text-slate-500">{credit.payment_method}</p>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
                   </div>
                   )
                 )}
@@ -1927,17 +2139,6 @@ export function SearchPatientModal({
 
       </div>
 
-      <ReceiveDepositModal
-        isOpen={showDepositModal}
-        onClose={() => setShowDepositModal(false)}
-        patient={selectedPatient}
-        clinic={clinic}
-        receptionistId={receptionistId}
-        registerSessionId={registerSessionId}
-        cashierName={receptionistName}
-        existingCredits={selectedPatientCredits}
-        onSaved={(credit) => onCreditSaved?.(credit)}
-      />
       <EditPatientModal
         isOpen={showEditModal}
         onClose={() => setShowEditModal(false)}

@@ -1,10 +1,21 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import type { Clinic, TreatmentPlan, TreatmentPlanPayment } from "../lib/types";
+import {
+  buildPaymentAllocations,
+  paymentSummaryLabel,
+  paymentVariantLabel,
+  PaymentAllocationDraft,
+  PaymentMethodVariant,
+  referenceRequiredForVariant,
+  validatePaymentAllocations,
+} from "../lib/payment-allocation";
+import { toMinorUnits } from "../lib/money";
+import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-payment-receipt";
 
-const PLAN_PAYMENT_METHODS = ["Cash", "Card", "Visa", "Mastercard", "Tabby", "Tabby Card", "Tamara", "Tamara Card", "Bank Transfer", "Split Payment"];
+const PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"] as const;
 const PAYMENT_ARRANGEMENTS = [
   "Full payment today",
   "Down payment + remaining balance",
@@ -13,6 +24,39 @@ const PAYMENT_ARRANGEMENTS = [
   "Custom schedule",
   "No payment today",
 ];
+const ALLOCATION_METHOD_OPTIONS: Array<{ value: PaymentMethodVariant; label: string }> = [
+  { value: "cash", label: "Cash" },
+  { value: "card", label: "Card" },
+  { value: "tabby_standard", label: "Tabby" },
+  { value: "tabby_card", label: "Tabby Card" },
+  { value: "tamara", label: "Tamara" },
+];
+
+function newAllocationDraft(methodVariant: PaymentMethodVariant | "" = "", amount = ""): PaymentAllocationDraft {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    methodVariant,
+    invoiceAllocationAmountInput: amount,
+    providerReferenceNumber: "",
+    terminalAuthorizationCode: "",
+    cardNetwork: "",
+  };
+}
+
+function modeToVariant(mode: string): PaymentMethodVariant {
+  if (mode === "Cash") return "cash";
+  if (mode === "Card") return "card";
+  if (mode === "Tabby") return "tabby_standard";
+  if (mode === "Tamara") return "tamara";
+  return "cash";
+}
+
+function formatNetworkLabel(value: string) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "visa") return "Visa";
+  if (normalized === "mastercard") return "Mastercard";
+  return "";
+}
 
 export function PosPlanCheckoutModal({
   isOpen,
@@ -25,6 +69,7 @@ export function PosPlanCheckoutModal({
   patientFileNo,
   doctorId,
   receptionistId,
+  receptionistName,
   registerSessionId,
   services,
   subtotal,
@@ -35,7 +80,7 @@ export function PosPlanCheckoutModal({
 }: {
   isOpen: boolean;
   onClose: () => void;
-  onSaved: (plan: TreatmentPlan, payment: TreatmentPlanPayment | null) => void;
+  onSaved: (plan: TreatmentPlan, payments: TreatmentPlanPayment[]) => void;
   patientId: string;
   patientName: string;
   clinicId: string;
@@ -43,6 +88,7 @@ export function PosPlanCheckoutModal({
   patientFileNo: string;
   doctorId: string;
   receptionistId: string;
+  receptionistName: string;
   registerSessionId: string;
   services: Array<{ id: string; name: string; price: number; quantity?: number; teeth?: string[] }>;
   subtotal: number;
@@ -57,38 +103,86 @@ export function PosPlanCheckoutModal({
   const [agreedTotal, setAgreedTotal] = useState(String(total.toFixed(2)));
   const [paymentArrangement, setPaymentArrangement] = useState("Full payment today");
   const [amountToday, setAmountToday] = useState(String(total.toFixed(2)));
-  const [paymentMethod, setPaymentMethod] = useState("Cash");
-  const [tabbyRef, setTabbyRef] = useState("");
-  const [tamaraRef, setTamaraRef] = useState("");
+  const [paymentMode, setPaymentMode] = useState<(typeof PAYMENT_MODE_OPTIONS)[number]>("Cash");
+  const [paymentAllocationDrafts, setPaymentAllocationDrafts] = useState<PaymentAllocationDraft[]>([]);
+  const [paymentValidationErrors, setPaymentValidationErrors] = useState<string[]>([]);
   const [planNotes, setPlanNotes] = useState("");
   const [saving, setSaving] = useState(false);
-  const [step, setStep] = useState<"config" | "review">("config");
+  const [step, setStep] = useState<"config" | "payment">("config");
 
   const agreedTotalNum = parseFloat(agreedTotal) || 0;
   const amountTodayNum = parseFloat(amountToday) || 0;
   const remainingAfterToday = Math.max(0, agreedTotalNum - amountTodayNum);
+  const amountTodayMinor = toMinorUnits(amountTodayNum);
+
+  const previewAllocations = useMemo(() => {
+    if (amountTodayNum <= 0.001 || paymentAllocationDrafts.length === 0) return [];
+    return buildPaymentAllocations(paymentAllocationDrafts, amountTodayNum, amountTodayNum, 0);
+  }, [amountTodayNum, paymentAllocationDrafts]);
+
+  const allocationInvoiceMinor = previewAllocations.reduce((sum, allocation) => sum + toMinorUnits(allocation.invoiceAllocationAmount), 0);
+  const allocationBalanced = amountTodayMinor === allocationInvoiceMinor;
+  const paymentFeeTotal = previewAllocations.reduce((sum, allocation) => sum + allocation.feeAmount, 0);
+  const customerChargeTotal = previewAllocations.reduce((sum, allocation) => sum + allocation.customerChargedAmount, 0);
 
   if (!isOpen) return null;
 
-  function goToReview() {
+  function prepareDraftsForMode(mode: (typeof PAYMENT_MODE_OPTIONS)[number]) {
+    if (amountTodayNum <= 0.001) {
+      setPaymentAllocationDrafts([]);
+      return;
+    }
+
+    if (mode !== "Split Payment") {
+      const variant = modeToVariant(mode);
+      setPaymentAllocationDrafts([newAllocationDraft(variant, amountTodayNum.toFixed(2))]);
+      return;
+    }
+
+    setPaymentAllocationDrafts([
+      newAllocationDraft("cash", amountTodayNum.toFixed(2)),
+      newAllocationDraft("card", "0.00"),
+    ]);
+  }
+
+  function applyRemainingToLastRow(drafts: PaymentAllocationDraft[], editedIndex: number) {
+    if (paymentMode !== "Split Payment" || drafts.length < 2) return drafts;
+    const lastIndex = drafts.length - 1;
+    if (editedIndex === lastIndex) return drafts;
+
+    const sumPrevious = drafts
+      .slice(0, lastIndex)
+      .reduce((sum, row) => sum + (parseFloat(String(row.invoiceAllocationAmountInput || "0").replace(/,/g, ".")) || 0), 0);
+    const remaining = Math.max(0, Math.round((amountTodayNum - sumPrevious) * 100) / 100);
+
+    const next = [...drafts];
+    next[lastIndex] = {
+      ...next[lastIndex],
+      invoiceAllocationAmountInput: remaining.toFixed(2),
+    };
+    return next;
+  }
+
+  function goToPayment() {
     if (!planTitle.trim()) { alert("Please enter a plan name."); return; }
     const visits = parseInt(plannedVisits, 10);
     if (!Number.isFinite(visits) || visits < 1) { alert("Planned visits must be at least 1."); return; }
     if (amountTodayNum < 0) { alert("Amount today cannot be negative."); return; }
     if (amountTodayNum > agreedTotalNum + 0.001) { alert("Amount today cannot exceed the agreed total."); return; }
-    if (amountTodayNum > 0.001) {
-      if (!paymentMethod) { alert("Please select a payment method."); return; }
-      if (paymentMethod === "Tabby" && !tabbyRef.trim()) { alert("Enter Tabby reference number."); return; }
-      if (paymentMethod === "Tamara" && !tamaraRef.trim()) { alert("Enter Tamara reference number."); return; }
+    if (amountTodayNum <= 0.001) {
+      handleSave();
+      return;
     }
-    setStep("review");
+
+    prepareDraftsForMode(paymentMode);
+    setPaymentValidationErrors([]);
+    setStep("payment");
   }
 
   async function handleSave() {
     setSaving(true);
     try {
       const visits = parseInt(plannedVisits, 10);
-
       const { data: planData, error: planError } = await supabase
         .from("treatment_plans")
         .insert([{
@@ -112,38 +206,89 @@ export function PosPlanCheckoutModal({
         return;
       }
 
-      let paymentData: TreatmentPlanPayment | null = null;
+      let savedPayments: TreatmentPlanPayment[] = [];
 
       if (amountTodayNum > 0.001) {
-        const methodLabel = paymentMethod === "Tabby"
-          ? `Tabby (Ref: ${tabbyRef.trim()})`
-          : paymentMethod === "Tamara"
-          ? `Tamara (Ref: ${tamaraRef.trim()})`
-          : paymentMethod;
+        const validationErrors = validatePaymentAllocations(paymentAllocationDrafts, amountTodayNum);
+        if (validationErrors.length > 0) {
+          setPaymentValidationErrors(validationErrors.map((error) => error.message));
+          setStep("payment");
+          alert("Please fix payment allocation issues before saving.");
+          return;
+        }
 
-        const { data: pmtData, error: pmtError } = await supabase
-          .from("treatment_plan_payments")
-          .insert([{
+        const allocations = buildPaymentAllocations(paymentAllocationDrafts, amountTodayNum, amountTodayNum, 0);
+        const paymentRows = allocations.map((allocation) => {
+          const methodName = paymentVariantLabel(allocation.methodVariant);
+          const networkLabel = allocation.methodVariant === "card" && allocation.cardNetwork
+            ? ` (${formatNetworkLabel(allocation.cardNetwork) || allocation.cardNetwork})`
+            : "";
+          const refLabel = allocation.providerReferenceNumber ? ` (Ref: ${allocation.providerReferenceNumber})` : "";
+          const methodLabel = `${methodName}${networkLabel}${refLabel}`;
+
+          const parts = [
+            `Initial payment for plan: ${planTitle.trim()}`,
+            `Invoice settled AED ${allocation.invoiceAllocationAmount.toFixed(2)}`,
+            `Fee AED ${allocation.feeAmount.toFixed(2)} @ ${(allocation.feeRate * 100).toFixed(1)}%`,
+            `Customer charged AED ${allocation.customerChargedAmount.toFixed(2)}`,
+          ];
+          if (allocation.terminalAuthorizationCode) {
+            parts.push(`Terminal auth: ${allocation.terminalAuthorizationCode}`);
+          }
+
+          return {
             treatment_plan_id: planData.id,
             patient_id: patientId,
             clinic_id: clinicId,
-            amount: amountTodayNum,
+            // Store invoice allocation amount so plan balance tracks cleanly;
+            // customer charged (fee-inclusive) amount is in notes.
+            amount: allocation.invoiceAllocationAmount,
             payment_method: methodLabel,
             receptionist_id: receptionistId,
             register_session_id: registerSessionId || null,
-            notes: `Initial payment for plan: ${planTitle.trim()}`,
-          }])
-          .select()
-          .single();
+            notes: parts.join(" | "),
+          };
+        });
 
-        if (pmtError || !pmtData) {
-          alert(`Plan created but payment failed: ${pmtError?.message || "Unknown"}`);
+        const { data: pmtData, error: pmtError } = await supabase
+          .from("treatment_plan_payments")
+          .insert(paymentRows)
+          .select();
+
+        if (pmtError) {
+          alert(`Plan created but payment failed: ${pmtError.message || "Unknown error"}`);
         } else {
-          paymentData = pmtData as TreatmentPlanPayment;
+          savedPayments = (pmtData as TreatmentPlanPayment[]) || [];
+          const totalCustomerPaid = allocations.reduce((sum, allocation) => sum + allocation.customerChargedAmount, 0);
+          const totalFee = allocations.reduce((sum, allocation) => sum + allocation.feeAmount, 0);
+          const firstPayment = savedPayments[0];
+
+          printTreatmentPlanPaymentReceipt({
+            clinic,
+            patientName,
+            patientFileNo,
+            planTitle: planTitle.trim(),
+            paymentArrangement,
+            agreedTotal: agreedTotalNum,
+            amountSettledToday: amountTodayNum,
+            remainingAfterToday,
+            totalFeeAmount: totalFee,
+            totalCustomerPaid,
+            cashierName: receptionistName || "Reception",
+            services,
+            allocations: allocations.map((allocation) => ({
+              methodLabel: paymentVariantLabel(allocation.methodVariant),
+              invoiceAllocationAmount: allocation.invoiceAllocationAmount,
+              feeAmount: allocation.feeAmount,
+              customerChargedAmount: allocation.customerChargedAmount,
+            })),
+            createdAt: firstPayment?.created_at,
+            referenceNo: firstPayment?.id ? `TPP-${String(firstPayment.id).slice(0, 8).toUpperCase()}` : undefined,
+          });
         }
       }
 
-      onSaved(planData as TreatmentPlan, paymentData);
+      onSaved(planData as TreatmentPlan, savedPayments);
     } finally {
       setSaving(false);
     }
@@ -163,88 +308,88 @@ export function PosPlanCheckoutModal({
         <div className="flex-1 overflow-y-auto p-6">
           {step === "config" ? (
             <div className="space-y-4">
-              {/* Services summary */}
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Selected Services</p>
                 <div className="space-y-1">
-                  {services.map((s, i) => {
-                    const teethStr = s.teeth && s.teeth.length > 0 ? ` — Tooth #${s.teeth.join(", #")}` : "";
+                  {services.map((service, index) => {
+                    const teethStr = service.teeth && service.teeth.length > 0 ? ` — Tooth #${service.teeth.join(", #")}` : "";
                     return (
-                      <div key={i} className="flex items-center justify-between text-sm">
-                        <span className="text-slate-800">{s.name}{teethStr}</span>
-                        <span className="font-semibold text-slate-700">AED {(Number(s.price) * (s.quantity ?? 1)).toFixed(2)}</span>
+                      <div key={index} className="flex items-center justify-between text-sm">
+                        <span className="text-slate-800">{service.name}{teethStr}</span>
+                        <span className="font-semibold text-slate-700">AED {(Number(service.price) * (service.quantity ?? 1)).toFixed(2)}</span>
                       </div>
                     );
                   })}
                 </div>
-                <div className="mt-2 border-t border-slate-200 pt-2 flex justify-between text-sm font-bold text-slate-900">
+                <div className="mt-2 flex justify-between border-t border-slate-200 pt-2 text-sm font-bold text-slate-900">
                   <span>Total</span>
                   <span>AED {total.toFixed(2)}</span>
                 </div>
               </div>
 
-              {/* Plan name */}
               <div>
                 <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Plan Name</label>
                 <input
                   value={planTitle}
-                  onChange={(e) => setPlanTitle(e.target.value)}
+                  onChange={(event) => setPlanTitle(event.target.value)}
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                {/* Agreed total */}
                 <div>
                   <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Agreed Total (AED)</label>
                   <input
-                    type="number" min="0" step="0.01"
+                    type="number"
+                    min="0"
+                    step="0.01"
                     value={agreedTotal}
-                    onChange={(e) => setAgreedTotal(e.target.value)}
+                    onChange={(event) => setAgreedTotal(event.target.value)}
                     className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                   />
                 </div>
-                {/* Planned visits */}
                 <div>
                   <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Planned Visits</label>
                   <input
-                    type="number" min="1" step="1"
+                    type="number"
+                    min="1"
+                    step="1"
                     value={plannedVisits}
-                    onChange={(e) => setPlannedVisits(e.target.value)}
+                    onChange={(event) => setPlannedVisits(event.target.value)}
                     className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                   />
                 </div>
               </div>
 
-              {/* Payment arrangement */}
               <div>
                 <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Arrangement</label>
                 <select
                   value={paymentArrangement}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setPaymentArrangement(val);
-                    if (val === "Full payment today") setAmountToday(String(parseFloat(agreedTotal) || 0));
-                    else if (val === "50% now / 50% later") setAmountToday(String(Math.round((parseFloat(agreedTotal) || 0) * 0.5 * 100) / 100));
-                    else if (val === "No payment today") setAmountToday("0");
-                    else if (val === "Payment per visit") {
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setPaymentArrangement(value);
+                    if (value === "Full payment today") setAmountToday(String(parseFloat(agreedTotal) || 0));
+                    else if (value === "50% now / 50% later") setAmountToday(String(Math.round((parseFloat(agreedTotal) || 0) * 0.5 * 100) / 100));
+                    else if (value === "No payment today") setAmountToday("0");
+                    else if (value === "Payment per visit") {
                       const visits = parseInt(plannedVisits, 10) || 1;
                       setAmountToday(String(Math.round((parseFloat(agreedTotal) || 0) / visits * 100) / 100));
                     }
                   }}
                   className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                 >
-                  {PAYMENT_ARRANGEMENTS.map((a) => <option key={a} value={a}>{a}</option>)}
+                  {PAYMENT_ARRANGEMENTS.map((arrangement) => <option key={arrangement} value={arrangement}>{arrangement}</option>)}
                 </select>
               </div>
 
-              {/* Amount today */}
               <div>
                 <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Amount Paid Today (AED)</label>
                 <input
-                  type="number" min="0" step="0.01"
+                  type="number"
+                  min="0"
+                  step="0.01"
                   value={amountToday}
-                  onChange={(e) => setAmountToday(e.target.value)}
+                  onChange={(event) => setAmountToday(event.target.value)}
                   className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                 />
                 {amountTodayNum < agreedTotalNum - 0.001 && (
@@ -254,36 +399,28 @@ export function PosPlanCheckoutModal({
                 )}
               </div>
 
-              {/* Payment method (only when amount > 0) */}
               {amountTodayNum > 0.001 && (
                 <div>
-                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Method</label>
+                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment Mode</label>
                   <div className="grid grid-cols-3 gap-2">
-                    {PLAN_PAYMENT_METHODS.map((m) => (
+                    {PAYMENT_MODE_OPTIONS.map((mode) => (
                       <button
-                        key={m}
-                        onClick={() => setPaymentMethod(m)}
-                        className={`rounded-xl border px-2 py-1.5 text-xs font-semibold transition ${paymentMethod === m ? "border-cyan-300 bg-cyan-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-cyan-200"}`}
+                        key={mode}
+                        onClick={() => setPaymentMode(mode)}
+                        className={`rounded-xl border px-2 py-1.5 text-xs font-semibold transition ${paymentMode === mode ? "border-cyan-300 bg-cyan-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-cyan-200"}`}
                       >
-                        {m}
+                        {mode}
                       </button>
                     ))}
                   </div>
-                  {paymentMethod === "Tabby" && (
-                    <input value={tabbyRef} onChange={(e) => setTabbyRef(e.target.value)} placeholder="Tabby reference number" className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300" />
-                  )}
-                  {paymentMethod === "Tamara" && (
-                    <input value={tamaraRef} onChange={(e) => setTamaraRef(e.target.value)} placeholder="Tamara reference number" className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300" />
-                  )}
                 </div>
               )}
 
-              {/* Notes */}
               <div>
                 <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Plan Notes (Optional)</label>
                 <textarea
                   value={planNotes}
-                  onChange={(e) => setPlanNotes(e.target.value)}
+                  onChange={(event) => setPlanNotes(event.target.value)}
                   rows={2}
                   placeholder="Treatment stages, notes…"
                   className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
@@ -291,33 +428,251 @@ export function PosPlanCheckoutModal({
               </div>
 
               <button
-                onClick={goToReview}
+                onClick={goToPayment}
                 className="w-full rounded-2xl bg-cyan-600 py-3 text-sm font-semibold text-white transition hover:bg-cyan-500"
               >
-                Review Plan →
+                {amountTodayNum > 0.001 ? "Proceed to Payment →" : "Save Plan"}
               </button>
             </div>
           ) : (
             <div className="space-y-4">
-              <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 space-y-2">
-                <h3 className="text-sm font-bold text-cyan-900">Review Treatment Plan</h3>
-                <div className="space-y-1 text-sm text-slate-700">
-                  <div className="flex justify-between"><span className="font-semibold">Plan Name</span><span>{planTitle}</span></div>
-                  <div className="flex justify-between"><span className="font-semibold">Patient</span><span>{patientName}</span></div>
-                  {patientFileNo && <div className="flex justify-between"><span className="font-semibold">File No.</span><span>#{patientFileNo}</span></div>}
-                  <div className="flex justify-between"><span className="font-semibold">Planned Visits</span><span>{plannedVisits}</span></div>
-                  <div className="flex justify-between"><span className="font-semibold">Agreed Total</span><span>AED {agreedTotalNum.toFixed(2)}</span></div>
-                  <div className="flex justify-between"><span className="font-semibold">Payment Arrangement</span><span>{paymentArrangement}</span></div>
-                  {amountTodayNum > 0.001 ? (
-                    <>
-                      <div className="flex justify-between text-emerald-700 font-semibold"><span>Paid Today</span><span>AED {amountTodayNum.toFixed(2)}</span></div>
-                      <div className="flex justify-between text-amber-700 font-semibold"><span>Remaining Balance</span><span>AED {remainingAfterToday.toFixed(2)}</span></div>
-                      <div className="flex justify-between"><span className="font-semibold">Payment Method</span><span>{paymentMethod}</span></div>
-                    </>
-                  ) : (
-                    <div className="flex justify-between text-slate-500"><span className="font-semibold">Payment Today</span><span>None</span></div>
-                  )}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-600">Plan</span>
+                  <span className="font-semibold text-slate-900">{planTitle}</span>
                 </div>
+                <div className="mt-1 flex items-center justify-between">
+                  <span className="text-slate-600">Invoice amount being paid</span>
+                  <span className="font-semibold text-slate-900">AED {amountTodayNum.toFixed(2)}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between">
+                  <span className="text-slate-600">Remaining plan balance</span>
+                  <span className="font-semibold text-amber-700">AED {remainingAfterToday.toFixed(2)}</span>
+                </div>
+                <p className="mt-2 text-xs text-slate-500">
+                  Enter the amount being settled against the invoice. The Tabby/Tamara fee will be calculated separately.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                {paymentAllocationDrafts.map((row, index) => {
+                  const variant = row.methodVariant as PaymentMethodVariant;
+                  const rowComputed = previewAllocations.find((allocation) => allocation.id === row.id);
+                  const needsReference = variant ? referenceRequiredForVariant(variant) : false;
+                  const isCard = variant === "card";
+                  const isTabbyCard = variant === "tabby_card";
+
+                  return (
+                    <div key={row.id} className="rounded-2xl border border-slate-200 p-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-xs font-semibold uppercase text-slate-500">Payment #{index + 1}</span>
+                        {paymentAllocationDrafts.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPaymentAllocationDrafts((prev) => {
+                                const next = prev.filter((draft) => draft.id !== row.id);
+                                return applyRemainingToLastRow(next, Math.max(0, index - 1));
+                              });
+                            }}
+                            className="text-xs font-semibold text-rose-600 hover:text-rose-700"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Payment method</label>
+                          <select
+                            value={row.methodVariant}
+                            onChange={(event) => {
+                              const value = event.target.value as PaymentMethodVariant | "";
+                              setPaymentAllocationDrafts((prev) => {
+                                const next = [...prev];
+                                next[index] = { ...next[index], methodVariant: value };
+                                return next;
+                              });
+                            }}
+                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300"
+                          >
+                            <option value="">Select method</option>
+                            {ALLOCATION_METHOD_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Invoice amount allocated</label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={row.invoiceAllocationAmountInput}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setPaymentAllocationDrafts((prev) => {
+                                const next = [...prev];
+                                next[index] = { ...next[index], invoiceAllocationAmountInput: value };
+                                return applyRemainingToLastRow(next, index);
+                              });
+                            }}
+                            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300"
+                          />
+                        </div>
+                      </div>
+
+                      {isCard && (
+                        <div className="mt-2">
+                          <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Card network (optional)</label>
+                          <div className="flex items-center gap-4 text-sm text-slate-700">
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={String(row.cardNetwork || "").toLowerCase() === "visa"}
+                                onChange={(event) => {
+                                  const checked = event.target.checked;
+                                  setPaymentAllocationDrafts((prev) => {
+                                    const next = [...prev];
+                                    next[index] = { ...next[index], cardNetwork: checked ? "Visa" : "" };
+                                    return next;
+                                  });
+                                }}
+                                className="h-4 w-4 accent-cyan-600"
+                              />
+                              Visa
+                            </label>
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={String(row.cardNetwork || "").toLowerCase() === "mastercard"}
+                                onChange={(event) => {
+                                  const checked = event.target.checked;
+                                  setPaymentAllocationDrafts((prev) => {
+                                    const next = [...prev];
+                                    next[index] = { ...next[index], cardNetwork: checked ? "Mastercard" : "" };
+                                    return next;
+                                  });
+                                }}
+                                className="h-4 w-4 accent-cyan-600"
+                              />
+                              Mastercard
+                            </label>
+                          </div>
+                        </div>
+                      )}
+
+                      {needsReference && (
+                        <div className="mt-2">
+                          <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">
+                            {variant === "tamara" ? "Tamara reference number" : "Tabby reference number"}
+                          </label>
+                          <input
+                            value={row.providerReferenceNumber}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setPaymentAllocationDrafts((prev) => {
+                                const next = [...prev];
+                                next[index] = { ...next[index], providerReferenceNumber: value };
+                                return next;
+                              });
+                            }}
+                            placeholder={variant === "tamara" ? "Tamara reference number" : "Tabby reference number"}
+                            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300"
+                          />
+                        </div>
+                      )}
+
+                      {isTabbyCard && (
+                        <div className="mt-2">
+                          <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Terminal authorization code (optional)</label>
+                          <input
+                            value={row.terminalAuthorizationCode}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setPaymentAllocationDrafts((prev) => {
+                                const next = [...prev];
+                                next[index] = { ...next[index], terminalAuthorizationCode: value };
+                                return next;
+                              });
+                            }}
+                            placeholder="Authorization code"
+                            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300"
+                          />
+                        </div>
+                      )}
+
+                      <div className="mt-2 rounded-xl border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900">
+                        <div className="flex items-center justify-between">
+                          <span>Fee rate</span>
+                          <span className="font-semibold">{rowComputed ? `${(rowComputed.feeRate * 100).toFixed(1)}%` : "0.0%"}</span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between">
+                          <span>Payment fee</span>
+                          <span className="font-semibold">AED {rowComputed ? rowComputed.feeAmount.toFixed(2) : "0.00"}</span>
+                        </div>
+                        <div className="mt-1 flex items-center justify-between border-t border-cyan-200 pt-1 font-bold">
+                          <span>Amount to collect</span>
+                          <span>AED {rowComputed ? rowComputed.customerChargedAmount.toFixed(2) : "0.00"}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentAllocationDrafts((prev) => {
+                      const next = [...prev, newAllocationDraft("", "0.00")];
+                      return applyRemainingToLastRow(next, Math.max(0, next.length - 2));
+                    });
+                  }}
+                  className="w-full rounded-xl border border-dashed border-cyan-300 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-50"
+                >
+                  + Add another payment method
+                </button>
+              </div>
+
+              {paymentValidationErrors.length > 0 && (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+                  <p className="font-semibold">Please fix the following:</p>
+                  <ul className="mt-1 list-disc pl-4">
+                    {[...new Set(paymentValidationErrors)].map((message) => (
+                      <li key={message}>{message}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
+                <p className="font-semibold text-slate-700">Payment Summary</p>
+                <div className="mt-1 flex items-center justify-between">
+                  <span className="text-slate-600">Invoice amount being paid</span>
+                  <span className="font-semibold">AED {amountTodayNum.toFixed(2)}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between">
+                  <span className="text-slate-600">Payment fee</span>
+                  <span className="font-semibold">AED {paymentFeeTotal.toFixed(2)}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between">
+                  <span className="text-slate-700">Total customer pays</span>
+                  <span className="font-bold text-slate-900">AED {customerChargeTotal.toFixed(2)}</span>
+                </div>
+                {previewAllocations.length > 0 && (
+                  <div className="mt-2 border-t border-slate-200 pt-2 text-xs text-slate-600">
+                    {previewAllocations.map((allocation) => (
+                      <div key={allocation.id} className="mt-1 flex items-center justify-between">
+                        <span>Collect through {paymentVariantLabel(allocation.methodVariant)}</span>
+                        <span className="font-semibold text-slate-800">AED {allocation.customerChargedAmount.toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="flex gap-3">
@@ -325,16 +680,27 @@ export function PosPlanCheckoutModal({
                   onClick={() => setStep("config")}
                   className="flex-1 rounded-2xl border border-slate-200 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
                 >
-                  ← Edit
+                  ← Back
                 </button>
                 <button
-                  onClick={handleSave}
-                  disabled={saving}
+                  onClick={async () => {
+                    const validationErrors = validatePaymentAllocations(paymentAllocationDrafts, amountTodayNum);
+                    setPaymentValidationErrors(validationErrors.map((error) => error.message));
+                    if (validationErrors.length > 0) return;
+                    await handleSave();
+                  }}
+                  disabled={saving || !allocationBalanced || previewAllocations.length === 0}
                   className="flex-1 rounded-2xl bg-cyan-600 py-3 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50"
                 >
-                  {saving ? "Saving…" : amountTodayNum > 0.001 ? "Save Plan & Record Payment" : "Save Plan"}
+                  {saving ? "Saving…" : `Save Plan & Collect (${paymentSummaryLabel(previewAllocations) || "Payment"})`}
                 </button>
               </div>
+
+              {!allocationBalanced && (
+                <p className="text-center text-xs font-semibold text-amber-700">
+                  Allocations must match AED {amountTodayNum.toFixed(2)} before you can continue.
+                </p>
+              )}
             </div>
           )}
         </div>
