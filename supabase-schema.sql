@@ -252,3 +252,68 @@ create index if not exists treatment_plan_payments_plan_id_idx on public.treatme
 create index if not exists treatment_plan_payments_patient_id_idx on public.treatment_plan_payments(patient_id);
 create index if not exists treatment_plan_payments_clinic_id_idx on public.treatment_plan_payments(clinic_id);
 create index if not exists treatment_plan_payments_created_at_idx on public.treatment_plan_payments(created_at desc);
+
+create table if not exists public.clinic_monthly_targets (
+  id uuid primary key default gen_random_uuid(),
+  clinic_id uuid not null references public.clinics(id) on delete cascade,
+  target_year int not null check (target_year between 2000 and 2100),
+  target_month int not null check (target_month between 1 and 12),
+  net_sales_target numeric(14,2) not null check (net_sales_target >= 0),
+  notes text,
+  created_by uuid references public.receptionist(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint clinic_monthly_targets_unique unique (clinic_id, target_year, target_month)
+);
+
+create index if not exists clinic_monthly_targets_clinic_idx
+  on public.clinic_monthly_targets(clinic_id, target_year, target_month);
+
+create table if not exists public.clinic_operating_schedule (
+  id uuid primary key default gen_random_uuid(),
+  clinic_id uuid not null references public.clinics(id) on delete cascade,
+  weekday int not null check (weekday between 0 and 6),
+  is_open boolean not null default true,
+  opens_at time,
+  closes_at time,
+  notes text,
+  created_by uuid references public.receptionist(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint clinic_operating_schedule_unique unique (clinic_id, weekday)
+);
+
+create index if not exists clinic_operating_schedule_clinic_idx
+  on public.clinic_operating_schedule(clinic_id, weekday);
+
+create table if not exists public.clinic_calendar_events (
+  id uuid primary key default gen_random_uuid(),
+  clinic_id uuid references public.clinics(id) on delete cascade,
+  applies_to_all_clinics boolean not null default false,
+  event_name text not null,
+  event_type text not null check (
+    event_type in (
+      'public_holiday',
+      'ramadan_eid',
+      'clinic_closure',
+      'marketing_campaign',
+      'other_business_event'
+    )
+  ),
+  start_date date not null,
+  end_date date not null,
+  is_closed_day boolean not null default false,
+  notes text,
+  created_by uuid references public.receptionist(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint clinic_calendar_events_date_order check (end_date >= start_date),
+  constraint clinic_calendar_events_scope_check check (
+    applies_to_all_clinics = true or clinic_id is not null
+  )
+);
+
+create index if not exists clinic_calendar_events_date_idx
+  on public.clinic_calendar_events(start_date, end_date);
+create index if not exists clinic_calendar_events_scope_idx
+  on public.clinic_calendar_events(applies_to_all_clinics, clinic_id, event_type);

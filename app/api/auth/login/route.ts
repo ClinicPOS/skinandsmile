@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
     user_agent: userAgent,
     session_mode: sessionMode,
     clinic_id: clinicId,
-    user_role: sessionMode === "manager" ? "administrator" : "receptionist",
+    user_role: sessionMode === "manager" ? "it_admin" : "receptionist",
   };
 
   const sessionRes = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/active_sessions`, {

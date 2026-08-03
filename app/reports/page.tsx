@@ -1,1923 +1,815 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx-js-style";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { calculateAge } from "../../lib/utils";
-import type { Clinic, Patient, Receptionist, Service, BalancePayment } from "../../lib/types";
-import { getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
+import {
+  buildComparisonRange,
+  buildDashboardRange,
+  DashboardPeriod,
+  formatCurrency,
+  percentageChange,
+  statusIcon,
+  statusLabel,
+} from "../../lib/ceo-dashboard";
+import { printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 
-const BOSS_PIN = "doctorsafarreport";
-
-function getPaymentCategory(method: string): string {
-  const m = (method || "").toLowerCase();
-  if (m.startsWith("cash")) return "Cash";
-  if (m.startsWith("split")) return "Split Payment";
-  if (m.includes("tabby card")) return "Tabby Card";
-  if (m.includes("tabby")) return "Tabby";
-  if (m.includes("tamara card")) return "Tamara Card";
-  if (m.includes("tamara")) return "Tamara";
-  if (m.includes("visa")) return "Visa";
-  if (m.includes("mastercard")) return "Mastercard";
-  if (m.includes("card")) return "Card";
-  return method || "Other";
-}
-
-type TopServiceSummary = {
-  id: string;
-  name: string;
-  count: number;
-  revenue: number;
-  patientCount: number;
-  doctorCount: number;
-  revenueShare: number;
-  isTopPerformer: boolean;
-};
-
-type TopServicesSummaryPayload = {
-  services: TopServiceSummary[];
-  totalRevenue: number;
-  uniqueServices: number;
-  mostPerformed: TopServiceSummary | null;
-  highestRevenue: TopServiceSummary | null;
-};
-
-type TopServiceDetail = {
-  id: string;
-  name: string;
-  revenue: number;
-  count: number;
-  averagePrice: number;
-  patientCount: number;
-  revenueShare: number;
-  patients: Array<{ id: string; name: string }>;
-  doctors: Array<{ id: string; name: string }>;
-  revenueTrend: Array<{ date: string; label: string; revenue: number; count: number }>;
-};
-
-type Receipt = {
-  id: string;
-  receptionist_id: string;
-  patient_id: string | null;
-  total: number;
-  amount_paid?: number | null;
-  gateway_fee?: number | null;
-  gateway_fee_provider?: string | null;
-  payment_method: string | null;
-  notes?: string | null;
-  created_at: string;
-};
-
-// Money actually received for a receipt; NULL amount_paid = paid in full.
-function receiptPaidAmount(r: Receipt): number {
-  return r.amount_paid != null ? Number(r.amount_paid) : Number(r.total || 0);
-}
-
-function receiptGatewayFee(r: Receipt): { label: string; amount: number } | null {
-  const amount = Number(r.gateway_fee || 0);
-  if (amount <= 0) return null;
-  const provider = r.gateway_fee_provider || getInstallmentFeeProvider(r.payment_method) || "Installment";
-  return { label: `${provider} Fee`, amount };
-}
-
-// PostgREST caps responses at 1000 rows; page through so exports stay complete
-// as the patient database grows into the thousands.
-async function fetchAllRows(table: string, select: string): Promise<any[]> {
-  const pageSize = 1000;
-  const rows: any[] = [];
-  for (let from = 0; ; from += pageSize) {
-    const { data, error } = await supabase.from(table).select(select).range(from, from + pageSize - 1);
-    if (error) throw new Error(`Failed loading ${table}: ${error.message}`);
-    rows.push(...(data || []));
-    if (!data || data.length < pageSize) break;
-  }
-  return rows;
-}
-
-type ReceiptItem = {
-  id: string;
-  receipt_id: string;
-  service_id: string;
-  doctor_id: string | null;
-  price: number | null;
-  total: number | null;
-  created_at: string;
-  services?: {
-    name?: string | null;
+type DashboardResponse = {
+  meta: {
+    currentRange: {
+      period: DashboardPeriod;
+      label: string;
+      startUtcIso: string;
+      endUtcIso: string;
+      startDubaiDate: string;
+      endDubaiDate: string;
+    };
+    compareRange: {
+      label: string;
+      startDubaiDate: string;
+      endDubaiDate: string;
+    };
+    timezone: string;
+    lastUpdatedAt: string;
+    clinicId: string | null;
+    selectedYear: number;
+  };
+  overview: {
+    netSales: number;
+    netSalesCompare: number;
+    targetProgress: number | null;
+    customerCollections: number;
+    customerCollectionsCompare: number;
+    outstandingBalance: number;
+    outstandingBalanceCompare: number;
+    uniquePatientsSeen: number;
+    uniquePatientsSeenCompare: number;
+    completedVisits: number;
+    newPatients: number;
+    returningPatients: number;
+    refundsTreatmentValue: number;
+    comparisonRefundsTreatmentValue: number;
+    missingData: {
+      cancelledStatusNotRecorded: boolean;
+      providerDeductionsNotRecorded: boolean;
+      paymentAllocationCoverageIncomplete: boolean;
+      targetConfigurationAvailable: boolean;
+    };
   } | null;
+  clinicPerformance: Array<{
+    clinicId: string;
+    clinicName: string;
+    netSales: number;
+    expectedTarget: number | null;
+    targetAttainment: number | null;
+    status: "good" | "average" | "needs_attention" | "no_target_set";
+    previousPeriodChangePercent: number | null;
+    uniquePatients: number;
+    averageNetSalesPerPatient: number;
+  }>;
+  doctorPerformance: Array<{
+    doctorId: string;
+    doctorName: string;
+    clinicName: string;
+    uniquePatients: number;
+    completedVisits: number;
+    netSales: number;
+    averageNetSalesPerPatient: number;
+  }>;
+  trends: {
+    monthly: Array<{
+      month: string;
+      netSales: number;
+      target: number | null;
+      previousYear: number | null;
+      belowTarget: boolean | null;
+    }>;
+    patientDemand: {
+      historyDays: number;
+      message: string;
+      dayOfWeek: Array<{
+        weekday: string;
+        visits: number;
+        averagePerOpenDay: number | null;
+      }>;
+      dayOfMonthBuckets: Array<{
+        label: string;
+        visits: number;
+      }>;
+      eventsInRange: Array<{
+        eventType: string;
+        startDate: string;
+        endDate: string;
+        clinicId: string | null;
+      }>;
+    };
+  };
+  payments: {
+    methods: Array<{
+      method: "cash" | "card" | "tabby" | "tamara";
+      amount: number;
+      count: number;
+    }>;
+    paymentMethodUses: number;
+    paymentFeesCollected: number;
+    customerCollections: number;
+    customerRefunds: number;
+    providerDeductionsAvailable: boolean;
+    providerDeductions: number | null;
+    netSettlement: number | null;
+    missingAllocationCoverage: boolean;
+  };
+  attentionItems: string[];
 };
 
-type Refund = {
-  id: string;
-  receipt_id: string;
-  total_amount: number;
-  reason?: string | null;
-  refunded_by?: string | null;
-  refunded_by_receptionist?: {
-    name?: string | null;
-  } | null;
-  created_at: string;
-};
+type DashboardTab = "overview" | "clinics_doctors" | "trends_demand" | "payments";
 
-const EMPTY_TOP_SERVICES_SUMMARY: TopServicesSummaryPayload = {
-  services: [],
-  totalRevenue: 0,
-  uniqueServices: 0,
-  mostPerformed: null,
-  highestRevenue: null,
-};
+const PERIOD_OPTIONS: Array<{ value: DashboardPeriod; label: string }> = [
+  { value: "today", label: "Today" },
+  { value: "this_week", label: "This Week" },
+  { value: "this_month", label: "This Month" },
+  { value: "this_year", label: "This Year" },
+  { value: "custom", label: "Custom Date Range" },
+];
+
+const TABS: Array<{ id: DashboardTab; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "clinics_doctors", label: "Clinics & Doctors" },
+  { id: "trends_demand", label: "Trends & Patient Demand" },
+  { id: "payments", label: "Payments" },
+];
+
+function deltaClass(value: number | null, direction: "higher_better" | "lower_better") {
+  if (value == null) return "text-slate-500";
+  const positive = direction === "higher_better" ? value >= 0 : value <= 0;
+  return positive ? "text-emerald-700" : "text-rose-700";
+}
+
+function deltaPrefix(value: number | null) {
+  if (value == null) return "Not available";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(1)}%`;
+}
+
+function methodLabel(method: string) {
+  if (method === "cash") return "Cash";
+  if (method === "card") return "Card";
+  if (method === "tabby") return "Tabby";
+  if (method === "tamara") return "Tamara";
+  return method;
+}
+
+function renderExportHtml(data: DashboardResponse) {
+  const rows = data.clinicPerformance
+    .map((row) => `
+      <tr>
+        <td>${row.clinicName}</td>
+        <td>AED ${row.netSales.toFixed(2)}</td>
+        <td>${row.expectedTarget == null ? "Not available" : `AED ${row.expectedTarget.toFixed(2)}`}</td>
+        <td>${row.targetAttainment == null ? "No Target Set" : `${row.targetAttainment.toFixed(1)}%`}</td>
+        <td>${statusLabel(row.status)}</td>
+      </tr>
+    `)
+    .join("");
+  return `<!doctype html>
+  <html>
+    <head>
+      <meta charset="utf-8" />
+      <title>CEO Dashboard Export</title>
+      <style>
+        body { font-family: Arial, sans-serif; margin: 16px; color: #0f172a; }
+        h1, h2 { margin: 0 0 8px; }
+        .meta { color: #475569; margin-bottom: 12px; font-size: 12px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 12px; text-align: left; }
+        th { background: #f1f5f9; }
+        .kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0; }
+        .kpi { border: 1px solid #dbeafe; border-radius: 8px; padding: 8px; background: #f8fafc; }
+        .kpi .label { color: #475569; font-size: 11px; }
+        .kpi .value { font-weight: bold; font-size: 14px; margin-top: 2px; }
+      </style>
+    </head>
+    <body>
+      <h1>CEO Dashboard Report</h1>
+      <div class="meta">
+        Clinic: ${data.meta.clinicId || "All Clinics"}<br/>
+        Period: ${data.meta.currentRange.label} (${data.meta.currentRange.startDubaiDate} - ${data.meta.currentRange.endDubaiDate})<br/>
+        Comparison: ${data.meta.compareRange.label} (${data.meta.compareRange.startDubaiDate} - ${data.meta.compareRange.endDubaiDate})<br/>
+        Time Zone: ${data.meta.timezone}<br/>
+        Generated: ${new Date(data.meta.lastUpdatedAt).toLocaleString("en-GB", { timeZone: "Asia/Dubai" })}
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="label">Net Sales</div><div class="value">${formatCurrency(data.overview?.netSales)}</div></div>
+        <div class="kpi"><div class="label">Target Progress</div><div class="value">${data.overview?.targetProgress == null ? "Not available" : `${data.overview.targetProgress.toFixed(1)}%`}</div></div>
+        <div class="kpi"><div class="label">Customer Collections</div><div class="value">${formatCurrency(data.overview?.customerCollections)}</div></div>
+        <div class="kpi"><div class="label">Outstanding Balance</div><div class="value">${formatCurrency(data.overview?.outstandingBalance)}</div></div>
+      </div>
+      <h2>Clinic Comparison</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Clinic</th>
+            <th>Net Sales</th>
+            <th>Expected Target</th>
+            <th>Target Attainment</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>${rows || `<tr><td colspan="5">No data</td></tr>`}</tbody>
+      </table>
+    </body>
+  </html>`;
+}
 
 export default function ReportsPage() {
-  const [pinInput, setPinInput] = useState("");
-  const [role, setRole] = useState<"boss" | "receptionist" | null>(null);
-  const [activeClinicId, setActiveClinicId] = useState("");
-  const [activeClinicName, setActiveClinicName] = useState("");
-  const [pinError, setPinError] = useState("");
+  const [tab, setTab] = useState<DashboardTab>("overview");
+  const [period, setPeriod] = useState<DashboardPeriod>("today");
+  const [clinicId, setClinicId] = useState<string>("");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
+  const [amountMode, setAmountMode] = useState<"amount" | "count">("amount");
+  const [clinics, setClinics] = useState<Array<{ id: string; name: string }>>([]);
+  const [data, setData] = useState<DashboardResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<string>("");
+  const inFlightRef = useRef(false);
 
-  const [receptionists, setReceptionists] = useState<Receptionist[]>([]);
-  const [clinics, setClinics] = useState<Clinic[]>([]);
-  const [patients, setPatients] = useState<Patient[]>([]);
-  const [receipts, setReceipts] = useState<Receipt[]>([]);
-  const [receiptItems, setReceiptItems] = useState<ReceiptItem[]>([]);
-  const [services, setServices] = useState<Service[]>([]);
-  const [refunds, setRefunds] = useState<Refund[]>([]);
-  const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
+  useEffect(() => {
+    supabase.from("clinics").select("id, name").order("name", { ascending: true }).then(({ data: rows }) => {
+      setClinics((rows || []) as Array<{ id: string; name: string }>);
+    });
+  }, []);
 
-  const [isLoading, setIsLoading] = useState(false);
-  const [isExportingPatients, setIsExportingPatients] = useState(false);
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
-  const [calendarDate, setCalendarDate] = useState(new Date());
-  const [selectedClinic, setSelectedClinic] = useState<string | null>(null); // null = All Clinics
-  
-  // Date range filter states
-  const [startDate, setStartDate] = useState<string>("");
-  const [endDate, setEndDate] = useState<string>("");
-  const [filterType, setFilterType] = useState<"today" | "yesterday" | "week" | "month" | "lastMonth" | "custom" | "selectedDate">("today");
+  const loadDashboard = useCallback(async (options?: { background?: boolean }) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    const background = !!options?.background;
+    if (background) setRefreshing(true);
+    else setLoading(true);
+    setError("");
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch("/api/reports/ceo-dashboard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          period,
+          clinicId: clinicId || null,
+          customStart: period === "custom" ? customStart : null,
+          customEnd: period === "custom" ? customEnd : null,
+          year: selectedYear,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to load CEO dashboard.");
+      }
+      setData(payload as DashboardResponse);
+      setLastUpdated(new Date().toISOString());
+    } catch (fetchError) {
+      setData(null);
+      if (fetchError instanceof Error && fetchError.name === "AbortError") {
+        setError("Dashboard request timed out. Please retry and check Supabase query performance.");
+      } else {
+        setError(fetchError instanceof Error ? fetchError.message : "Failed to load CEO dashboard.");
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      inFlightRef.current = false;
+      if (background) setRefreshing(false);
+      else setLoading(false);
+    }
+  }, [period, clinicId, customStart, customEnd, selectedYear]);
 
-  // Service details panel state
-  const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null);
-  const [showServicePanel, setShowServicePanel] = useState(false);
-  const [topServicesSummary, setTopServicesSummary] = useState<TopServicesSummaryPayload>(EMPTY_TOP_SERVICES_SUMMARY);
-  const [topServicesLoading, setTopServicesLoading] = useState(false);
-  const [topServicesError, setTopServicesError] = useState("");
-  const [selectedServiceDetail, setSelectedServiceDetail] = useState<TopServiceDetail | null>(null);
-  const [serviceDetailLoading, setServiceDetailLoading] = useState(false);
-  const [serviceDetailError, setServiceDetailError] = useState("");
+  useEffect(() => {
+    if (period === "custom" && (!customStart || !customEnd)) return;
+    loadDashboard();
+  }, [period, clinicId, customStart, customEnd, selectedYear, loadDashboard]);
 
-  type ApiErrorPayload = {
-    error?: string;
-    details?: string;
-    hint?: string;
+  useEffect(() => {
+    if (period !== "today") return;
+    const channel = supabase
+      .channel("ceo-dashboard-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "receipts" }, () => loadDashboard({ background: true }))
+      .on("postgres_changes", { event: "*", schema: "public", table: "refunds" }, () => loadDashboard({ background: true }))
+      .on("postgres_changes", { event: "*", schema: "public", table: "payment_records" }, () => loadDashboard({ background: true }))
+      .on("postgres_changes", { event: "*", schema: "public", table: "payment_allocations" }, () => loadDashboard({ background: true }))
+      .on("postgres_changes", { event: "*", schema: "public", table: "balance_payments" }, () => loadDashboard({ background: true }))
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [period, loadDashboard]);
+
+  const currentRangeLabel = useMemo(() => {
+    if (data?.meta.currentRange) {
+      return `${data.meta.currentRange.startDubaiDate} - ${data.meta.currentRange.endDubaiDate}`;
+    }
+    try {
+      const current = buildDashboardRange({ period, customStart, customEnd });
+      return `${current.startDubaiDate} - ${current.endDubaiDate}`;
+    } catch {
+      return "Select a valid range";
+    }
+  }, [data, period, customStart, customEnd]);
+
+  const compareRangeLabel = useMemo(() => {
+    if (data?.meta.compareRange) {
+      return `${data.meta.compareRange.label}: ${data.meta.compareRange.startDubaiDate} - ${data.meta.compareRange.endDubaiDate}`;
+    }
+    try {
+      const current = buildDashboardRange({ period, customStart, customEnd });
+      const previous = buildComparisonRange(current);
+      return `${previous.label}: ${previous.startDubaiDate} - ${previous.endDubaiDate}`;
+    } catch {
+      return "";
+    }
+  }, [data, period, customStart, customEnd]);
+
+  const clinicLabel = clinicId
+    ? clinics.find((clinic) => clinic.id === clinicId)?.name || "Selected Clinic"
+    : "All Clinics";
+
+  const exportExcel = () => {
+    if (!data) return;
+    const workbook = XLSX.utils.book_new();
+    const summaryRows = [
+      ["CEO Dashboard Summary"],
+      [""],
+      ["Clinic", clinicLabel],
+      ["Period", `${data.meta.currentRange.label} (${currentRangeLabel})`],
+      ["Comparison", compareRangeLabel],
+      ["Generated", new Date(data.meta.lastUpdatedAt).toLocaleString("en-GB", { timeZone: "Asia/Dubai" })],
+      [""],
+      ["Net Sales", data.overview?.netSales ?? ""],
+      ["Customer Collections", data.overview?.customerCollections ?? ""],
+      ["Outstanding Balance", data.overview?.outstandingBalance ?? ""],
+      ["Unique Patients Seen", data.overview?.uniquePatientsSeen ?? ""],
+      ["Completed Visits", data.overview?.completedVisits ?? ""],
+    ];
+    const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
+    summarySheet["!cols"] = [{ wch: 34 }, { wch: 24 }];
+    XLSX.utils.book_append_sheet(workbook, summarySheet, "Executive Summary");
+
+    const clinicSheetRows = [
+      ["Clinic", "Status", "Net Sales", "Expected Target", "Target Attainment %", "Previous Period Change %", "Unique Patients", "Avg Net Sales / Patient"],
+      ...data.clinicPerformance.map((row) => [
+        row.clinicName,
+        statusLabel(row.status),
+        row.netSales,
+        row.expectedTarget ?? "",
+        row.targetAttainment ?? "",
+        row.previousPeriodChangePercent ?? "",
+        row.uniquePatients,
+        row.averageNetSalesPerPatient,
+      ]),
+    ];
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(clinicSheetRows), "Clinic Comparison");
+
+    const doctorSheetRows = [
+      ["Doctor", "Clinic", "Unique Patients", "Completed Visits", "Net Sales", "Avg Net Sales / Patient"],
+      ...data.doctorPerformance.map((row) => [
+        row.doctorName,
+        row.clinicName,
+        row.uniquePatients,
+        row.completedVisits,
+        row.netSales,
+        row.averageNetSalesPerPatient,
+      ]),
+    ];
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(doctorSheetRows), "Doctor Performance");
+
+    const trendRows = [
+      ["Month", "Net Sales", "Target", "Previous Year", "Below Target"],
+      ...data.trends.monthly.map((row) => [row.month, row.netSales, row.target ?? "", row.previousYear ?? "", row.belowTarget == null ? "" : row.belowTarget ? "Yes" : "No"]),
+    ];
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(trendRows), "Monthly Trends");
+
+    const demandRows = [
+      ["Patient Demand Patterns"],
+      ["History Days", data.trends.patientDemand.historyDays],
+      ["Message", data.trends.patientDemand.message],
+      [""],
+      ["Day of Week", "Visits", "Average per Open Day"],
+      ...data.trends.patientDemand.dayOfWeek.map((row) => [row.weekday, row.visits, row.averagePerOpenDay ?? ""]),
+      [""],
+      ["Day-of-Month Bucket", "Visits"],
+      ...data.trends.patientDemand.dayOfMonthBuckets.map((row) => [row.label, row.visits]),
+    ];
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(demandRows), "Patient Demand");
+
+    const paymentRows = [
+      ["Method", "Amount (Treatment Net)", "Payment Method Uses"],
+      ...data.payments.methods.map((row) => [methodLabel(row.method), row.amount, row.count]),
+      [""],
+      ["Payment Fees Collected", data.payments.paymentFeesCollected],
+      ["Customer Collections", data.payments.customerCollections],
+      ["Customer Refunds", data.payments.customerRefunds],
+      ["Provider Deductions", data.payments.providerDeductionsAvailable ? data.payments.providerDeductions ?? "" : "Not available"],
+      ["Net Settlement", data.payments.netSettlement == null ? "Not available" : data.payments.netSettlement],
+    ];
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(paymentRows), "Payments");
+
+    XLSX.writeFile(workbook, `CEO_Dashboard_${new Date().toLocaleDateString("en-CA")}.xlsx`);
   };
 
-  const parseApiError = useCallback(async <T,>(response: Response, fallbackMessage: string): Promise<T> => {
-    const payload = await response.json().catch(() => null) as (T & ApiErrorPayload) | null;
-
-    if (!response.ok) {
-      const messageParts = [payload?.error, payload?.details, payload?.hint].filter(Boolean);
-      throw new Error(messageParts.join(" ") || fallbackMessage);
-    }
-
-    if (!payload) {
-      throw new Error("Top Services returned an invalid response. Please sign in again.");
-    }
-
-    return payload as T;
-  }, []);
-
-  useEffect(() => {
-    async function loadMeta() {
-      const [rRes, cRes, pRes] = await Promise.allSettled([
-        supabase.from("receptionist").select("*"),
-        supabase.from("clinics").select("*"),
-        supabase.from("patients").select("*"),
-      ]);
-      if (rRes.status === "fulfilled") setReceptionists(rRes.value.data || []);
-      if (cRes.status === "fulfilled") setClinics(cRes.value.data || []);
-      if (pRes.status === "fulfilled") setPatients(pRes.value.data || []);
-    }
-    loadMeta();
-  }, []);
-
-  async function loadReportForMonth(date: Date) {
-    setIsLoading(true);
-    const year = date.getFullYear();
-    const month = date.getMonth();
-    const from = new Date(year, month, 1).toISOString();
-    const to = new Date(year, month + 1, 1).toISOString();
-
-    const [receiptsRes, itemsRes, servicesRes, balPayRes] = await Promise.allSettled([
-      supabase.from("receipts").select("*").gte("created_at", from).lt("created_at", to),
-      supabase.from("receipt_items").select("*").gte("created_at", from).lt("created_at", to),
-      supabase.from("services").select("*"),
-      supabase.from("balance_payments").select("*").gte("created_at", from).lt("created_at", to),
-    ]);
-
-    const loadedReceipts: Receipt[] = receiptsRes.status === "fulfilled" ? ((receiptsRes.value.data || []) as Receipt[]) : [];
-    let loadedRefunds: Refund[] = [];
-    if (loadedReceipts.length > 0) {
-      const receiptIds = loadedReceipts.map((r) => r.id);
-      const refundsRes = await supabase.from("refunds").select("*, refunded_by_receptionist:refunded_by(name)").in("receipt_id", receiptIds);
-      loadedRefunds = (refundsRes.data || []) as Refund[];
-    }
-
-    setReceipts(loadedReceipts);
-    if (itemsRes.status === "fulfilled") setReceiptItems((itemsRes.value.data || []) as ReceiptItem[]);
-    if (servicesRes.status === "fulfilled") setServices((servicesRes.value.data || []) as Service[]);
-    setRefunds(loadedRefunds);
-    if (balPayRes.status === "fulfilled" && !balPayRes.value.error) {
-      setBalancePayments((balPayRes.value.data || []) as BalancePayment[]);
-    } else {
-      setBalancePayments([]);
-    }
-    setIsLoading(false);
-  }
-
-  async function loadAllReceipts() {
-    setIsLoading(true);
-    const [receiptsRes, itemsRes, servicesRes, balPayRes] = await Promise.allSettled([
-      supabase.from("receipts").select("*"),
-      supabase.from("receipt_items").select("*"),
-      supabase.from("services").select("*"),
-      supabase.from("balance_payments").select("*"),
-    ]);
-
-    const loadedReceipts: Receipt[] = receiptsRes.status === "fulfilled" ? ((receiptsRes.value.data || []) as Receipt[]) : [];
-    let loadedRefunds: Refund[] = [];
-    if (loadedReceipts.length > 0) {
-      const receiptIds = loadedReceipts.map((r) => r.id);
-      const refundsRes = await supabase.from("refunds").select("*, refunded_by_receptionist:refunded_by(name)").in("receipt_id", receiptIds);
-      loadedRefunds = (refundsRes.data || []) as Refund[];
-    }
-
-    setReceipts(loadedReceipts);
-    if (itemsRes.status === "fulfilled") setReceiptItems((itemsRes.value.data || []) as ReceiptItem[]);
-    if (servicesRes.status === "fulfilled") setServices((servicesRes.value.data || []) as Service[]);
-    setRefunds(loadedRefunds);
-    if (balPayRes.status === "fulfilled" && !balPayRes.value.error) {
-      setBalancePayments((balPayRes.value.data || []) as BalancePayment[]);
-    } else {
-      setBalancePayments([]);
-    }
-    setIsLoading(false);
-  }
-
-  async function downloadPatientsMasterList() {
-    if (isExportingPatients) return;
-    setIsExportingPatients(true);
-    try {
-      // Bulk fetches only — everything else is joined in memory below.
-      // (receipt_items ⇢ services is joined manually: the live DB has no FK
-      // between them, so PostgREST can't embed services(name).)
-      const [allPatients, allReceipts, allItems, allServices, allBalances, allBalancePayments] = await Promise.all([
-        fetchAllRows("patients", "id, patient_number, mrn, name, date_of_birth, sex, nationality, phone, email, emirates_id, passport_number"),
-        fetchAllRows("receipts", "id, patient_id, receptionist_id, created_at"),
-        fetchAllRows("receipt_items", "receipt_id, service_id"),
-        fetchAllRows("services", "id, name"),
-        fetchAllRows("outstanding_balances", "id, patient_id, clinic_id, original_amount"),
-        fetchAllRows("balance_payments", "outstanding_balance_id, amount"),
-      ]);
-
-      const serviceNameById = new Map(allServices.map((s) => [s.id, String(s.name || "").trim()]));
-
-      const clinicNameById = new Map(clinics.map((c) => [c.id, c.name]));
-      const clinicByReceptionist = new Map(receptionists.map((r) => [r.id, r.clinic_id || ""]));
-
-      // Boss exports everything; clinic staff export only their clinic's
-      // patients (visited it, or owe it money) per the existing role system.
-      const isClinicScoped = role === "receptionist" && !!activeClinicId;
-      const scopedReceipts = isClinicScoped
-        ? allReceipts.filter((r) => clinicByReceptionist.get(r.receptionist_id) === activeClinicId)
-        : allReceipts;
-      const scopedBalances = isClinicScoped
-        ? allBalances.filter((b) => b.clinic_id === activeClinicId)
-        : allBalances;
-
-      const visitAgg = new Map<string, { count: number; first: string; last: string; clinicIds: Set<string> }>();
-      const patientByReceiptId = new Map<string, string>();
-      for (const r of scopedReceipts) {
-        if (!r.patient_id) continue;
-        patientByReceiptId.set(r.id, r.patient_id);
-        const agg = visitAgg.get(r.patient_id) || { count: 0, first: r.created_at, last: r.created_at, clinicIds: new Set<string>() };
-        agg.count += 1;
-        if (r.created_at < agg.first) agg.first = r.created_at;
-        if (r.created_at > agg.last) agg.last = r.created_at;
-        const clinicId = clinicByReceptionist.get(r.receptionist_id);
-        if (clinicId) agg.clinicIds.add(clinicId);
-        visitAgg.set(r.patient_id, agg);
-      }
-
-      // patientByReceiptId only contains scoped receipts, so items outside the
-      // scope fall out here naturally.
-      const servicesByPatient = new Map<string, Set<string>>();
-      for (const item of allItems) {
-        const patientId = patientByReceiptId.get(item.receipt_id);
-        if (!patientId) continue;
-        const serviceName = serviceNameById.get(item.service_id) || "";
-        if (!serviceName) continue;
-        const set = servicesByPatient.get(patientId) || new Set<string>();
-        set.add(serviceName);
-        servicesByPatient.set(patientId, set);
-      }
-
-      const paidByBalance = new Map<string, number>();
-      for (const p of allBalancePayments) {
-        paidByBalance.set(
-          p.outstanding_balance_id,
-          (paidByBalance.get(p.outstanding_balance_id) || 0) + Number(p.amount || 0)
-        );
-      }
-      const outstandingByPatient = new Map<string, number>();
-      for (const b of scopedBalances) {
-        const remaining = Math.max(0, Number(b.original_amount || 0) - (paidByBalance.get(b.id) || 0));
-        if (remaining <= 0.0049) continue;
-        outstandingByPatient.set(b.patient_id, (outstandingByPatient.get(b.patient_id) || 0) + remaining);
-      }
-
-      const scopedPatients = (
-        isClinicScoped
-          ? allPatients.filter((p) => visitAgg.has(p.id) || outstandingByPatient.has(p.id))
-          : allPatients
-      ).sort((a, b) => {
-        const fileA = a.patient_number != null ? Number(a.patient_number) : Number.POSITIVE_INFINITY;
-        const fileB = b.patient_number != null ? Number(b.patient_number) : Number.POSITIVE_INFINITY;
-        if (fileA !== fileB) return fileA - fileB;
-        return String(a.name || "").localeCompare(String(b.name || ""));
-      });
-
-      const fmtDate = (iso: string | null | undefined) =>
-        iso ? new Date(iso).toLocaleDateString("en-GB") : "";
-
-      const headers = [
-        "File No.",
-        "MRN",
-        "Patient Name",
-        "Age",
-        "Sex",
-        "Nationality",
-        "Phone Number",
-        "Email",
-        "Emirates ID Number",
-        "Passport Number",
-        "Outstanding Balance",
-        "Total Visits",
-        "Clinics Visited",
-        "Treatments / Services Received",
-        "First Visit Date",
-        "Last Visit Date",
-      ];
-
-      const dataRows = scopedPatients.map((p) => {
-        const agg = visitAgg.get(p.id);
-        const clinicNames = agg
-          ? [...agg.clinicIds].map((id) => clinicNameById.get(id) || "Unknown").sort().join(", ")
-          : "";
-        const treatments = [...(servicesByPatient.get(p.id) || [])].sort().join(", ");
-        const outstanding = outstandingByPatient.get(p.id) || 0;
-        const age = calculateAge(p.date_of_birth);
-        return [
-          p.patient_number != null ? String(p.patient_number).padStart(5, "0") : "",
-          p.mrn || "",
-          p.name || "",
-          age != null ? age : "",
-          p.sex || "",
-          p.nationality || "",
-          p.phone || "",
-          p.email || "",
-          p.emirates_id || "",
-          p.passport_number || "",
-          `AED ${outstanding.toFixed(2)}`,
-          agg?.count ?? 0,
-          clinicNames,
-          treatments,
-          fmtDate(agg?.first),
-          fmtDate(agg?.last),
-        ] as (string | number)[];
-      });
-
-      const clinicGroup = role === "boss" ? "All Clinics" : activeClinicName;
-      const generatedBy = role === "boss" ? "Administrator" : `${activeClinicName} Reception`;
-      const exportDate = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
-
-      const HEADER_ROW = 7; // 1-based sheet row of the column headers
-      const blankTail = new Array(headers.length - 1).fill("");
-      const aoa: (string | number)[][] = [
-        ["Patient Master List", ...blankTail],
-        [],
-        ["Clinic Group", clinicGroup],
-        ["Export Date", exportDate],
-        ["Generated By", generatedBy],
-        ["Total Patients", scopedPatients.length],
-        headers,
-        ...dataRows,
-      ];
-
-      const sheet = XLSX.utils.aoa_to_sheet(aoa);
-      sheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
-      sheet["!freeze"] = { xSplit: 0, ySplit: HEADER_ROW };
-      sheet["!autofilter"] = { ref: `A${HEADER_ROW}:P${HEADER_ROW + dataRows.length}` };
-      sheet["!cols"] = headers.map((header, i) => {
-        let max = header.length;
-        for (const row of dataRows) {
-          const len = String(row[i] ?? "").length;
-          if (len > max) max = len;
-        }
-        return { wch: Math.min(60, Math.max(10, max + 2)) };
-      });
-
-      const setStyle = (r: number, c: number, style: Record<string, unknown>) => {
-        const ref = XLSX.utils.encode_cell({ r, c });
-        const cell = (sheet as any)[ref];
-        if (!cell) return;
-        cell.s = { ...(cell.s || {}), ...style };
-      };
-      const thinBorder = {
-        top: { style: "thin", color: { rgb: "D9D9D9" } },
-        bottom: { style: "thin", color: { rgb: "D9D9D9" } },
-        left: { style: "thin", color: { rgb: "D9D9D9" } },
-        right: { style: "thin", color: { rgb: "D9D9D9" } },
-      };
-
-      for (let c = 0; c < headers.length; c++) {
-        setStyle(0, c, {
-          fill: { fgColor: { rgb: "0B132B" } },
-          font: { name: "Calibri", sz: 18, bold: true, color: { rgb: "FFFFFF" } },
-          alignment: { horizontal: "center", vertical: "center" },
-        });
-      }
-      for (let r = 2; r <= 5; r++) {
-        setStyle(r, 0, { font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "1F2937" } } });
-        setStyle(r, 1, { font: { name: "Calibri", sz: 11, color: { rgb: "1F2937" } } });
-      }
-      for (let c = 0; c < headers.length; c++) {
-        setStyle(HEADER_ROW - 1, c, {
-          fill: { fgColor: { rgb: "1F4E78" } },
-          font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "FFFFFF" } },
-          alignment: { horizontal: "center", vertical: "center", wrapText: true },
-          border: thinBorder,
-        });
-      }
-      const rightAlignedCols = new Set([10, 11]); // Outstanding Balance, Total Visits
-      for (let i = 0; i < dataRows.length; i++) {
-        const r = HEADER_ROW + i;
-        const isEven = i % 2 === 1;
-        for (let c = 0; c < headers.length; c++) {
-          setStyle(r, c, {
-            border: thinBorder,
-            font: { name: "Calibri", sz: 10, color: { rgb: "111827" } },
-            alignment: {
-              vertical: "top",
-              horizontal: rightAlignedCols.has(c) ? "right" : "left",
-              wrapText: c === 13, // treatments column
-            },
-            fill: { fgColor: { rgb: isEven ? "F8FAFC" : "FFFFFF" } },
-          });
-        }
-      }
-
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, sheet, "Patient Master List");
-      const fileDate = new Date().toLocaleDateString("en-CA");
-      XLSX.writeFile(workbook, `Patients_Master_List_${fileDate}.xlsx`);
-    } catch (error) {
-      console.error("Patient export failed", error);
-      alert(error instanceof Error ? error.message : "Could not generate the patient list. Please try again.");
-    } finally {
-      setIsExportingPatients(false);
-    }
-  }
-
-  function handleUnlock() {
-    const found = receptionists.find((r) => String(r.pin) === pinInput);
-    if (pinInput === BOSS_PIN) {
-      setRole("boss");
-      setPinError("");
-      loadAllReceipts();
-      return;
-    }
-    if (found) {
-      setRole("receptionist");
-      const clinicId = found.clinic_id || "";
-      setActiveClinicId(clinicId);
-      setActiveClinicName(found.name);
-      if (clinicId) {
-        const clinic = clinics.find((c) => c.id === clinicId);
-        if (clinic) setActiveClinicName(clinic.name);
-      }
-      setPinError("");
-      loadReportForMonth(new Date());
-      return;
-    }
-    setPinError("Invalid PIN. Try again.");
-  }
-
-  function navigateMonth(offset: number) {
-    const d = new Date(calendarDate);
-    d.setMonth(d.getMonth() + offset);
-    setCalendarDate(d);
-    loadReportForMonth(d);
-  }
-
-  const getTodayRange = useCallback(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    return { from: today, to: tomorrow };
-  }, []);
-
-  const getFilterRange = useCallback(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    if (filterType === "selectedDate" && selectedDate) {
-      const selected = new Date(selectedDate);
-      selected.setHours(0, 0, 0, 0);
-      const nextDay = new Date(selected);
-      nextDay.setDate(nextDay.getDate() + 1);
-      return { from: selected, to: nextDay };
-    }
-
-    if (filterType === "custom") {
-      if (startDate && endDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        return { from: start, to: end };
-      }
-      return getTodayRange();
-    }
-
-    if (filterType === "today") return getTodayRange();
-
-    if (filterType === "yesterday") {
-      const yesterday = new Date(today);
-      yesterday.setDate(yesterday.getDate() - 1);
-      const endYesterday = new Date(yesterday);
-      endYesterday.setDate(endYesterday.getDate() + 1);
-      return { from: yesterday, to: endYesterday };
-    }
-
-    if (filterType === "week") {
-      const first = new Date(today);
-      first.setDate(today.getDate() - today.getDay());
-      const last = new Date(first);
-      last.setDate(last.getDate() + 7);
-      return { from: first, to: last };
-    }
-
-    if (filterType === "month") {
-      return {
-        from: new Date(today.getFullYear(), today.getMonth(), 1),
-        to: new Date(today.getFullYear(), today.getMonth() + 1, 1),
-      };
-    }
-
-    if (filterType === "lastMonth") {
-      const lastMonthDate = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-      return {
-        from: lastMonthDate,
-        to: new Date(today.getFullYear(), today.getMonth(), 1),
-      };
-    }
-
-    return getTodayRange();
-  }, [endDate, filterType, getTodayRange, selectedDate, startDate]);
-
-  const getFilteredReceipts = useCallback((receiptsToFilter: Receipt[]) => {
-    const { from, to } = getFilterRange();
-    return receiptsToFilter.filter((r) => {
-      const receiptDate = new Date(r.created_at || new Date());
-      return receiptDate >= from && receiptDate < to;
-    });
-  }, [getFilterRange]);
-
-  const getFilteredBalancePayments = useCallback(() => {
-    const { from, to } = getFilterRange();
-    return balancePayments.filter((p) => {
-      const d = new Date(p.created_at || new Date());
-      return d >= from && d < to;
-    });
-  }, [balancePayments, getFilterRange]);
-
-  const receptionistStats = useMemo(() => {
-    if (role !== "receptionist") return null;
-    const clinicReceptionistIds = new Set(
-      receptionists.filter((r) => r.clinic_id === activeClinicId).map((r) => r.id)
-    );
-    const filteredReceipts = getFilteredReceipts(receipts);
-    const mine = filteredReceipts.filter((r) => clinicReceptionistIds.has(r.receptionist_id));
-    const cashReceipts = mine.filter((r) => (r.payment_method || "").toLowerCase().startsWith("cash"));
-    const cashTotal = cashReceipts.reduce((s, r) => s + receiptPaidAmount(r), 0);
-    const totalRevenue = mine.reduce((s, r) => s + receiptPaidAmount(r), 0);
-
-    const paymentBreakdown: Record<string, number> = {};
-    for (const r of mine) {
-      const cat = getPaymentCategory(r.payment_method || "");
-      const gatewayFee = receiptGatewayFee(r);
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Math.max(0, receiptPaidAmount(r) - (gatewayFee?.amount || 0));
-      if (gatewayFee) {
-        paymentBreakdown[gatewayFee.label] = (paymentBreakdown[gatewayFee.label] || 0) + gatewayFee.amount;
-      }
-    }
-
-    const myBalancePayments = getFilteredBalancePayments().filter((p) =>
-      clinicReceptionistIds.has(p.receptionist_id)
-    );
-    const collectionsTotal = myBalancePayments.reduce((s, p) => s + Number(p.amount || 0), 0);
-    const collectionsCash = myBalancePayments
-      .filter((p) => (p.payment_method || "").toLowerCase().startsWith("cash"))
-      .reduce((s, p) => s + Number(p.amount || 0), 0);
-    const collectionsBreakdown: Record<string, number> = {};
-    for (const p of myBalancePayments) {
-      const cat = getPaymentCategory(p.payment_method || "");
-      collectionsBreakdown[cat] = (collectionsBreakdown[cat] || 0) + Number(p.amount || 0);
-    }
-
-    const myRefunds = refunds.filter((refund) => {
-      const receipt = receipts.find((r) => r.id === refund.receipt_id);
-      return receipt && mine.some((m) => m.id === receipt.id);
-    });
-    const totalRefunded = myRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
-    const netRevenue = totalRevenue - totalRefunded;
-
-    return {
-      totalTransactions: mine.length,
-      cashTotal,
-      cashCount: cashReceipts.length,
-      totalRevenue: netRevenue,
-      paymentBreakdown,
-      totalRefunded,
-      grossRevenue: totalRevenue,
-      collectionsTotal,
-      collectionsCash,
-      collectionsCount: myBalancePayments.length,
-      collectionsBreakdown,
-    };
-  }, [role, receipts, refunds, receptionists, activeClinicId, getFilteredReceipts, getFilteredBalancePayments]);
-
-  const bossStats = useMemo(() => {
-    if (role !== "boss") return null;
-
-    let filteredReceipts = getFilteredReceipts(receipts);
-    
-    // Filter by selected clinic if not "All Clinics"
-    if (selectedClinic) {
-      filteredReceipts = filteredReceipts.filter((r) => {
-        const receptionist = receptionists.find((rec) => rec.id === r.receptionist_id);
-        return receptionist?.clinic_id === selectedClinic;
-      });
-    }
-    
-    const totalRevenue = filteredReceipts.reduce((s, r) => s + receiptPaidAmount(r), 0);
-    const totalPatients = new Set(filteredReceipts.filter((r) => r.patient_id).map((r) => r.patient_id)).size;
-
-    const clinicMap: Record<string, { name: string; revenue: number; refunded: number; patients: Set<string>; paymentMethods: Record<string, number> }> = {};
-    for (const clinic of clinics) {
-      clinicMap[clinic.id] = { name: clinic.name, revenue: 0, refunded: 0, patients: new Set(), paymentMethods: {} };
-    }
-
-    for (const receipt of filteredReceipts) {
-      const receptionist = receptionists.find((r) => r.id === receipt.receptionist_id);
-      const clinicId = receptionist?.clinic_id;
-      if (!clinicId || !clinicMap[clinicId]) continue;
-
-      const entry = clinicMap[clinicId];
-      entry.revenue += receiptPaidAmount(receipt);
-      if (receipt.patient_id) entry.patients.add(receipt.patient_id);
-
-      const gatewayFee = receiptGatewayFee(receipt);
-      const cat = getPaymentCategory(receipt.payment_method || "");
-      entry.paymentMethods[cat] = (entry.paymentMethods[cat] || 0) + Math.max(0, receiptPaidAmount(receipt) - (gatewayFee?.amount || 0));
-      if (gatewayFee) {
-        entry.paymentMethods[gatewayFee.label] = (entry.paymentMethods[gatewayFee.label] || 0) + gatewayFee.amount;
-      }
-    }
-
-    for (const refund of refunds) {
-      const receipt = receipts.find((r) => r.id === refund.receipt_id);
-      const receptionist = receptionists.find((r) => r.id === receipt?.receptionist_id);
-      const clinicId = receptionist?.clinic_id;
-      if (!clinicId || !clinicMap[clinicId]) continue;
-      clinicMap[clinicId].refunded += Number(refund.total_amount || 0);
-    }
-
-    const paymentBreakdown: Record<string, number> = {};
-    for (const r of filteredReceipts) {
-      const cat = getPaymentCategory(r.payment_method || "");
-      const gatewayFee = receiptGatewayFee(r);
-      paymentBreakdown[cat] = (paymentBreakdown[cat] || 0) + Math.max(0, receiptPaidAmount(r) - (gatewayFee?.amount || 0));
-      if (gatewayFee) {
-        paymentBreakdown[gatewayFee.label] = (paymentBreakdown[gatewayFee.label] || 0) + gatewayFee.amount;
-      }
-    }
-
-    const filteredRefunds = refunds.filter((refund) => {
-      const receipt = receipts.find((r) => r.id === refund.receipt_id);
-      if (!receipt) return false;
-      return filteredReceipts.some((fr) => fr.id === receipt.id);
-    });
-    const totalRefunded = filteredRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
-    const netRevenue = totalRevenue - totalRefunded;
-
-    let bossBalancePayments = getFilteredBalancePayments();
-    if (selectedClinic) {
-      const clinicRecIds = new Set(
-        receptionists.filter((r) => r.clinic_id === selectedClinic).map((r) => r.id)
-      );
-      bossBalancePayments = bossBalancePayments.filter((p) => clinicRecIds.has(p.receptionist_id));
-    }
-    const collectionsTotal = bossBalancePayments.reduce((s, p) => s + Number(p.amount || 0), 0);
-    const collectionsCash = bossBalancePayments
-      .filter((p) => (p.payment_method || "").toLowerCase().startsWith("cash"))
-      .reduce((s, p) => s + Number(p.amount || 0), 0);
-    const collectionsBreakdown: Record<string, number> = {};
-    for (const p of bossBalancePayments) {
-      const cat = getPaymentCategory(p.payment_method || "");
-      collectionsBreakdown[cat] = (collectionsBreakdown[cat] || 0) + Number(p.amount || 0);
-    }
-
-    const serviceMap: Record<string, { name: string; count: number; revenue: number }> = {};
-    const filteredReceiptIds = new Set(filteredReceipts.map((r) => r.id));
-    for (const item of receiptItems) {
-      // Only include items from receipts that passed the date and clinic filters
-      if (!filteredReceiptIds.has(item.receipt_id)) continue;
-      const name = item.services?.name || services.find((s) => s.id === item.service_id)?.name || "Unknown";
-      if (!serviceMap[item.service_id]) serviceMap[item.service_id] = { name, count: 0, revenue: 0 };
-      serviceMap[item.service_id].count += 1;
-      serviceMap[item.service_id].revenue += Number(item.total || item.price || 0);
-    }
-    const topServices = Object.values(serviceMap)
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 10);
-
-    return { totalRevenue: netRevenue, totalPatients, totalTransactions: filteredReceipts.length, clinicMap, paymentBreakdown, topServices, totalRefunded, grossRevenue: totalRevenue, collectionsTotal, collectionsCash, collectionsCount: bossBalancePayments.length, collectionsBreakdown };
-  }, [role, receipts, refunds, receiptItems, services, clinics, receptionists, selectedClinic, getFilteredReceipts, getFilteredBalancePayments]);
-
-  const clinicLabel = useMemo(() => {
-    if (!selectedClinic) return "All Clinics";
-    const clinic = clinics.find((c) => c.id === selectedClinic);
-    return clinic?.name || "Unknown Clinic";
-  }, [selectedClinic, clinics]);
-
-  const filterLabel = useMemo(() => {
-    if (filterType === "selectedDate" && selectedDate) {
-      return selectedDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-    }
-    if (filterType === "today") return "Today";
-    if (filterType === "yesterday") return "Yesterday";
-    if (filterType === "week") return "This Week";
-    if (filterType === "month") return "This Month";
-    if (filterType === "lastMonth") return "Last Month";
-    if (filterType === "custom" && startDate && endDate) {
-      return `${new Date(startDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${new Date(endDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
-    }
-    return "Today";
-  }, [filterType, startDate, endDate, selectedDate]);
-
-  const topServicesRequest = useMemo(() => {
-    if (role !== "boss") return null;
-
-    const { from, to } = getFilterRange();
-    return {
-      clinicId: selectedClinic,
-      from: from.toISOString(),
-      to: to.toISOString(),
-    };
-  }, [role, selectedClinic, getFilterRange]);
-
-  useEffect(() => {
-    if (!topServicesRequest) {
-      return;
-    }
-    const request = topServicesRequest;
-
-    const controller = new AbortController();
-
-    async function loadTopServicesSummary() {
-      setTopServicesLoading(true);
-      setTopServicesError("");
-
-      const params = new URLSearchParams({
-        from: request.from,
-        to: request.to,
-      });
-
-      if (request.clinicId) {
-        params.set("clinicId", request.clinicId);
-      }
-
-      try {
-        const response = await fetch(`/api/reports/top-services?${params.toString()}`, {
-          signal: controller.signal,
-          cache: "no-store",
-        });
-
-        const payload = await parseApiError<{ summary?: TopServicesSummaryPayload }>(
-          response,
-          "Failed to load top services analytics."
-        );
-        setTopServicesSummary(payload.summary || EMPTY_TOP_SERVICES_SUMMARY);
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        console.error(error);
-        setTopServicesSummary(EMPTY_TOP_SERVICES_SUMMARY);
-        setTopServicesError(error instanceof Error ? error.message : "Unable to load Top Services right now.");
-      } finally {
-        if (!controller.signal.aborted) {
-          setTopServicesLoading(false);
-        }
-      }
-    }
-
-    loadTopServicesSummary();
-
-    return () => controller.abort();
-  }, [parseApiError, topServicesRequest]);
-
-  useEffect(() => {
-    if (!showServicePanel || !selectedServiceId || !topServicesRequest) {
-      return;
-    }
-    const request = topServicesRequest;
-    const serviceId = selectedServiceId;
-
-    const controller = new AbortController();
-
-    async function loadServiceDetail() {
-      setServiceDetailLoading(true);
-      setServiceDetailError("");
-
-      const params = new URLSearchParams({
-        from: request.from,
-        to: request.to,
-        serviceId,
-      });
-
-      if (request.clinicId) {
-        params.set("clinicId", request.clinicId);
-      }
-
-      try {
-        const response = await fetch(`/api/reports/top-services?${params.toString()}`, {
-          signal: controller.signal,
-          cache: "no-store",
-        });
-
-        const payload = await parseApiError<{ detail?: TopServiceDetail | null }>(
-          response,
-          "Failed to load service detail."
-        );
-        setSelectedServiceDetail(payload.detail || null);
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        console.error(error);
-        setSelectedServiceDetail(null);
-        setServiceDetailError(error instanceof Error ? error.message : "Unable to load this service detail right now.");
-      } finally {
-        if (!controller.signal.aborted) {
-          setServiceDetailLoading(false);
-        }
-      }
-    }
-
-    loadServiceDetail();
-
-    return () => controller.abort();
-  }, [parseApiError, showServicePanel, selectedServiceId, topServicesRequest]);
-
-  const calendarStats = useMemo(() => {
-    if (role !== "boss") return null;
-    const year = calendarDate.getFullYear();
-    const month = calendarDate.getMonth();
-    const firstDay = new Date(year, month, 1);
-    const lastDay = new Date(year, month + 1, 0);
-    const daysInMonth = lastDay.getDate();
-    const startingDayOfWeek = firstDay.getDay();
-
-    const dailyData: Record<number, { revenue: number; patients: Set<string>; count: number; hasPromo: boolean; hasRefund: boolean; hasLateRefund: boolean; refundTotal: number }> = {};
-
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dayStart = new Date(year, month, day);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(year, month, day);
-      dayEnd.setHours(23, 59, 59, 999);
-
-      let dayReceipts = receipts.filter((r) => {
-        const rDate = new Date(r.created_at || new Date());
-        return rDate >= dayStart && rDate <= dayEnd;
-      });
-      
-      // Filter by selected clinic if not "All Clinics"
-      if (selectedClinic) {
-        dayReceipts = dayReceipts.filter((r) => {
-          const receptionist = receptionists.find((rec) => rec.id === r.receptionist_id);
-          return receptionist?.clinic_id === selectedClinic;
-        });
-      }
-
-      const dayRevenue = dayReceipts.reduce((s, r) => s + receiptPaidAmount(r), 0);
-      const dayPatients = new Set(
-        dayReceipts.map((r) => r.patient_id).filter((patientId): patientId is string => Boolean(patientId))
-      );
-
-      const dayRefunds = refunds.filter((ref) => {
-        const receipt = receipts.find((r) => r.id === ref.receipt_id);
-        if (!receipt) return false;
-        const rDate = new Date(receipt.created_at || new Date());
-        return rDate >= dayStart && rDate <= dayEnd;
-      });
-
-      const hasPromo = dayReceipts.some((r) => r.notes?.includes("Promo") || r.notes?.includes("promo"));
-      const hasRefund = dayRefunds.length > 0;
-      const refundTotal = dayRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
-
-      dailyData[day] = {
-        revenue: dayRevenue,
-        patients: dayPatients,
-        count: dayReceipts.length,
-        hasPromo,
-        hasRefund,
-        hasLateRefund: hasRefund && new Date().getTime() - new Date(dayRefunds[dayRefunds.length - 1].created_at).getTime() > 86400000,
-        refundTotal,
-      };
-    }
-
-    return { daysInMonth, startingDayOfWeek, dailyData };
-  }, [role, receipts, refunds, receptionists, calendarDate, selectedClinic]);
-
-  const chartData = useMemo(() => {
-    if (role !== "boss") return [];
-
-    let filteredReceipts = getFilteredReceipts(receipts);
-    
-    // Filter by selected clinic if not "All Clinics"
-    if (selectedClinic) {
-      filteredReceipts = filteredReceipts.filter((r) => {
-        const receptionist = receptionists.find((rec) => rec.id === r.receptionist_id);
-        return receptionist?.clinic_id === selectedClinic;
-      });
-    }
-
-    if (filteredReceipts.length === 0) return [];
-
-    // For Today/Yesterday: Aggregate by hour
-    if (filterType === "today" || filterType === "yesterday" || filterType === "selectedDate") {
-      const hourlyData: Record<number, { revenue: number; transactions: number; patients: Set<string> }> = {};
-      
-      for (let hour = 0; hour < 24; hour++) {
-        hourlyData[hour] = { revenue: 0, transactions: 0, patients: new Set() };
-      }
-
-      for (const receipt of filteredReceipts) {
-        const receiptDate = new Date(receipt.created_at);
-        const hour = receiptDate.getHours();
-        hourlyData[hour].revenue += Number(receipt.total || 0);
-        hourlyData[hour].transactions += 1;
-        if (receipt.patient_id) hourlyData[hour].patients.add(receipt.patient_id);
-      }
-
-      return Object.entries(hourlyData).map(([hour, data]) => ({
-        label: `${String(Number(hour)).padStart(2, "0")}:00`,
-        revenue: Number(data.revenue.toFixed(2)),
-        transactions: data.transactions,
-        patients: data.patients.size,
-      }));
-    }
-
-    // For Week/Month/LastMonth/Custom: Aggregate by day
-    const dailyData: Record<string, { revenue: number; transactions: number; patients: Set<string> }> = {};
-    const { from, to } = getFilterRange();
-
-    // Initialize all days in range
-    const current = new Date(from);
-    while (current < to) {
-      const dateKey = current.toISOString().split("T")[0];
-      dailyData[dateKey] = { revenue: 0, transactions: 0, patients: new Set() };
-      current.setDate(current.getDate() + 1);
-    }
-
-    for (const receipt of filteredReceipts) {
-      const receiptDate = new Date(receipt.created_at);
-      const dateKey = receiptDate.toISOString().split("T")[0];
-      if (dailyData[dateKey]) {
-        dailyData[dateKey].revenue += Number(receipt.total || 0);
-        dailyData[dateKey].transactions += 1;
-        if (receipt.patient_id) dailyData[dateKey].patients.add(receipt.patient_id);
-      }
-    }
-
-    return Object.entries(dailyData)
-      .map(([date, data]) => {
-        const dateObj = new Date(date);
-        let label = "";
-        
-        if (filterType === "week") {
-          const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-          label = dayNames[dateObj.getDay()];
-        } else {
-          label = dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-        }
-
-        return {
-          label,
-          revenue: Number(data.revenue.toFixed(2)),
-          transactions: data.transactions,
-          patients: data.patients.size,
-        };
-      })
-      .sort((a, b) => {
-        // For week view, sort by day of week
-        if (filterType === "week") {
-          const dayOrder = { "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6 };
-          return (dayOrder[a.label as keyof typeof dayOrder] || 0) - (dayOrder[b.label as keyof typeof dayOrder] || 0);
-        }
-        return 0;
-      });
-  }, [role, receipts, filterType, selectedClinic, receptionists, getFilterRange, getFilteredReceipts]);
-
-  if (role === null) {
-    return (
-      <AppFrame title="Reports" description="View financial summaries for your clinic shifts.">
-        <div className="mx-auto max-w-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-teal-700">Access Reports</p>
-          <h2 className="mt-2 text-2xl font-semibold text-slate-900">Enter PIN</h2>
-          <p className="mt-1 text-sm text-slate-500">
-            Manager PIN for full reports. Receptionist PIN for your shift summary.
-          </p>
-          <div className="mt-5 space-y-3">
-            <input
-              type="password"
-              value={pinInput}
-              onChange={(e) => { setPinInput(e.target.value); setPinError(""); }}
-              onKeyDown={(e) => e.key === "Enter" && handleUnlock()}
-              placeholder="Enter PIN"
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
-            />
-            {pinError && <p className="text-sm text-red-500">{pinError}</p>}
-            <button
-              onClick={handleUnlock}
-              className="w-full rounded-2xl bg-teal-700 px-5 py-3 text-sm font-semibold text-white transition hover:bg-teal-600"
-            >
-              View Reports
-            </button>
-          </div>
-        </div>
-      </AppFrame>
-    );
-  }
+  const exportPdfPrint = () => {
+    if (!data) return;
+    const html = renderExportHtml(data);
+    printHtmlWhenImagesReady(html, "Please allow popups to print the CEO dashboard report.");
+  };
+
+  const overviewKpis = [
+    {
+      title: "Net Sales",
+      value: data?.overview?.netSales ?? null,
+      compare: percentageChange(data?.overview?.netSales ?? null, data?.overview?.netSalesCompare ?? null),
+      direction: "higher_better" as const,
+    },
+    {
+      title: "Target Progress",
+      value: data?.overview?.targetProgress ?? null,
+      compare: null,
+      direction: "higher_better" as const,
+      isPercent: true,
+    },
+    {
+      title: "Customer Collections",
+      value: data?.overview?.customerCollections ?? null,
+      compare: percentageChange(data?.overview?.customerCollections ?? null, data?.overview?.customerCollectionsCompare ?? null),
+      direction: "higher_better" as const,
+    },
+    {
+      title: "Outstanding Balance",
+      value: data?.overview?.outstandingBalance ?? null,
+      compare: percentageChange(data?.overview?.outstandingBalance ?? null, data?.overview?.outstandingBalanceCompare ?? null),
+      direction: "lower_better" as const,
+    },
+    {
+      title: "Unique Patients Seen",
+      value: data?.overview?.uniquePatientsSeen ?? null,
+      compare: percentageChange(data?.overview?.uniquePatientsSeen ?? null, data?.overview?.uniquePatientsSeenCompare ?? null),
+      direction: "higher_better" as const,
+      plainNumber: true,
+    },
+  ];
 
   return (
-    <AppFrame title="Reports" description="Financial summary for your clinic.">
-      <div className="space-y-8">
-        {/* ── HEADER ── */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200 pb-6">
-          <div>
-            <h1 className="text-3xl font-bold text-slate-900">Reports</h1>
-            <p className="mt-1 text-sm text-slate-500">
-              {role === "boss" ? "All Clinics • Manager View" : `${activeClinicName} • Your Shift`}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={downloadPatientsMasterList}
-              disabled={isExportingPatients}
-              className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white transition hover:bg-teal-600 disabled:opacity-60"
-            >
-              {isExportingPatients ? "Preparing…" : "Download Patients"}
-            </button>
-            {role === "boss" && (
-              <button
-                onClick={() => { setRole(null); setPinInput(""); }}
-                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
-              >
-                Lock
-              </button>
-            )}
-            {role === "receptionist" && (
-              <button
-                onClick={() => { setRole(null); setPinInput(""); }}
-                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
-              >
-                Lock
-              </button>
-            )}
-          </div>
-        </div>
-
-        {isLoading && (
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-500">
-            Loading...
-          </div>
-        )}
-
-        {!isLoading && role === "boss" && (
-          <>
-            {/* ── CLINIC AND FILTER DISPLAY ── */}
-            <div className="mb-6 grid gap-4 sm:grid-cols-2">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500 mb-1">Clinic</p>
-                <p className="text-sm font-semibold text-teal-700">{clinicLabel}</p>
-              </div>
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500 mb-1">Report Period</p>
-                <p className="text-sm font-semibold text-teal-700">{filterLabel}</p>
-              </div>
-            </div>
-
-            {/* ── CLINIC SELECTOR ── */}
-            <div className="mb-4">
-              <label className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500 block mb-2">Select Clinic</label>
+    <AppFrame title="CEO Dashboard" description="Executive dashboard for net sales, targets, demand, and payments.">
+      <div className="space-y-5">
+        <div className="rounded-2xl border border-teal-100 bg-white p-4 shadow-sm">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+            <div className="lg:col-span-2">
+              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Clinic</label>
               <select
-                value={selectedClinic || ""}
-                onChange={(e) => setSelectedClinic(e.target.value || null)}
-                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 transition focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                value={clinicId}
+                onChange={(event) => setClinicId(event.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-300"
               >
                 <option value="">All Clinics</option>
                 {clinics.map((clinic) => (
-                  <option key={clinic.id} value={clinic.id}>
-                    {clinic.name}
-                  </option>
+                  <option key={clinic.id} value={clinic.id}>{clinic.name}</option>
                 ))}
               </select>
             </div>
-
-            {/* ── FILTER BAR ── */}
-            <div className="flex flex-wrap gap-2">
-              {(["today", "yesterday", "week", "month", "lastMonth"] as const).map((type) => (
-                <button
-                  key={type}
-                  onClick={() => {
-                    setFilterType(type);
-                    setStartDate("");
-                    setEndDate("");
-                    setSelectedDate(null);
-                  }}
-                  className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-                    filterType === type
-                      ? "bg-teal-700 text-white"
-                      : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                  }`}
-                >
-                  {type === "today" && "Today"}
-                  {type === "yesterday" && "Yesterday"}
-                  {type === "week" && "This Week"}
-                  {type === "month" && "This Month"}
-                  {type === "lastMonth" && "Last Month"}
-                </button>
-              ))}
-              <button
-                onClick={() => setFilterType("custom")}
-                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-                  filterType === "custom"
-                    ? "bg-teal-700 text-white"
-                    : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                }`}
+            <div>
+              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Period</label>
+              <select
+                value={period}
+                onChange={(event) => setPeriod(event.target.value as DashboardPeriod)}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-300"
               >
-                Custom
-              </button>
-              {filterType === "selectedDate" && (
-                <button
-                  onClick={() => {
-                    setFilterType("today");
-                    setSelectedDate(null);
-                  }}
-                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100"
-                >
-                  ✕ Clear Filter
-                </button>
+                {PERIOD_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Year Trend</label>
+              <input
+                type="number"
+                value={selectedYear}
+                min={2020}
+                max={2100}
+                onChange={(event) => setSelectedYear(Number(event.target.value || new Date().getFullYear()))}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-300"
+              />
+            </div>
+            {period === "custom" && (
+              <>
+                <div>
+                  <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Start</label>
+                  <input
+                    type="date"
+                    value={customStart}
+                    onChange={(event) => setCustomStart(event.target.value)}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-300"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">End</label>
+                  <input
+                    type="date"
+                    value={customEnd}
+                    onChange={(event) => setCustomEnd(event.target.value)}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-300"
+                  />
+                </div>
+              </>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+            <div>
+              <span className="font-semibold text-slate-700">Active range:</span> {currentRangeLabel}
+              {compareRangeLabel ? <span className="ml-2">• <span className="font-semibold text-slate-700">Comparison:</span> {compareRangeLabel}</span> : null}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="rounded-full bg-slate-100 px-2 py-1">TZ: Asia/Dubai</span>
+              <span className="rounded-full bg-slate-100 px-2 py-1">Last updated: {lastUpdated ? new Date(lastUpdated).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "—"}</span>
+              {refreshing ? <span className="rounded-full bg-teal-50 px-2 py-1 text-teal-700">Refreshing…</span> : null}
+              <button onClick={() => loadDashboard()} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-50">Retry</button>
+              <button onClick={exportExcel} disabled={!data} className="rounded-lg bg-teal-700 px-3 py-1.5 font-semibold text-white disabled:opacity-50">Excel</button>
+              <button onClick={exportPdfPrint} disabled={!data} className="rounded-lg border border-teal-200 bg-teal-50 px-3 py-1.5 font-semibold text-teal-800 disabled:opacity-50">PDF / Print</button>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:grid-cols-4">
+          {TABS.map((entry) => (
+            <button
+              key={entry.id}
+              onClick={() => setTab(entry.id)}
+              className={`rounded-xl px-3 py-2 text-xs font-semibold sm:text-sm ${tab === entry.id ? "bg-teal-700 text-white" : "bg-white text-slate-700 border border-slate-200"}`}
+            >
+              {entry.label}
+            </button>
+          ))}
+        </div>
+
+        {loading && (
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
+            Loading CEO dashboard...
+          </div>
+        )}
+
+        {!loading && error && (
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+            {error}
+          </div>
+        )}
+
+        {!loading && !error && data && tab === "overview" && (
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {overviewKpis.map((kpi) => (
+                <div key={kpi.title} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{kpi.title}</p>
+                  <p className="mt-1 text-xl font-bold text-slate-900">
+                    {kpi.value == null
+                      ? "Not available"
+                      : kpi.isPercent
+                        ? `${kpi.value.toFixed(1)}%`
+                        : kpi.plainNumber
+                          ? String(Math.round(kpi.value))
+                          : formatCurrency(kpi.value)}
+                  </p>
+                  <p className={`mt-1 text-xs font-semibold ${deltaClass(kpi.compare, kpi.direction)}`}>
+                    {kpi.compare == null ? "Comparison not available" : `${deltaPrefix(kpi.compare)} vs comparison period`}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <h3 className="text-sm font-bold text-amber-900">Needs Attention</h3>
+              {data.attentionItems.length === 0 ? (
+                <p className="mt-2 text-sm text-amber-800">No critical alerts for this period.</p>
+              ) : (
+                <ul className="mt-2 space-y-1 text-sm text-amber-900">
+                  {data.attentionItems.map((item) => <li key={item}>• {item}</li>)}
+                </ul>
               )}
             </div>
 
-            {/* ── CUSTOM DATE RANGE ── */}
-            {filterType === "custom" && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">Start Date</label>
-                    <input
-                      type="date"
-                      value={startDate}
-                      onChange={(e) => setStartDate(e.target.value)}
-                      className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">End Date</label>
-                    <input
-                      type="date"
-                      value={endDate}
-                      onChange={(e) => setEndDate(e.target.value)}
-                      className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
-                    />
-                  </div>
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 text-xs text-slate-600">
+              <p className="font-semibold text-slate-700">Definitions</p>
+              <p className="mt-1">Net Sales = completed treatment value excluding VAT - discounts - refunded treatment value excluding VAT.</p>
+              <p className="mt-1">Operating profit is not shown because expense data is not present in POS.</p>
+            </div>
+          </div>
+        )}
+
+        {!loading && !error && data && tab === "clinics_doctors" && (
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <h3 className="text-sm font-bold text-slate-900">Clinic Ranking</h3>
+              <div className="mt-3 overflow-x-auto">
+                <table className="min-w-full text-xs sm:text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-500">
+                      <th className="pb-2 pr-3">Clinic</th>
+                      <th className="pb-2 pr-3">Status</th>
+                      <th className="pb-2 pr-3">Net Sales</th>
+                      <th className="pb-2 pr-3">Expected Target</th>
+                      <th className="pb-2 pr-3">Target %</th>
+                      <th className="pb-2 pr-3">Previous Change</th>
+                      <th className="pb-2 pr-3">Unique Patients</th>
+                      <th className="pb-2 pr-3">Avg/Patient</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.clinicPerformance.map((row) => (
+                      <tr key={row.clinicId} className="border-t border-slate-100">
+                        <td className="py-2 pr-3 font-semibold text-slate-900">{row.clinicName}</td>
+                        <td className="py-2 pr-3">{statusIcon(row.status)} {statusLabel(row.status)}</td>
+                        <td className="py-2 pr-3">{formatCurrency(row.netSales)}</td>
+                        <td className="py-2 pr-3">{formatCurrency(row.expectedTarget)}</td>
+                        <td className="py-2 pr-3">{row.targetAttainment == null ? "No Target Set" : `${row.targetAttainment.toFixed(1)}%`}</td>
+                        <td className={`py-2 pr-3 ${deltaClass(row.previousPeriodChangePercent, "higher_better")}`}>{deltaPrefix(row.previousPeriodChangePercent)}</td>
+                        <td className="py-2 pr-3">{row.uniquePatients}</td>
+                        <td className="py-2 pr-3">{formatCurrency(row.averageNetSalesPerPatient)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <h3 className="text-sm font-bold text-slate-900">Doctor Performance</h3>
+              <div className="mt-3 overflow-x-auto">
+                <table className="min-w-full text-xs sm:text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-500">
+                      <th className="pb-2 pr-3">Doctor</th>
+                      <th className="pb-2 pr-3">Clinic</th>
+                      <th className="pb-2 pr-3">Unique Patients</th>
+                      <th className="pb-2 pr-3">Completed Visits</th>
+                      <th className="pb-2 pr-3">Net Sales</th>
+                      <th className="pb-2 pr-3">Avg/Patient</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.doctorPerformance.map((row) => (
+                      <tr key={row.doctorId} className="border-t border-slate-100">
+                        <td className="py-2 pr-3 font-semibold text-slate-900">{row.doctorName}</td>
+                        <td className="py-2 pr-3">{row.clinicName}</td>
+                        <td className="py-2 pr-3">{row.uniquePatients}</td>
+                        <td className="py-2 pr-3">{row.completedVisits}</td>
+                        <td className="py-2 pr-3">{formatCurrency(row.netSales)}</td>
+                        <td className="py-2 pr-3">{formatCurrency(row.averageNetSalesPerPatient)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {!loading && !error && data && tab === "trends_demand" && (
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <h3 className="text-sm font-bold text-slate-900">Annual Performance ({selectedYear})</h3>
+              <div className="mt-3 h-72 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={data.trends.monthly}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="month" />
+                    <YAxis />
+                    <Tooltip />
+                    <Legend />
+                    <Line type="monotone" dataKey="netSales" stroke="#0f766e" strokeWidth={2} name="Net Sales" />
+                    <Line type="monotone" dataKey="target" stroke="#0284c7" strokeWidth={2} name="Monthly Target" />
+                    <Line type="monotone" dataKey="previousYear" stroke="#64748b" strokeDasharray="5 5" name="Previous Year" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <h3 className="text-sm font-bold text-slate-900">Patient Demand Patterns</h3>
+              <p className="mt-1 text-xs text-slate-600">{data.trends.patientDemand.message}</p>
+              <div className="mt-3 grid gap-4 lg:grid-cols-2">
+                <div className="h-60 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={data.trends.patientDemand.dayOfWeek}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="weekday" />
+                      <YAxis />
+                      <Tooltip />
+                      <Bar dataKey="visits" fill="#0f766e" name="Visits" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="h-60 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={data.trends.patientDemand.dayOfMonthBuckets}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="label" />
+                      <YAxis />
+                      <Tooltip />
+                      <Bar dataKey="visits" fill="#0284c7" name="Visits" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {!loading && !error && data && tab === "payments" && (
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900">Payment Method Aggregates</h3>
+                <div className="flex gap-2">
                   <button
-                    onClick={() => { setStartDate(""); setEndDate(""); setFilterType("today"); }}
-                    className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100"
+                    onClick={() => setAmountMode("amount")}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${amountMode === "amount" ? "bg-teal-700 text-white" : "border border-slate-200 bg-white text-slate-700"}`}
                   >
-                    Reset
+                    Amount
+                  </button>
+                  <button
+                    onClick={() => setAmountMode("count")}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${amountMode === "count" ? "bg-teal-700 text-white" : "border border-slate-200 bg-white text-slate-700"}`}
+                  >
+                    Count
                   </button>
                 </div>
               </div>
-            )}
-
-            {/* ── KPI CARDS ── */}
-            <div>
-              <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 mb-4">Key Metrics • {filterLabel}</h2>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {/* Gross Sales */}
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Gross Sales</p>
-                      <p className="mt-2 text-2xl font-bold text-slate-900">
-                        AED {bossStats?.grossRevenue.toFixed(2)}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-400">
-                        Net: AED {bossStats?.totalRevenue.toFixed(2)}
-                      </p>
-                    </div>
-                    <div className="text-3xl text-teal-600">💰</div>
-                  </div>
-                </div>
-
-                {/* Patients Seen */}
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Patients Seen</p>
-                      <p className="mt-2 text-2xl font-bold text-slate-900">{bossStats?.totalPatients}</p>
-                      <p className="mt-1 text-xs text-slate-400">Unique patients</p>
-                    </div>
-                    <div className="text-3xl">👥</div>
-                  </div>
-                </div>
-
-                {/* Transactions */}
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Transactions</p>
-                      <p className="mt-2 text-2xl font-bold text-slate-900">{bossStats?.totalTransactions}</p>
-                      <p className="mt-1 text-xs text-slate-400">Total completed</p>
-                    </div>
-                    <div className="text-3xl">📊</div>
-                  </div>
-                </div>
-
-                {/* Average Transaction */}
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Avg Transaction</p>
-                      <p className="mt-2 text-2xl font-bold text-slate-900">
-                        AED {bossStats && bossStats.totalTransactions > 0
-                          ? (bossStats.totalRevenue / bossStats.totalTransactions).toFixed(2)
-                          : "0.00"}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-400">Per transaction</p>
-                    </div>
-                    <div className="text-3xl">📈</div>
-                  </div>
-                </div>
-
-                {/* Outstanding Balance (Placeholder) */}
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Outstanding</p>
-                      <p className="mt-2 text-2xl font-bold text-slate-900">AED 0.00</p>
-                      <p className="mt-1 text-xs text-slate-400">Placeholder</p>
-                    </div>
-                    <div className="text-3xl">⏳</div>
-                  </div>
-                </div>
-
-                {/* Refunds */}
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Refunds</p>
-                      <p className="mt-2 text-2xl font-bold text-slate-900">
-                        AED {bossStats?.totalRefunded.toFixed(2)}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-400">{refunds.filter((r) => getFilteredReceipts([receipts.find((rec) => rec.id === r.receipt_id)!]).length > 0).length} transactions</p>
-                    </div>
-                    <div className="text-3xl">↩️</div>
-                  </div>
-                </div>
+              <div className="mt-3 h-72 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={data.payments.methods.map((row) => ({
+                      method: methodLabel(row.method),
+                      value: amountMode === "amount" ? row.amount : row.count,
+                    }))}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="method" />
+                    <YAxis />
+                    <Tooltip />
+                    <Bar dataKey="value" fill="#0f766e" />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
-            </div>
-
-            {/* ── REVENUE TREND CHART ── */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <h3 className="text-sm font-semibold text-slate-900 mb-4">Revenue Trend</h3>
-              {chartData.length > 0 ? (
-                <div className="h-80 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={chartData} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis 
-                        dataKey="label" 
-                        stroke="#64748b"
-                        style={{ fontSize: "0.75rem" }}
-                      />
-                      <YAxis 
-                        stroke="#64748b"
-                        style={{ fontSize: "0.75rem" }}
-                        tickFormatter={(value) => `AED ${value.toLocaleString()}`}
-                      />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: "#fff",
-                          border: "1px solid #cbd5e1",
-                          borderRadius: "0.5rem",
-                          padding: "0.75rem",
-                        }}
-                        formatter={(value, name) => {
-                          if (name === "revenue") return [`AED ${Number(value).toFixed(2)}`, "Revenue"];
-                          if (name === "transactions") return [value, "Transactions"];
-                          if (name === "patients") return [value, "Patients"];
-                          return [value, name];
-                        }}
-                        labelFormatter={(label) => `${label}`}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="revenue"
-                        stroke="#0d9488"
-                        strokeWidth={3}
-                        dot={{ fill: "#0d9488", r: 4 }}
-                        activeDot={{ r: 6 }}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              ) : (
-                <div className="h-80 flex items-center justify-center bg-slate-50 rounded-lg border border-slate-200">
-                  <div className="text-center text-slate-500">
-                    <p className="text-sm font-medium">No revenue recorded</p>
-                    <p className="text-xs mt-1">during the selected period</p>
-                  </div>
-                </div>
+              {data.payments.missingAllocationCoverage && (
+                <p className="mt-2 text-xs text-amber-700">
+                  Some historical receipts do not have allocation records. Split-payment method allocation metrics for those receipts are unavailable.
+                </p>
               )}
             </div>
 
-            {/* ── TOP SERVICES ANALYTICS ── */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <div className="flex flex-col gap-4 border-b border-slate-200 pb-6 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                  <h3 className="text-sm font-semibold text-slate-900">Top Services</h3>
-                  <p className="mt-2 text-sm text-slate-500">
-                    Ranked by revenue for {clinicLabel} during {filterLabel}.
-                  </p>
-                </div>
-
-                {topServicesSummary.highestRevenue && (
-                  <div className="rounded-2xl bg-teal-50 px-4 py-3 lg:max-w-xs">
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-700">Top Performer</p>
-                    <p className="mt-2 text-base font-semibold text-slate-900">{topServicesSummary.highestRevenue.name}</p>
-                    <p className="mt-1 text-sm text-teal-700">
-                      AED {topServicesSummary.highestRevenue.revenue.toFixed(2)}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {topServicesSummary.highestRevenue.count} times performed
-                    </p>
-                  </div>
-                )}
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Payment Fees Collected</p>
+                <p className="mt-1 text-xl font-bold text-slate-900">{formatCurrency(data.payments.paymentFeesCollected)}</p>
               </div>
-
-              {topServicesLoading ? (
-                <div className="flex h-56 items-center justify-center rounded-xl bg-slate-50 text-sm text-slate-500">
-                  Loading service analytics...
-                </div>
-              ) : topServicesError ? (
-                <div className="flex h-56 items-center justify-center rounded-xl border border-red-100 bg-red-50 text-sm text-red-600">
-                  {topServicesError}
-                </div>
-              ) : topServicesSummary.services.length > 0 ? (
-                <>
-                  <div className="grid gap-4 py-6 sm:grid-cols-3">
-                    <div className="rounded-2xl bg-slate-50 px-4 py-4">
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Services Offered</p>
-                      <p className="mt-3 text-2xl font-bold text-slate-900">{topServicesSummary.uniqueServices}</p>
-                    </div>
-                    <div className="rounded-2xl bg-slate-50 px-4 py-4">
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Most Performed</p>
-                      <p className="mt-3 text-base font-semibold text-slate-900">{topServicesSummary.mostPerformed?.name || "—"}</p>
-                      <p className="mt-1 text-sm text-slate-500">
-                        {topServicesSummary.mostPerformed ? `${topServicesSummary.mostPerformed.count} times` : "No activity"}
-                      </p>
-                    </div>
-                    <div className="rounded-2xl bg-slate-50 px-4 py-4">
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Highest Revenue</p>
-                      <p className="mt-3 text-base font-semibold text-slate-900">{topServicesSummary.highestRevenue?.name || "—"}</p>
-                      <p className="mt-1 text-sm text-slate-500">
-                        {topServicesSummary.highestRevenue
-                          ? `AED ${topServicesSummary.highestRevenue.revenue.toFixed(2)}`
-                          : "No activity"}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[680px] text-sm">
-                      <thead className="border-b border-slate-200">
-                        <tr>
-                          <th className="text-left px-4 py-3 font-semibold text-slate-700">Service</th>
-                          <th className="text-center px-4 py-3 font-semibold text-slate-700">Times Performed</th>
-                          <th className="text-right px-4 py-3 font-semibold text-slate-700">Revenue</th>
-                          <th className="text-right px-4 py-3 font-semibold text-slate-700">% of Revenue</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {topServicesSummary.services.map((service) => (
-                          <tr
-                            key={service.id}
-                            onClick={() => {
-                              setSelectedServiceId(service.id);
-                              setSelectedServiceDetail(null);
-                              setServiceDetailError("");
-                              setShowServicePanel(true);
-                            }}
-                            className={`cursor-pointer border-b border-slate-100 transition-colors last:border-0 hover:bg-slate-50 ${
-                              service.isTopPerformer ? "bg-teal-50/60" : "bg-white"
-                            }`}
-                          >
-                            <td className="px-4 py-4">
-                              <div>
-                                <p className="font-medium text-slate-900">{service.name}</p>
-                                <p className="mt-1 text-xs text-slate-500">
-                                  {service.patientCount} patients • {service.doctorCount} dentists
-                                </p>
-                              </div>
-                            </td>
-                            <td className="px-4 py-4 text-center text-slate-600">{service.count}</td>
-                            <td className="px-4 py-4 text-right font-semibold text-teal-700">AED {service.revenue.toFixed(2)}</td>
-                            <td className="px-4 py-4 text-right text-slate-600">{service.revenueShare.toFixed(1)}%</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <p className="mt-4 text-xs text-slate-500">
-                    Click any service to inspect patients treated, dentists involved, average price, and revenue trend.
-                  </p>
-                </>
-              ) : (
-                <div className="flex h-56 items-center justify-center rounded-xl border border-slate-200 bg-slate-50">
-                  <div className="text-center text-slate-500">
-                    <p className="text-sm font-medium">No services were performed during the selected period.</p>
-                    <p className="mt-1 text-xs text-slate-400">Try another clinic or date range.</p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* ── CALENDAR ── */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-semibold text-slate-900">
-                  {calendarDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
-                </h3>
-                <div className="flex gap-2">
-                  <button onClick={() => navigateMonth(-1)} className="px-3 py-1 text-sm border border-slate-200 rounded-lg hover:bg-slate-50">← Prev</button>
-                  <button onClick={() => navigateMonth(1)} className="px-3 py-1 text-sm border border-slate-200 rounded-lg hover:bg-slate-50">Next →</button>
-                </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Customer Collections</p>
+                <p className="mt-1 text-xl font-bold text-slate-900">{formatCurrency(data.payments.customerCollections)}</p>
               </div>
-              {calendarStats && (
-                <div className="grid grid-cols-7 gap-1">
-                  {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => (
-                    <div key={day} className="text-center text-xs font-semibold text-slate-500 py-2">{day}</div>
-                  ))}
-                  {Array.from({ length: calendarStats.startingDayOfWeek }).map((_, i) => (
-                    <div key={`empty-${i}`} className="aspect-square bg-slate-50 rounded" />
-                  ))}
-                  {Array.from({ length: calendarStats.daysInMonth }).map((_, i) => {
-                    const day = i + 1;
-                    const data = calendarStats.dailyData[day];
-                    const clickedDate = new Date(calendarDate.getFullYear(), calendarDate.getMonth(), day);
-                    return (
-                      <button
-                        key={day}
-                        onClick={() => {
-                          setSelectedDate(clickedDate);
-                          setFilterType("selectedDate");
-                        }}
-                        className="aspect-square rounded border border-slate-200 bg-white p-1.5 text-left text-[10px] hover:border-teal-300 hover:bg-teal-50 transition"
-                      >
-                        <div className="font-semibold text-slate-900">{day}</div>
-                        {data && data.count > 0 && (
-                          <>
-                            <div className="text-teal-700 font-semibold text-[8px] leading-tight">
-                              {data.revenue >= 1000 ? `${(data.revenue / 1000).toFixed(1)}k` : `${data.revenue.toFixed(0)}`}
-                            </div>
-                            <div className="text-slate-500 text-[8px] leading-tight">{data.patients.size}P</div>
-                            {data.hasPromo && <div className="mt-0.5 text-[7px] font-bold text-red-500 leading-tight">PROMO</div>}
-                            {data.hasRefund && (
-                              <div className={`mt-0.5 text-[7px] font-bold leading-tight ${data.hasLateRefund ? "text-yellow-500" : "text-purple-600"}`}>
-                                RFND
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* ── PER CLINIC PERFORMANCE ── */}
-            <div>
-              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 mb-4">Clinic Performance</h3>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {bossStats && Object.entries(bossStats.clinicMap).map(([clinicId, data]) => (
-                  <div key={clinicId} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm hover:shadow-md transition">
-                    <h4 className="font-semibold text-slate-900">{data.name}</h4>
-                    <div className="mt-4 space-y-3">
-                      <div>
-                        <p className="text-xs text-slate-500">Revenue</p>
-                        <p className="mt-1 text-xl font-bold text-teal-700">AED {(data.revenue - data.refunded).toFixed(2)}</p>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <p className="text-xs text-slate-500">Patients</p>
-                          <p className="mt-1 text-lg font-semibold text-slate-900">{data.patients.size}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-slate-500">Transactions</p>
-                          <p className="mt-1 text-lg font-semibold text-slate-900">—</p>
-                        </div>
-                      </div>
-                      {data.refunded > 0 && (
-                        <div className="pt-3 border-t border-slate-200">
-                          <p className="text-xs text-red-500">Refunded: −AED {data.refunded.toFixed(2)}</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Customer Refunds</p>
+                <p className="mt-1 text-xl font-bold text-slate-900">{formatCurrency(data.payments.customerRefunds)}</p>
               </div>
-            </div>
-
-            {/* ── PAYMENT METHODS ── */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <h3 className="text-sm font-semibold text-slate-900 mb-4">Payment Methods</h3>
-              <div className="space-y-4">
-                {bossStats && Object.entries(bossStats.paymentBreakdown)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([method, amount]) => {
-                    const pct = bossStats.totalRevenue > 0 ? ((amount as number) / bossStats.totalRevenue) * 100 : 0;
-                    return (
-                      <div key={method}>
-                        <div className="flex items-center justify-between text-sm mb-2">
-                          <span className="font-medium text-slate-700">{method}</span>
-                          <div>
-                            <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
-                            <span className="text-slate-500 text-xs ml-2">{pct.toFixed(1)}%</span>
-                          </div>
-                        </div>
-                        <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
-                          <div className="h-full rounded-full bg-teal-500" style={{ width: `${pct}%` }} />
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            </div>
-
-            {bossStats && bossStats.collectionsCount > 0 && (
-              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
-                <div className="mb-4 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-amber-900">Collections (Previous Balances)</h3>
-                  <span className="rounded-full bg-amber-200 px-3 py-0.5 text-xs font-semibold text-amber-900">
-                    {bossStats.collectionsCount} payment{bossStats.collectionsCount > 1 ? "s" : ""}
-                  </span>
-                </div>
-                <div className="mb-4 grid grid-cols-2 gap-4">
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-amber-700">Total Collected</p>
-                    <p className="mt-1 text-2xl font-bold text-amber-900">AED {bossStats.collectionsTotal.toFixed(2)}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-amber-700">Cash Collected</p>
-                    <p className="mt-1 text-2xl font-bold text-amber-900">AED {bossStats.collectionsCash.toFixed(2)}</p>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  {Object.entries(bossStats.collectionsBreakdown)
-                    .sort((a, b) => b[1] - a[1])
-                    .map(([method, amount]) => (
-                      <div key={method} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm">
-                        <span className="font-medium text-slate-700">{method}</span>
-                        <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
-                      </div>
-                    ))}
-                </div>
-                <p className="mt-3 text-[11px] italic text-amber-700">
-                  Collections are payments against outstanding balances (old-system debts and POS partial payments). They are tracked separately from treatment revenue.
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Provider Deductions</p>
+                <p className="mt-1 text-xl font-bold text-slate-900">
+                  {data.payments.providerDeductionsAvailable ? formatCurrency(data.payments.providerDeductions) : "Not available"}
                 </p>
               </div>
-            )}
-
-            {/* ── ANALYTICS SECTION ── */}
-            <div className="grid gap-4 sm:grid-cols-2">
-              {/* Top Services */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                <h3 className="text-sm font-semibold text-slate-900 mb-4">Top Services</h3>
-                <div className="space-y-3">
-                  {topServicesSummary.services.length > 0 ? (
-                    topServicesSummary.services.slice(0, 5).map((service) => (
-                      <div key={service.id} className="flex items-center justify-between pb-3 border-b border-slate-100 last:border-0">
-                        <div>
-                          <p className="text-sm font-medium text-slate-900">{service.name}</p>
-                          <p className="text-xs text-slate-500">{service.count} times performed</p>
-                        </div>
-                        <p className="font-semibold text-teal-700">AED {service.revenue.toFixed(2)}</p>
-                      </div>
-                    ))
-                  ) : topServicesLoading ? (
-                    <p className="text-sm text-slate-500">Loading service data...</p>
-                  ) : (
-                    <p className="text-sm text-slate-500">No service data available</p>
-                  )}
-                </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Net Settlement</p>
+                <p className="mt-1 text-xl font-bold text-slate-900">
+                  {data.payments.netSettlement == null ? "Not available" : formatCurrency(data.payments.netSettlement)}
+                </p>
               </div>
-
-              {/* Top Dentists (Placeholder) */}
-              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                <h3 className="text-sm font-semibold text-slate-900 mb-4">Top Dentists</h3>
-                <div className="h-40 flex items-center justify-center bg-slate-50 rounded-lg border border-slate-200">
-                  <div className="text-center text-slate-500">
-                    <p className="text-sm font-medium">Placeholder</p>
-                    <p className="text-xs mt-1">Dentist analytics coming soon</p>
-                  </div>
-                </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Payment Method Uses</p>
+                <p className="mt-1 text-xl font-bold text-slate-900">{data.payments.paymentMethodUses}</p>
               </div>
             </div>
-
-            {/* ── SERVICE DETAILS PANEL ── */}
-            {showServicePanel && selectedServiceId && (
-              <div className="fixed inset-0 z-50 overflow-hidden">
-                <div
-                  className="absolute inset-0 bg-black/50"
-                  onClick={() => {
-                    setShowServicePanel(false);
-                    setSelectedServiceDetail(null);
-                    setServiceDetailError("");
-                    setServiceDetailLoading(false);
-                  }}
-                />
-                <div className="absolute right-0 top-0 h-full w-full max-w-md bg-white shadow-lg rounded-l-2xl overflow-y-auto">
-                  <div className="p-6">
-                    <div className="flex items-center justify-between mb-6">
-                      <h2 className="text-lg font-bold text-slate-900">
-                        {selectedServiceDetail?.name || "Service Details"}
-                      </h2>
-                      <button
-                        onClick={() => {
-                          setShowServicePanel(false);
-                          setSelectedServiceDetail(null);
-                          setServiceDetailError("");
-                          setServiceDetailLoading(false);
-                        }}
-                        className="text-slate-400 hover:text-slate-600 transition-colors"
-                      >
-                        ✕
-                      </button>
-                    </div>
-
-                    {serviceDetailLoading ? (
-                      <div className="flex h-64 items-center justify-center rounded-xl bg-slate-50 text-sm text-slate-500">
-                        Loading service detail...
-                      </div>
-                    ) : serviceDetailError ? (
-                      <div className="flex h-64 items-center justify-center rounded-xl border border-red-100 bg-red-50 px-6 text-center text-sm text-red-600">
-                        {serviceDetailError}
-                      </div>
-                    ) : selectedServiceDetail ? (
-                      <>
-                        <div className="space-y-4 border-b border-slate-200 pb-6">
-                          <div>
-                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Total Revenue</p>
-                            <p className="mt-1 text-2xl font-bold text-teal-700">AED {selectedServiceDetail.revenue.toFixed(2)}</p>
-                          </div>
-                          <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Times Performed</p>
-                              <p className="mt-1 text-xl font-bold text-slate-900">{selectedServiceDetail.count}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Patients Treated</p>
-                              <p className="mt-1 text-xl font-bold text-slate-900">{selectedServiceDetail.patientCount}</p>
-                            </div>
-                          </div>
-                          <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Average Price</p>
-                              <p className="mt-1 text-lg font-bold text-slate-900">AED {selectedServiceDetail.averagePrice.toFixed(2)}</p>
-                            </div>
-                            <div>
-                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">% of Revenue</p>
-                              <p className="mt-1 text-lg font-bold text-slate-900">{selectedServiceDetail.revenueShare.toFixed(1)}%</p>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="py-6 border-b border-slate-200">
-                          <div className="mb-4 flex items-center justify-between">
-                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Revenue Trend</p>
-                            <p className="text-xs text-slate-500">{filterLabel}</p>
-                          </div>
-                          {selectedServiceDetail.revenueTrend.length > 0 ? (
-                            <div className="h-48 w-full">
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={selectedServiceDetail.revenueTrend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                                  <XAxis dataKey="label" stroke="#64748b" style={{ fontSize: "0.7rem" }} />
-                                  <YAxis
-                                    stroke="#64748b"
-                                    style={{ fontSize: "0.7rem" }}
-                                    tickFormatter={(value) => `AED ${Number(value).toFixed(0)}`}
-                                  />
-                                  <Tooltip
-                                    formatter={(value, name) => {
-                                      if (name === "revenue") return [`AED ${Number(value).toFixed(2)}`, "Revenue"];
-                                      if (name === "count") return [value, "Times Performed"];
-                                      return [value, name];
-                                    }}
-                                  />
-                                  <Line type="monotone" dataKey="revenue" stroke="#0d9488" strokeWidth={3} dot={{ fill: "#0d9488", r: 3 }} />
-                                </LineChart>
-                              </ResponsiveContainer>
-                            </div>
-                          ) : (
-                            <div className="flex h-32 items-center justify-center rounded-xl bg-slate-50 text-sm text-slate-500">
-                              No trend data available for this filter.
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="py-6 border-b border-slate-200">
-                          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-600">Dentists Who Performed It</p>
-                          {selectedServiceDetail.doctors.length > 0 ? (
-                            <div className="space-y-2">
-                              {selectedServiceDetail.doctors.map((doctor) => (
-                                <p key={doctor.id} className="text-sm text-slate-700">• {doctor.name}</p>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="text-sm text-slate-500">No dentists recorded for this service.</p>
-                          )}
-                        </div>
-
-                        <div className="py-6">
-                          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-600">Patients Treated</p>
-                          {selectedServiceDetail.patients.length > 0 ? (
-                            <div className="max-h-64 space-y-2 overflow-y-auto">
-                              {selectedServiceDetail.patients.map((patient) => (
-                                <p key={patient.id} className="text-sm text-slate-700">• {patient.name}</p>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="text-sm text-slate-500">No patient records found for this service.</p>
-                          )}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="flex h-64 items-center justify-center rounded-xl bg-slate-50 px-6 text-center text-sm text-slate-500">
-                        This service was not found for the selected filters.
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ── RECENT TRANSACTIONS ── */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm overflow-x-auto">
-              <h3 className="text-sm font-semibold text-slate-900 mb-4">Recent Transactions</h3>
-              <table className="w-full min-w-[600px] text-sm">
-                <thead className="border-b border-slate-200">
-                  <tr>
-                    <th className="text-left px-4 py-3 font-semibold text-slate-600">Time</th>
-                    <th className="text-left px-4 py-3 font-semibold text-slate-600">Patient</th>
-                    <th className="text-left px-4 py-3 font-semibold text-slate-600">Clinic</th>
-                    <th className="text-left px-4 py-3 font-semibold text-slate-600">Method</th>
-                    <th className="text-right px-4 py-3 font-semibold text-slate-600">Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {getFilteredReceipts(receipts).filter((r) => r.patient_id).slice(0, 10).map((receipt, i) => {
-                    const patient = patients.find((p) => p.id === receipt.patient_id);
-                    const receptionist = receptionists.find((r) => r.id === receipt.receptionist_id);
-                    const clinic = clinics.find((c) => c.id === receptionist?.clinic_id);
-                    return (
-                      <tr key={i} className="border-b border-slate-100 last:border-0 hover:bg-slate-50">
-                        <td className="px-4 py-3 text-slate-600">
-                          {new Date(receipt.created_at).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
-                        </td>
-                        <td className="px-4 py-3 text-slate-900 font-medium">{patient?.name || "Unknown"}</td>
-                        <td className="px-4 py-3 text-slate-600">{clinic?.name || "Unknown"}</td>
-                        <td className="px-4 py-3 text-slate-600">{receipt.payment_method}</td>
-                        <td className="px-4 py-3 text-right font-semibold text-teal-700">AED {receipt.total.toFixed(2)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            </>
-        )}
-
-        {!isLoading && role === "receptionist" && receptionistStats && (
-          <>
-            {/* ── RECEPTIONIST VIEW ── */}
-            <div className="space-y-6">
-              {/* KPI Cards */}
-              <div className="grid gap-4 sm:grid-cols-3">
-                <div className="rounded-2xl border border-teal-200 bg-teal-50 p-6 shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-[0.1em] text-teal-600">Total Revenue</p>
-                  <p className="mt-2 text-2xl font-bold text-teal-800">AED {receptionistStats.totalRevenue.toFixed(2)}</p>
-                  <p className="mt-1 text-xs text-slate-400">{receptionistStats.totalTransactions} transactions</p>
-                </div>
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Cash Collected</p>
-                  <p className="mt-2 text-2xl font-bold text-slate-800">AED {receptionistStats.cashTotal.toFixed(2)}</p>
-                  <p className="mt-1 text-xs text-slate-400">{receptionistStats.cashCount} cash transactions</p>
-                </div>
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-[0.1em] text-slate-500">Your Clinic</p>
-                  <p className="mt-2 text-lg font-bold text-slate-800">{activeClinicName}</p>
-                  <p className="mt-1 text-xs text-slate-400">{filterLabel}</p>
-                </div>
-              </div>
-
-              {/* Payment Methods */}
-              {Object.keys(receptionistStats.paymentBreakdown).length > 0 && (
-                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <h3 className="text-sm font-semibold text-slate-900 mb-4">Payment Methods</h3>
-                  <div className="space-y-3">
-                    {Object.entries(receptionistStats.paymentBreakdown)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([method, amount]) => {
-                        const pct = receptionistStats.totalRevenue > 0 ? ((amount as number) / receptionistStats.totalRevenue) * 100 : 0;
-                        return (
-                          <div key={method}>
-                            <div className="flex items-center justify-between text-sm mb-2">
-                              <span className="font-medium text-slate-700">{method}</span>
-                              <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
-                            </div>
-                            <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
-                              <div className="h-full rounded-full bg-teal-500" style={{ width: `${pct}%` }} />
-                            </div>
-                          </div>
-                        );
-                      })}
-                  </div>
-                </div>
-              )}
-
-              {receptionistStats.collectionsCount > 0 && (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
-                  <div className="mb-4 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-amber-900">Collections (Previous Balances)</h3>
-                    <span className="rounded-full bg-amber-200 px-3 py-0.5 text-xs font-semibold text-amber-900">
-                      {receptionistStats.collectionsCount} payment{receptionistStats.collectionsCount > 1 ? "s" : ""}
-                    </span>
-                  </div>
-                  <div className="mb-4 grid grid-cols-2 gap-4">
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-amber-700">Total Collected</p>
-                      <p className="mt-1 text-xl font-bold text-amber-900">AED {receptionistStats.collectionsTotal.toFixed(2)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-amber-700">Cash Collected</p>
-                      <p className="mt-1 text-xl font-bold text-amber-900">AED {receptionistStats.collectionsCash.toFixed(2)}</p>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    {Object.entries(receptionistStats.collectionsBreakdown)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([method, amount]) => (
-                        <div key={method} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm">
-                          <span className="font-medium text-slate-700">{method}</span>
-                          <span className="font-semibold text-slate-900">AED {(amount as number).toFixed(2)}</span>
-                        </div>
-                      ))}
-                  </div>
-                  <p className="mt-3 text-[11px] italic text-amber-700">
-                    Migrated balance collections — separate from treatment sales.
-                  </p>
-                </div>
-              )}
-            </div>
-            </>
+          </div>
         )}
       </div>
     </AppFrame>
