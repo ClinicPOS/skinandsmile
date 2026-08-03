@@ -35,13 +35,13 @@ const {
   percentageChange,
 } = require(outputJs);
 
-// Default today range + previous same weekday.
+// Default today range + previous day.
 {
   const now = new Date("2026-08-03T08:00:00.000Z"); // 12:00 Dubai
   const current = buildDashboardRange({ period: "today", now });
   const compare = buildComparisonRange(current);
   assert.equal(current.period, "today");
-  assert.equal(compare.label, "Same weekday last week");
+  assert.equal(compare.label, "Yesterday");
 }
 
 // This week and previous week.

@@ -849,7 +849,7 @@ export async function POST(request: Request) {
     for (const clinicMetric of clinicPerformance) {
       if (clinicMetric.expectedTarget == null) {
         attentionItems.push(`${clinicMetric.clinicName}: Missing monthly target.`);
-      } else if ((clinicMetric.targetAttainment || 0) < 80) {
+      } else if (period !== "today" && (clinicMetric.targetAttainment || 0) < 80) {
         attentionItems.push(`${clinicMetric.clinicName}: Target attainment below 80%.`);
       }
       // Only alert on decline for multi-day periods. For "today" the day is partial so

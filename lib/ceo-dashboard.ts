@@ -122,9 +122,9 @@ export function buildComparisonRange(current: DashboardRange): DashboardRange {
   let label = "";
 
   if (current.period === "today") {
-    start = addDubaiDays(start, -7);
-    end = addDubaiDays(end, -7);
-    label = "Same weekday last week";
+    start = addDubaiDays(start, -1);
+    end = addDubaiDays(end, -1);
+    label = "Yesterday";
   } else if (current.period === "this_week") {
     start = addDubaiDays(start, -7);
     end = addDubaiDays(end, -7);
@@ -158,7 +158,13 @@ export function buildComparisonRange(current: DashboardRange): DashboardRange {
 
 export function formatCurrency(value: number | null | undefined) {
   if (value == null || !Number.isFinite(value)) return "Not available";
-  return `AED ${value.toFixed(2)}`;
+  const rounded = Math.round(value * 100) / 100;
+  if (Number.isInteger(rounded)) {
+    return `AED ${rounded.toLocaleString("en-US")}`;
+  }
+  const fixed = rounded.toFixed(2);
+  const parts = fixed.split(".");
+  return `AED ${Number(parts[0]).toLocaleString("en-US")}.${parts[1]}`;
 }
 
 export function statusFromTarget(attainmentPercent: number | null): ClinicPerformanceStatus {
@@ -176,10 +182,10 @@ export function statusLabel(status: ClinicPerformanceStatus) {
 }
 
 export function statusIcon(status: ClinicPerformanceStatus) {
-  if (status === "good") return "👍";
-  if (status === "average") return "➖";
-  if (status === "needs_attention") return "⚠️";
-  return "ℹ️";
+  if (status === "good") return "G";
+  if (status === "average") return "A";
+  if (status === "needs_attention") return "!";
+  return "i";
 }
 
 export function percentageChange(current: number | null, previous: number | null) {
