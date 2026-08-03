@@ -1282,6 +1282,50 @@ export default function ReceiptsPage() {
     return Number(normalized);
   }
 
+  function buildPatientDetailsPayload() {
+    return {
+      name: patientName.trim() || null,
+      phone: patientPhoneInput.trim() || null,
+      email: patientEmailInput.trim() || null,
+      date_of_birth: patientDobInput || null,
+      sex: patientSexInput || null,
+      nationality: patientNationalityInput.trim() || null,
+      emirates_id: patientEmiratesIdInput.trim() || null,
+      passport_number: patientPassportInput.trim() || null,
+      mrn: patientMrnInput.trim() || null,
+    };
+  }
+
+  async function savePatientDetails(patientIdToSave: string) {
+    if (!patientIdToSave) {
+      return { ok: false as const, error: null as Error | null };
+    }
+
+    const payload = buildPatientDetailsPayload();
+    const sanitizedPayload = Object.fromEntries(
+      Object.entries(payload).filter(([, value]) => value !== null && value !== "")
+    ) as Record<string, string>;
+
+    if (Object.keys(sanitizedPayload).length === 0) {
+      return { ok: true as const, error: null as Error | null };
+    }
+
+    const { error } = await supabase.from("patients").update(sanitizedPayload).eq("id", patientIdToSave);
+    if (error) {
+      console.error("Patient detail save error", error);
+      return { ok: false as const, error };
+    }
+
+    setPatients((prev) =>
+      prev.map((patient) => {
+        if (patient.id !== patientIdToSave) return patient;
+        return { ...patient, ...sanitizedPayload };
+      })
+    );
+
+    return { ok: true as const, error: null as Error | null };
+  }
+
   async function openRegister() {
     if (!loginReceptionistId) {
       alert("Please select receptionist.");
@@ -2806,21 +2850,12 @@ export default function ReceiptsPage() {
       }
     }
 
-    // Update existing patient fields if a patient is already selected
+    // Persist the patient details for the selected or newly created patient.
     if (patientId) {
-      await supabase
-        .from("patients")
-        .update({
-          phone: patientPhoneInput.trim() || null,
-          email: patientEmailInput.trim() || null,
-          date_of_birth: patientDobInput || null,
-          sex: patientSexInput || null,
-          nationality: patientNationalityInput.trim() || null,
-          emirates_id: patientEmiratesIdInput.trim() || null,
-          passport_number: patientPassportInput.trim() || null,
-          mrn: patientMrnInput.trim() || null,
-        })
-        .eq("id", patientId);
+      const patientSaveResult = await savePatientDetails(patientId);
+      if (!patientSaveResult.ok) {
+        console.warn("Existing patient details could not be fully saved.");
+      }
     }
 
     // NEW PATIENT — use the atomic RPC so patients + clinic_patient_files
@@ -2855,6 +2890,11 @@ export default function ReceiptsPage() {
       finalPatientId = result.patient_id;
       finalPatientFileId = result.clinic_patient_file_id;
       finalClinicFileNo = result.file_no;
+
+      const patientSaveResult = await savePatientDetails(result.patient_id);
+      if (!patientSaveResult.ok) {
+        console.warn("New patient details could not be fully saved.");
+      }
 
       // Update local state so the new patient is immediately searchable
       setPatients((prev) => [
@@ -3224,25 +3264,11 @@ export default function ReceiptsPage() {
     }
 
     try {
-    if (patientId) {
-      const updates: Record<string, string> = {};
-      if (patientEmiratesIdInput.trim() && !selectedPatientInfo?.emirates_id)
-        updates.emirates_id = patientEmiratesIdInput.trim();
-      if (patientPassportInput.trim() && !selectedPatientInfo?.passport_number)
-        updates.passport_number = patientPassportInput.trim();
-      if (patientMrnInput.trim() && !selectedPatientInfo?.mrn)
-        updates.mrn = patientMrnInput.trim();
-      if (patientDobInput && !selectedPatientInfo?.date_of_birth)
-        updates.date_of_birth = patientDobInput;
-      if (patientSexInput && !selectedPatientInfo?.sex)
-        updates.sex = patientSexInput;
-      if (patientEmailInput.trim() && !selectedPatientInfo?.email)
-        updates.email = patientEmailInput.trim();
-      if (Object.keys(updates).length > 0) {
-        const { error: patientUpdateError } = await supabase.from("patients").update(updates).eq("id", patientId);
-        if (patientUpdateError) {
-          console.error("Patient update error", patientUpdateError);
-        }
+    const patientIdToPersist = transactionPatientId || patientId;
+    if (patientIdToPersist) {
+      const patientSaveResult = await savePatientDetails(patientIdToPersist);
+      if (!patientSaveResult.ok) {
+        console.warn("Patient details could not be fully saved before receipt completion.");
       }
     }
 

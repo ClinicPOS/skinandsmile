@@ -190,11 +190,6 @@ function weekdayDubai(ymd: string) {
   return map[weekdayText] ?? 0;
 }
 
-function startMonthOfYmd(ymd: string) {
-  const { y, m } = parseYmd(ymd);
-  return `${y}-${String(m).padStart(2, "0")}-01`;
-}
-
 function nextMonthStart(ymd: string) {
   const { y, m } = parseYmd(ymd);
   const nextYear = m === 12 ? y + 1 : y;
@@ -371,7 +366,7 @@ export async function POST(request: Request) {
     return (data || []) as RefundRow[];
   };
 
-  let fetchRefundItems = async (refundIds: string[]) => {
+  const fetchRefundItems = async (refundIds: string[]) => {
     if (refundIds.length === 0) return [] as RefundItemRow[];
     const { data, error } = await supabase
       .from("refund_items")
@@ -418,27 +413,54 @@ export async function POST(request: Request) {
   const currentRefundTreatmentByRefund = groupedRefundTreatment(currentRefundItems);
   const compareRefundTreatmentByRefund = groupedRefundTreatment(compareRefundItems);
 
-  const computeNetSalesBase = (rows: ReceiptRow[]) =>
-    rows.reduce((sum, row) => {
-      const subtotal = row.subtotal == null ? null : asNumber(row.subtotal);
-      const discount = asNumber(row.discount_amount);
-      const vat = asNumber(row.vat);
-      const totalBeforeFee = row.total_before_gateway_fee == null
-        ? Math.max(0, asNumber(row.total) - asNumber(row.gateway_fee))
-        : asNumber(row.total_before_gateway_fee);
-      const treatmentExVat = subtotal != null ? Math.max(0, subtotal - discount) : Math.max(0, totalBeforeFee - vat);
-      return sum + treatmentExVat;
-    }, 0);
-
-  const currentNetSalesBase = computeNetSalesBase(currentReceipts);
-  const compareNetSalesBase = computeNetSalesBase(compareReceipts);
   const currentRefundTreatment = currentRefundsFiltered.reduce((sum, row) => sum + (currentRefundTreatmentByRefund.get(row.id) || 0), 0);
   const compareRefundTreatment = compareRefundsFiltered.reduce((sum, row) => sum + (compareRefundTreatmentByRefund.get(row.id) || 0), 0);
-  const currentNetSales = Math.max(0, currentNetSalesBase - currentRefundTreatment);
-  const compareNetSales = Math.max(0, compareNetSalesBase - compareRefundTreatment);
 
-  const currentCollections = currentReceipts.reduce((sum, row) => sum + (row.amount_paid == null ? asNumber(row.total) : asNumber(row.amount_paid)), 0);
-  const compareCollections = compareReceipts.reduce((sum, row) => sum + (row.amount_paid == null ? asNumber(row.total) : asNumber(row.amount_paid)), 0);
+  const sumReceiptCollectionAmount = (rows: ReceiptRow[]) => rows.reduce((sum, row) => sum + (row.amount_paid == null ? asNumber(row.total) : asNumber(row.amount_paid)), 0);
+  const sumAmountRows = (rows: Array<{ amount: number | null }>) => rows.reduce((sum, row) => sum + asNumber(row.amount), 0);
+  const fetchCollectionSupplementRows = async (tableName: string, startIso: string, endIso: string) => {
+    if (selectedReceptionistIds.size === 0) return [] as Array<{ amount: number | null; receptionist_id: string | null; created_at?: string | null }>;
+    const { data, error } = await supabase
+      .from(tableName)
+      .select("amount, receptionist_id")
+      .in("receptionist_id", [...selectedReceptionistIds])
+      .gte("created_at", startIso)
+      .lt("created_at", endIso);
+    if (error) {
+      if (isTableMissing(error)) return [];
+      throw error;
+    }
+    return (data || []) as Array<{ amount: number | null; receptionist_id: string | null; created_at?: string | null }>;
+  };
+
+  const [currentBalancePayments, currentDeposits, currentTreatmentPlanPayments, compareBalancePayments, compareDeposits, compareTreatmentPlanPayments, yearlyBalancePayments, yearlyDeposits, yearlyTreatmentPlanPayments, previousYearBalancePaymentRows, previousYearDepositRows, previousYearTreatmentPlanPaymentRows] = await Promise.all([
+    fetchCollectionSupplementRows("balance_payments", currentRange.startUtcIso, currentRange.endUtcIso),
+    fetchCollectionSupplementRows("patient_credits", currentRange.startUtcIso, currentRange.endUtcIso),
+    fetchCollectionSupplementRows("treatment_plan_payments", currentRange.startUtcIso, currentRange.endUtcIso),
+    fetchCollectionSupplementRows("balance_payments", compareRange.startUtcIso, compareRange.endUtcIso),
+    fetchCollectionSupplementRows("patient_credits", compareRange.startUtcIso, compareRange.endUtcIso),
+    fetchCollectionSupplementRows("treatment_plan_payments", compareRange.startUtcIso, compareRange.endUtcIso),
+    fetchCollectionSupplementRows("balance_payments", yearRange.startIso, yearRange.endIso),
+    fetchCollectionSupplementRows("patient_credits", yearRange.startIso, yearRange.endIso),
+    fetchCollectionSupplementRows("treatment_plan_payments", yearRange.startIso, yearRange.endIso),
+    fetchCollectionSupplementRows("balance_payments", yearRange.previousStartIso, yearRange.previousEndIso),
+    fetchCollectionSupplementRows("patient_credits", yearRange.previousStartIso, yearRange.previousEndIso),
+    fetchCollectionSupplementRows("treatment_plan_payments", yearRange.previousStartIso, yearRange.previousEndIso),
+  ]);
+
+  const currentCollectionsEod = sumReceiptCollectionAmount(currentReceipts)
+    + sumAmountRows(currentBalancePayments)
+    + sumAmountRows(currentDeposits)
+    + sumAmountRows(currentTreatmentPlanPayments);
+  const compareCollectionsEod = sumReceiptCollectionAmount(compareReceipts)
+    + sumAmountRows(compareBalancePayments)
+    + sumAmountRows(compareDeposits)
+    + sumAmountRows(compareTreatmentPlanPayments);
+
+  const currentNetSales = currentCollectionsEod;
+  const compareNetSales = compareCollectionsEod;
+  const currentCollections = currentCollectionsEod;
+  const compareCollections = compareCollectionsEod;
   const currentUniquePatients = new Set(currentReceipts.map((row) => row.patient_id).filter(Boolean)).size;
   const compareUniquePatients = new Set(compareReceipts.map((row) => row.patient_id).filter(Boolean)).size;
   const currentCompletedVisits = currentReceipts.length;
@@ -513,40 +535,32 @@ export async function POST(request: Request) {
     const clinicReceipts = currentReceipts.filter((row) => receptionistClinicMap.get(row.receptionist_id || "") === id);
     const clinicCompareReceipts = compareReceipts.filter((row) => receptionistClinicMap.get(row.receptionist_id || "") === id);
     const clinicPatients = new Set(clinicReceipts.map((row) => row.patient_id).filter(Boolean)).size;
-    const clinicNetSalesBase = computeNetSalesBase(clinicReceipts);
-    const clinicCompareNetSalesBase = computeNetSalesBase(clinicCompareReceipts);
-    const clinicRefundTreatment = currentRefundsFiltered
-      .filter((row) => {
-        const receipt = currentReceiptMap.get(row.receipt_id);
-        if (!receipt) return false;
-        return receptionistClinicMap.get(receipt.receptionist_id || "") === id;
-      })
-      .reduce((sum, row) => sum + (currentRefundTreatmentByRefund.get(row.id) || 0), 0);
-    const clinicCompareRefundTreatment = compareRefundsFiltered
-      .filter((row) => {
-        const receipt = compareReceiptMap.get(row.receipt_id);
-        if (!receipt) return false;
-        return receptionistClinicMap.get(receipt.receptionist_id || "") === id;
-      })
-      .reduce((sum, row) => sum + (compareRefundTreatmentByRefund.get(row.id) || 0), 0);
-    const clinicNetSales = Math.max(0, clinicNetSalesBase - clinicRefundTreatment);
-    const clinicCompareNetSales = Math.max(0, clinicCompareNetSalesBase - clinicCompareRefundTreatment);
+    const clinicReceiptCollections = sumReceiptCollectionAmount(clinicReceipts);
+    const clinicCompareReceiptCollections = sumReceiptCollectionAmount(clinicCompareReceipts);
+    const clinicBalancePayments = currentBalancePayments.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
+    const clinicCompareBalancePayments = compareBalancePayments.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
+    const clinicDeposits = currentDeposits.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
+    const clinicCompareDeposits = compareDeposits.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
+    const clinicTreatmentPlanPayments = currentTreatmentPlanPayments.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
+    const clinicCompareTreatmentPlanPayments = compareTreatmentPlanPayments.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
+    const clinicCollections = clinicReceiptCollections + sumAmountRows(clinicBalancePayments) + sumAmountRows(clinicDeposits) + sumAmountRows(clinicTreatmentPlanPayments);
+    const clinicCompareCollections = clinicCompareReceiptCollections + sumAmountRows(clinicCompareBalancePayments) + sumAmountRows(clinicCompareDeposits) + sumAmountRows(clinicCompareTreatmentPlanPayments);
     const expected = targetDataAvailable
       ? expectedTargetForRange(id, currentRange.startUtcIso, currentRange.endUtcIso, targetsByClinicMonth, scheduleByClinic, eventRows)
       : { expectedTarget: 0, hasAnyTarget: false };
     const targetAttainment = expected.hasAnyTarget && expected.expectedTarget > 0
-      ? (clinicNetSales / expected.expectedTarget) * 100
+      ? (clinicCollections / expected.expectedTarget) * 100
       : null;
-    const avgPerPatient = clinicPatients > 0 ? clinicNetSales / clinicPatients : 0;
+    const avgPerPatient = clinicPatients > 0 ? clinicCollections / clinicPatients : 0;
 
     return {
       clinicId: id,
       clinicName: name,
-      netSales: clinicNetSales,
+      netSales: clinicCollections,
       expectedTarget: expected.hasAnyTarget ? expected.expectedTarget : null,
       targetAttainment,
       status: statusFromTarget(targetAttainment),
-      previousPeriodChangePercent: percentageChange(clinicNetSales, clinicCompareNetSales),
+      previousPeriodChangePercent: percentageChange(clinicCollections, clinicCompareCollections),
       uniquePatients: clinicPatients,
       averageNetSalesPerPatient: avgPerPatient,
     };
@@ -737,8 +751,20 @@ export async function POST(request: Request) {
       const date = new Date(row.created_at);
       return date.getUTCMonth() + 1 === monthNumber;
     });
-    const netSales = computeNetSalesBase(monthReceipts);
-    const previousYearSales = computeNetSalesBase(previousMonthReceipts);
+    const monthBalancePayments = yearlyBalancePayments.filter((row) => row.created_at && row.created_at >= monthStart.toISOString() && row.created_at < nextMonth.toISOString());
+    const monthDeposits = yearlyDeposits.filter((row) => row.created_at && row.created_at >= monthStart.toISOString() && row.created_at < nextMonth.toISOString());
+    const monthTreatmentPlanPayments = yearlyTreatmentPlanPayments.filter((row) => row.created_at && row.created_at >= monthStart.toISOString() && row.created_at < nextMonth.toISOString());
+    const previousYearBalancePayments = previousYearBalancePaymentRows.filter((row) => row.created_at && new Date(row.created_at).getUTCMonth() + 1 === monthNumber);
+    const previousYearDeposits = previousYearDepositRows.filter((row) => row.created_at && new Date(row.created_at).getUTCMonth() + 1 === monthNumber);
+    const previousYearTreatmentPlanPayments = previousYearTreatmentPlanPaymentRows.filter((row) => row.created_at && new Date(row.created_at).getUTCMonth() + 1 === monthNumber);
+    const netSales = sumReceiptCollectionAmount(monthReceipts)
+      + sumAmountRows(monthBalancePayments)
+      + sumAmountRows(monthDeposits)
+      + sumAmountRows(monthTreatmentPlanPayments);
+    const previousYearSales = sumReceiptCollectionAmount(previousMonthReceipts)
+      + sumAmountRows(previousYearBalancePayments)
+      + sumAmountRows(previousYearDeposits)
+      + sumAmountRows(previousYearTreatmentPlanPayments);
     const targetForMonth = clinicIds.reduce((sum, id) => sum + (targetsByClinicMonth.get(`${id}:${monthKeyValue}`) || 0), 0);
     return {
       month: new Date(`${selectedYear}-${String(monthNumber).padStart(2, "0")}-01`).toLocaleDateString("en-US", { month: "short" }),
@@ -876,7 +902,6 @@ export async function POST(request: Request) {
     }
 
     const paymentRecordIds = new Set(paymentRows.map((row) => row.id));
-    const receiptIdsWithPaymentRecords = new Set<string>();
     // no receipt_id selected from payment records on purpose to keep payload compact.
     if (currentReceipts.length > 0 && paymentRecordIds.size === 0) missingAllocationCoverage = true;
 

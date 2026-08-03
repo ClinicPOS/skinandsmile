@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic, OutstandingBalance, BalancePayment } from "../../lib/types";
+import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic, OutstandingBalance, BalancePayment, TreatmentPlan, TreatmentPlanPayment } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
@@ -55,6 +55,9 @@ export default function BackendPage() {
   const [expandedPatientId, setExpandedPatientId] = useState<string | null>(null);
   const [outstandingBalances, setOutstandingBalances] = useState<OutstandingBalance[]>([]);
   const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
+  const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
+  const [treatmentPlanPayments, setTreatmentPlanPayments] = useState<TreatmentPlanPayment[]>([]);
+  const [patientNamesById, setPatientNamesById] = useState<Record<string, string>>({});
   const [addBalancePatient, setAddBalancePatient] = useState<Patient | null>(null);
 
   const [doctorName, setDoctorName] = useState("");
@@ -185,6 +188,96 @@ export default function BackendPage() {
     return map;
   }, [clinics]);
 
+  const patientNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const patient of patients) {
+      map.set(patient.id, patient.name || "Unknown patient");
+    }
+    for (const [patientId, patientName] of Object.entries(patientNamesById)) {
+      if (patientName) map.set(patientId, patientName);
+    }
+    return map;
+  }, [patients, patientNamesById]);
+
+  const treatmentPlanPaymentsByPlanId = useMemo(() => {
+    const map = new Map<string, TreatmentPlanPayment[]>();
+    for (const payment of treatmentPlanPayments) {
+      const list = map.get(payment.treatment_plan_id) || [];
+      list.push(payment);
+      map.set(payment.treatment_plan_id, list);
+    }
+    return map;
+  }, [treatmentPlanPayments]);
+
+  const visibleClinicOutstandingBalanceGroups = useMemo(() => {
+    const groups = new Map<string, {
+      clinicId: string;
+      clinicName: string;
+      items: Array<{
+        id: string;
+        kind: "balance" | "treatment_plan";
+        label: string;
+        remaining: number;
+        status: string;
+        patientName: string;
+        originalDate?: string;
+        balance?: OutstandingBalance;
+      }>;
+    }>();
+
+    for (const balance of outstandingBalances) {
+      const clinicId = balance.clinic_id || "";
+      if (selectedClinicId && clinicId !== selectedClinicId) continue;
+      const clinicName = clinicNameById.get(clinicId) || "Unknown clinic";
+      const payments = paymentsByBalance.get(balance.id) || [];
+      const roll = rollupBalance(balance, payments);
+      if (roll.remaining <= 0.0049) continue;
+      const group = groups.get(clinicId) || {
+        clinicId,
+        clinicName,
+        items: [],
+      };
+      group.items.push({
+        id: `balance-${balance.id}`,
+        kind: "balance",
+        label: formatBalanceReference(balance),
+        remaining: roll.remaining,
+        status: roll.status,
+        patientName: patientNameById.get(balance.patient_id) || "Unknown patient",
+        originalDate: balance.original_date,
+        balance,
+      });
+      groups.set(clinicId, group);
+    }
+
+    for (const plan of treatmentPlans) {
+      if (plan.status !== "Active") continue;
+      const clinicId = plan.clinic_id || "";
+      if (selectedClinicId && clinicId !== selectedClinicId) continue;
+      const clinicName = clinicNameById.get(clinicId) || "Unknown clinic";
+      const paid = (treatmentPlanPaymentsByPlanId.get(plan.id) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+      const remaining = Math.max(0, Number(plan.total_amount || 0) - paid);
+      if (remaining <= 0.0049) continue;
+      const group = groups.get(clinicId) || {
+        clinicId,
+        clinicName,
+        items: [],
+      };
+      group.items.push({
+        id: `plan-${plan.id}`,
+        kind: "treatment_plan",
+        label: plan.title || "Active treatment plan",
+        remaining,
+        status: "Unpaid",
+        patientName: patientNameById.get(plan.patient_id) || "Unknown patient",
+        originalDate: plan.created_at,
+      });
+      groups.set(clinicId, group);
+    }
+
+    return [...groups.values()].sort((a, b) => a.clinicName.localeCompare(b.clinicName));
+  }, [outstandingBalances, paymentsByBalance, treatmentPlans, treatmentPlanPaymentsByPlanId, clinicNameById, patientNameById, selectedClinicId]);
+
   const selectedClinic = useMemo(
     () => clinics.find((c) => c.id === selectedClinicId) || null,
     [clinics, selectedClinicId]
@@ -241,6 +334,32 @@ export default function BackendPage() {
     }
     setOutstandingBalances((prev) => prev.filter((b) => b.id !== id));
     setBalancePayments((prev) => prev.filter((p) => p.outstanding_balance_id !== id));
+  }
+
+  async function deleteTreatmentPlan(id: string) {
+    if (!confirm("Delete this active treatment plan? Its related payments and visits will also be removed, and the reports will stop reflecting it.")) return;
+
+    const [paymentsResult, visitsResult, planResult] = await Promise.allSettled([
+      supabase.from("treatment_plan_payments").delete().eq("treatment_plan_id", id),
+      supabase.from("treatment_plan_visits").delete().eq("treatment_plan_id", id),
+      supabase.from("treatment_plans").delete().eq("id", id),
+    ]);
+
+    const planError = planResult.status === "fulfilled" ? planResult.value.error : null;
+    if (planError) {
+      alert(`Delete failed: ${planError.message || planError.code || "Unknown error"}`);
+      return;
+    }
+
+    if (paymentsResult.status === "fulfilled" && paymentsResult.value.error && paymentsResult.value.error.code !== "42P01" && paymentsResult.value.error.code !== "42501") {
+      console.warn("Failed deleting treatment plan payments", paymentsResult.value.error);
+    }
+    if (visitsResult.status === "fulfilled" && visitsResult.value.error && visitsResult.value.error.code !== "42P01" && visitsResult.value.error.code !== "42501") {
+      console.warn("Failed deleting treatment plan visits", visitsResult.value.error);
+    }
+
+    setTreatmentPlans((prev) => prev.filter((plan) => plan.id !== id));
+    setTreatmentPlanPayments((prev) => prev.filter((payment) => payment.treatment_plan_id !== id));
   }
 
   const displayedDoctors = useMemo(() =>
@@ -389,6 +508,44 @@ export default function BackendPage() {
     }
   }, [isUnlocked]);
 
+  useEffect(() => {
+    if (!isUnlocked) return;
+
+    const requiredPatientIds = Array.from(new Set([
+      ...outstandingBalances.map((balance) => balance.patient_id).filter(Boolean),
+      ...treatmentPlans.map((plan) => plan.patient_id).filter(Boolean),
+    ] as string[]));
+
+    if (requiredPatientIds.length === 0) return;
+
+    const missingIds = requiredPatientIds.filter((patientId) => {
+      if (!patientId) return false;
+      if (patients.some((patient) => patient.id === patientId)) return false;
+      return !patientNamesById[patientId];
+    });
+
+    if (missingIds.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      const { data, error } = await supabase
+        .from("patients")
+        .select("id, name")
+        .in("id", missingIds);
+
+      if (cancelled || error) return;
+
+      const nextNames = Object.fromEntries((data || []).filter(Boolean).map((patient: { id: string; name: string | null }) => [patient.id, patient.name || "Unknown patient"]));
+      if (Object.keys(nextNames).length > 0) {
+        setPatientNamesById((current) => ({ ...current, ...nextNames }));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isUnlocked, outstandingBalances, treatmentPlans, patients, patientNamesById]);
+
   async function revokeSession(token: string) {
     await supabase.from("active_sessions").delete().eq("token", token);
     setActiveSessions((prev) => prev.filter((s) => s.token !== token));
@@ -431,6 +588,8 @@ export default function BackendPage() {
       logsResult,
       balancesResult,
       balancePaymentsResult,
+      treatmentPlansResult,
+      treatmentPlanPaymentsResult,
     ] = await Promise.allSettled([
       supabase.from("patients").select("*"),
       supabase
@@ -442,6 +601,8 @@ export default function BackendPage() {
       supabase.from("login_logs").select("*").order("created_at", { ascending: false }).limit(20),
       supabase.from("outstanding_balances").select("*").order("original_date", { ascending: false }),
       supabase.from("balance_payments").select("*").order("created_at", { ascending: false }),
+      supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payments").select("*").order("created_at", { ascending: false }),
     ]);
 
     if (patientsResult.status === "fulfilled") {
@@ -473,6 +634,28 @@ export default function BackendPage() {
         setBalancePayments([]);
       } else {
         setBalancePayments((balancePaymentsResult.value.data || []) as BalancePayment[]);
+      }
+    }
+
+    if (treatmentPlansResult.status === "fulfilled") {
+      if (treatmentPlansResult.value.error) {
+        if (treatmentPlansResult.value.error.code !== "42P01") {
+          console.warn("Failed loading treatment plans", treatmentPlansResult.value.error);
+        }
+        setTreatmentPlans([]);
+      } else {
+        setTreatmentPlans((treatmentPlansResult.value.data || []) as TreatmentPlan[]);
+      }
+    }
+
+    if (treatmentPlanPaymentsResult.status === "fulfilled") {
+      if (treatmentPlanPaymentsResult.value.error) {
+        if (treatmentPlanPaymentsResult.value.error.code !== "42P01") {
+          console.warn("Failed loading treatment plan payments", treatmentPlanPaymentsResult.value.error);
+        }
+        setTreatmentPlanPayments([]);
+      } else {
+        setTreatmentPlanPayments((treatmentPlanPaymentsResult.value.data || []) as TreatmentPlanPayment[]);
       }
     }
 
@@ -1254,6 +1437,78 @@ export default function BackendPage() {
             <p className="mt-2 text-2xl font-semibold text-slate-900">{item.value}</p>
           </div>
         ))}
+      </div>
+
+      <div className="mt-6 rounded-3xl border border-amber-200 bg-amber-50 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">Outstanding balances by clinic</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Review who still owes per clinic. Delete is available only from this backend view after unlock.
+            </p>
+          </div>
+        </div>
+
+        {visibleClinicOutstandingBalanceGroups.length === 0 ? (
+          <p className="mt-4 text-sm text-slate-600">No outstanding balances found.</p>
+        ) : (
+          <div className="mt-4 space-y-3">
+            {visibleClinicOutstandingBalanceGroups.map((group) => (
+              <div key={group.clinicId} className="rounded-2xl border border-amber-200 bg-white p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">{group.clinicName}</p>
+                    <p className="text-xs text-slate-500">
+                      {group.items.length} outstanding balance{group.items.length === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <p className="text-sm font-semibold text-amber-700">
+                    Total AED {group.items.reduce((sum, item) => sum + item.remaining, 0).toFixed(2)}
+                  </p>
+                </div>
+
+                <div className="mt-3 space-y-2">
+                  {group.items.map((item) => {
+                    const balanceId = item.kind === "balance" ? item.balance?.id : null;
+                    return (
+                      <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 px-3 py-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-slate-800">{item.patientName}</p>
+                          <p className="text-xs text-slate-500">
+                            {item.kind === "balance" && item.balance
+                              ? `${formatBalanceReference(item.balance)} · ${new Date(item.balance.original_date).toLocaleDateString("en-GB")}`
+                              : `${item.label} · ${item.originalDate ? new Date(item.originalDate).toLocaleDateString("en-GB") : "No date"}`}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-sm font-semibold ${item.status === "Paid" ? "text-emerald-700" : item.status === "Partial" ? "text-amber-700" : "text-rose-700"}`}>
+                            {item.kind === "balance" ? `${item.status} · AED ${item.remaining.toFixed(2)}` : `Treatment plan · AED ${item.remaining.toFixed(2)}`}
+                          </span>
+                          {balanceId ? (
+                            <button
+                              onClick={() => deleteBalance(balanceId)}
+                              className="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-50"
+                            >
+                              Delete
+                            </button>
+                          ) : null}
+                          {item.kind === "treatment_plan" ? (
+                            <button
+                              onClick={() => deleteTreatmentPlan(item.id.replace("plan-", ""))}
+                              className="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-50"
+                            >
+                              Delete plan
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-5">
