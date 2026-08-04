@@ -18,15 +18,14 @@ import { EditPatientModal } from "./edit-patient-modal";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../lib/receipt-branding";
 import {
   buildPaymentAllocations,
-  paymentSummaryLabel,
   paymentVariantLabel,
   referenceRequiredForVariant,
   validatePaymentAllocations,
   PaymentAllocationDraft,
   PaymentMethodVariant,
 } from "../lib/payment-allocation";
-import { toMinorUnits } from "../lib/money";
 import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-payment-receipt";
+import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 
 type Patient = {
   id: string;
@@ -845,36 +844,17 @@ export function SearchPatientModal({
     setSavingTreatmentPayment(true);
     try {
       const allocations = buildPaymentAllocations(planPaymentDrafts, invoiceAmount, invoiceAmount, 0);
-      const paymentRows = allocations.map((allocation) => {
-        const methodName = paymentVariantLabel(allocation.methodVariant);
-        const networkLabel = allocation.methodVariant === "card" && allocation.cardNetwork
-          ? ` (${allocation.cardNetwork})`
-          : "";
-        const refLabel = allocation.providerReferenceNumber ? ` (Ref: ${allocation.providerReferenceNumber})` : "";
-        const methodLabel = `${methodName}${networkLabel}${refLabel}`;
-        const noteParts = [
-          `Plan payment: ${plan.title}`,
-          `Invoice settled AED ${allocation.invoiceAllocationAmount.toFixed(2)}`,
-          `Fee AED ${allocation.feeAmount.toFixed(2)} @ ${(allocation.feeRate * 100).toFixed(1)}%`,
-          `Customer charged AED ${allocation.customerChargedAmount.toFixed(2)}`,
-        ];
-        return {
-          treatment_plan_id: plan.id,
-          patient_id: selectedPatient.id,
-          clinic_id: clinic.id,
-          // Store invoice allocation amount so plan balance tracks cleanly.
-          amount: allocation.invoiceAllocationAmount,
-          payment_method: methodLabel,
-          receptionist_id: receptionistId,
-          register_session_id: registerSessionId,
-          notes: noteParts.join(" | "),
-        };
-      });
-
       const { data, error } = await supabase
-        .from("treatment_plan_payments")
-        .insert(paymentRows)
-        .select();
+        .rpc("create_treatment_plan_payment_record_with_allocations", buildTreatmentPlanPaymentRpcArgs({
+          treatmentPlanId: plan.id,
+          patientId: selectedPatient.id,
+          clinicId: clinic.id,
+          receptionistId,
+          registerSessionId,
+          paymentNotePrefix: `Plan payment: ${plan.title}`,
+          allocations,
+        }))
+        .single();
 
       if (error) {
         console.error("Collect treatment plan payment failed:", error);
@@ -882,8 +862,17 @@ export function SearchPatientModal({
         return;
       }
 
-      const savedPayments = (data as TreatmentPlanPayment[]) || [];
-      setTreatmentPlanPayments((prev) => [...savedPayments, ...prev]);
+      const paymentRecord = data as { payment_record_id: string; created_at: string };
+      const { data: refreshedPayments, error: refreshedPaymentsError } = await supabase
+        .from("treatment_plan_payments")
+        .select("*")
+        .eq("treatment_plan_id", plan.id)
+        .order("created_at", { ascending: false });
+      if (refreshedPaymentsError) {
+        alert(`Payment saved, but reloading treatment plan payments failed: ${refreshedPaymentsError.message || "Unknown error"}`);
+      } else {
+        setTreatmentPlanPayments((refreshedPayments as TreatmentPlanPayment[]) || []);
+      }
       setPaymentPlanId(null);
       setPlanPaymentAmount("");
       setPlanPaymentMode("Cash");
@@ -913,8 +902,8 @@ export function SearchPatientModal({
           feeAmount: a.feeAmount,
           customerChargedAmount: a.customerChargedAmount,
         })),
-        createdAt: savedPayments[0]?.created_at,
-        referenceNo: savedPayments[0]?.id ? `TPP-${String(savedPayments[0].id).slice(0, 8).toUpperCase()}` : undefined,
+        createdAt: paymentRecord.created_at,
+        referenceNo: paymentRecord.payment_record_id ? `TPP-${String(paymentRecord.payment_record_id).slice(0, 8).toUpperCase()}` : undefined,
       });
     } finally {
       setSavingTreatmentPayment(false);

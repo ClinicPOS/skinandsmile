@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx-js-style";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service, PaymentAllocation, PaymentAllocationRefund, PaymentRecord } from "../../lib/types";
+import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service, PaymentAllocation, PaymentAllocationRefund, PaymentRecord, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal } from "../../components/pos-modals";
 import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
@@ -26,7 +26,7 @@ import {
   referenceRequiredForVariant,
   validatePaymentAllocations,
 } from "../../lib/payment-allocation";
-import { fromMinorUnits, toMinorUnits } from "../../lib/money";
+import { fromMinorUnits, toMinorUnits, truncateCurrency } from "../../lib/money";
 import { getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
@@ -106,30 +106,35 @@ function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
   };
 
   if (paymentMethod.includes("split payment")) {
-    const cashMatch = paymentMethodRaw.match(/Cash\s+AED\s+([\d.]+)/i);
-    const otherMatch = paymentMethodRaw.match(/\+\s*([A-Za-z ]+)\s+AED\s+([\d.]+)/i);
-    const cashValue = cashMatch ? Number(cashMatch[1]) : 0;
-    const otherMethod = (otherMatch?.[1] || "").trim().toLowerCase();
-    const otherValue = otherMatch ? Number(otherMatch[2]) : 0;
-    const safeOther = Number.isFinite(otherValue) ? otherValue : 0;
+    const matches = [...paymentMethodRaw.matchAll(/([A-Za-z ]+?)\s+AED\s+([\d.]+)/gi)];
+    for (const match of matches) {
+      const methodLabel = String(match[1] || "")
+        .replace(/split payment/ig, "")
+        .replace(/[()]/g, "")
+        .trim()
+        .toLowerCase();
+      const parsedAmount = Number(match[2]);
+      const amount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
+      if (!methodLabel || amount <= 0) continue;
 
-    breakdown.cash = Number.isFinite(cashValue) ? cashValue : 0;
-    breakdown.mop = "SPLIT";
-
-    if (otherMethod.includes("tabby card")) {
-      breakdown.tabbyCard = safeOther;
-    } else if (otherMethod.includes("tabby")) {
-      breakdown.tabby = safeOther;
-    } else if (otherMethod.includes("tamara")) {
-      breakdown.tamara = safeOther;
-    } else if (otherMethod.includes("insurance")) {
-      breakdown.insurance = safeOther;
-    } else if (otherMethod.includes("bank")) {
-      breakdown.bankTransfer = safeOther;
-    } else {
-      breakdown.card = safeOther;
+      if (methodLabel.includes("tabby card")) {
+        breakdown.tabbyCard += amount;
+      } else if (methodLabel.includes("tabby")) {
+        breakdown.tabby += amount;
+      } else if (methodLabel.includes("tamara")) {
+        breakdown.tamara += amount;
+      } else if (methodLabel.includes("insurance")) {
+        breakdown.insurance += amount;
+      } else if (methodLabel.includes("bank")) {
+        breakdown.bankTransfer += amount;
+      } else if (methodLabel.includes("cash")) {
+        breakdown.cash += amount;
+      } else {
+        breakdown.card += amount;
+      }
     }
 
+    breakdown.mop = "SPLIT";
     return breakdown;
   }
 
@@ -195,6 +200,67 @@ function extractTransactionReference(paymentMethodRaw: string, channel: "card" |
   }
 
   return "";
+}
+
+function summarizeStoredAllocationRows(rows: PaymentAllocation[]) {
+  const breakdown = {
+    cash: 0,
+    card: 0,
+    tabby: 0,
+    tabbyCard: 0,
+    tamara: 0,
+  };
+  const references = {
+    card: new Set<string>(),
+    tabby: new Set<string>(),
+    tamara: new Set<string>(),
+  };
+  let tabbyFee = 0;
+  let tamaraFee = 0;
+
+  rows.forEach((row) => {
+    const invoiceAllocated = Number(row.invoice_allocation_amount || 0);
+    const feeAmount = Number(row.fee_amount || 0);
+    const reference = String(row.provider_reference_number || "").trim();
+
+    if (row.method_variant === "cash") {
+      breakdown.cash += invoiceAllocated;
+      return;
+    }
+    if (row.method_variant === "card") {
+      breakdown.card += invoiceAllocated;
+      if (reference) references.card.add(reference);
+      return;
+    }
+    if (row.method_variant === "tabby_card") {
+      breakdown.tabbyCard += invoiceAllocated;
+      tabbyFee += feeAmount;
+      if (reference) references.tabby.add(reference);
+      return;
+    }
+    if (row.method_variant === "tabby_standard") {
+      breakdown.tabby += invoiceAllocated;
+      tabbyFee += feeAmount;
+      if (reference) references.tabby.add(reference);
+      return;
+    }
+    if (row.method_variant === "tamara") {
+      breakdown.tamara += invoiceAllocated;
+      tamaraFee += feeAmount;
+      if (reference) references.tamara.add(reference);
+    }
+  });
+
+  return {
+    breakdown,
+    tabbyFee,
+    tamaraFee,
+    references: {
+      card: [...references.card].join(", "),
+      tabby: [...references.tabby].join(", "),
+      tamara: [...references.tamara].join(", "),
+    },
+  };
 }
 
 function normalizeServiceText(value: unknown): string {
@@ -1626,6 +1692,8 @@ export default function ReceiptsPage() {
     let paymentRecordsForDay: PaymentRecord[] = [];
     let paymentAllocationsForDay: PaymentAllocation[] = [];
     let paymentAllocationRefundsForDay: PaymentAllocationRefund[] = [];
+    const paymentRecordsByReceiptId = new Map<string, PaymentRecord[]>();
+    const paymentAllocationsByReceiptId = new Map<string, PaymentAllocation[]>();
 
     const { data: paymentRecordsData, error: paymentRecordsError } = await supabase
       .from("payment_records")
@@ -1638,6 +1706,12 @@ export default function ReceiptsPage() {
       console.warn("Failed loading payment records for report", paymentRecordsError);
     } else {
       paymentRecordsForDay = (paymentRecordsData || []) as PaymentRecord[];
+      paymentRecordsForDay.forEach((row) => {
+        const key = String(row.receipt_id || "");
+        if (!key) return;
+        if (!paymentRecordsByReceiptId.has(key)) paymentRecordsByReceiptId.set(key, []);
+        paymentRecordsByReceiptId.get(key)?.push(row);
+      });
       const paymentRecordIds = paymentRecordsForDay.map((row) => row.id);
       if (paymentRecordIds.length > 0) {
         const [allocRes, refundRes] = await Promise.all([
@@ -1648,6 +1722,18 @@ export default function ReceiptsPage() {
           console.warn("Failed loading payment allocations for report", allocRes.error);
         } else {
           paymentAllocationsForDay = (allocRes.data || []) as PaymentAllocation[];
+          const receiptIdByPaymentId = new Map<string, string>();
+          paymentRecordsForDay.forEach((row) => {
+            const paymentId = String(row.id || "");
+            const receiptId = String(row.receipt_id || "");
+            if (paymentId && receiptId) receiptIdByPaymentId.set(paymentId, receiptId);
+          });
+          paymentAllocationsForDay.forEach((row) => {
+            const receiptId = receiptIdByPaymentId.get(String(row.payment_id || ""));
+            if (!receiptId) return;
+            if (!paymentAllocationsByReceiptId.has(receiptId)) paymentAllocationsByReceiptId.set(receiptId, []);
+            paymentAllocationsByReceiptId.get(receiptId)?.push(row);
+          });
         }
         if (refundRes.error) {
           console.warn("Failed loading allocation refunds for report", refundRes.error);
@@ -1800,10 +1886,22 @@ export default function ReceiptsPage() {
     }
 
     const treatmentPlanRows: Array<(string | number)[]> = [];
+    const treatmentPlanPaymentSummaries: Array<{
+      methodVariant: PaymentMethodVariant;
+      invoiceAllocated: number;
+      feeAmount: number;
+      customerChargedAmount: number;
+      allocationCount: number;
+    }> = [];
     const treatmentPlansById = new Map<string, any>();
     const treatmentPlanVisitCounts = new Map<string, number>();
     const treatmentPlanPaidToDate = new Map<string, number>();
     const relevantTreatmentPlanIds = new Set<string>();
+    let treatmentPlanTabbyFeeTotal = 0;
+    let treatmentPlanTamaraFeeTotal = 0;
+    let treatmentPlanPaymentRecordsForDay: Array<(TreatmentPlanPaymentRecord & { treatment_plans?: any; patients?: any })> = [];
+    let treatmentPlanPaymentAllocationsForDay: TreatmentPlanPaymentAllocation[] = [];
+    const treatmentPlanAllocationsByPaymentId = new Map<string, TreatmentPlanPaymentAllocation[]>();
 
     const { data: treatmentPlansCreatedData, error: treatmentPlansCreatedError } = await supabase
       .from("treatment_plans")
@@ -1840,31 +1938,41 @@ export default function ReceiptsPage() {
     // real cash/card collections, but the full plan price must not be counted
     // again on every visit.
     let treatmentPlanPaymentsTotal = 0;
-    const { data: treatmentPlanPaymentsData, error: treatmentPlanPaymentsError } = await supabase
-      .from("treatment_plan_payments")
-      .select("amount")
+    const { data: treatmentPlanPaymentRecordsData, error: treatmentPlanPaymentRecordsError } = await supabase
+      .from("treatment_plan_payment_records")
+      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(title, total_amount, planned_visits, status), patients(name, patient_number)")
       .in("receptionist_id", receptionistIds)
       .gte("created_at", startUtcIso)
-      .lte("created_at", endUtcIso);
-    if (treatmentPlanPaymentsError) {
-      console.warn("Failed loading treatment plan payments for report", treatmentPlanPaymentsError);
+      .lte("created_at", endUtcIso)
+      .order("created_at", { ascending: true });
+    if (treatmentPlanPaymentRecordsError) {
+      console.warn("Failed loading treatment plan payment records for report", treatmentPlanPaymentRecordsError);
     } else {
-      treatmentPlanPaymentsTotal = (treatmentPlanPaymentsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
-    }
-
-    const { data: treatmentPlanPaymentPlanIdsData, error: treatmentPlanPaymentPlanIdsError } = await supabase
-      .from("treatment_plan_payments")
-      .select("treatment_plan_id")
-      .in("receptionist_id", receptionistIds)
-      .gte("created_at", startUtcIso)
-      .lte("created_at", endUtcIso);
-    if (treatmentPlanPaymentPlanIdsError) {
-      console.warn("Failed loading treatment plan payment ids for report", treatmentPlanPaymentPlanIdsError);
-    } else {
-      (treatmentPlanPaymentPlanIdsData || []).forEach((payment: any) => {
+      treatmentPlanPaymentRecordsForDay = (treatmentPlanPaymentRecordsData || []) as Array<(TreatmentPlanPaymentRecord & { treatment_plans?: any; patients?: any })>;
+      treatmentPlanPaymentsTotal = treatmentPlanPaymentRecordsForDay.reduce((sum, payment) => sum + Number(payment.total_invoice_amount_settled || 0), 0);
+      treatmentPlanPaymentRecordsForDay.forEach((payment) => {
         const planId = String(payment.treatment_plan_id || "");
         if (planId) relevantTreatmentPlanIds.add(planId);
       });
+
+      const treatmentPlanPaymentRecordIds = treatmentPlanPaymentRecordsForDay.map((payment) => payment.id).filter(Boolean);
+      if (treatmentPlanPaymentRecordIds.length > 0) {
+        const { data: treatmentPlanPaymentAllocationsData, error: treatmentPlanPaymentAllocationsError } = await supabase
+          .from("treatment_plan_payment_allocations")
+          .select("*")
+          .in("payment_id", treatmentPlanPaymentRecordIds);
+        if (treatmentPlanPaymentAllocationsError) {
+          console.warn("Failed loading treatment plan payment allocations for report", treatmentPlanPaymentAllocationsError);
+        } else {
+          treatmentPlanPaymentAllocationsForDay = (treatmentPlanPaymentAllocationsData || []) as TreatmentPlanPaymentAllocation[];
+          treatmentPlanPaymentAllocationsForDay.forEach((allocation) => {
+            const paymentId = String(allocation.payment_id || "");
+            if (!paymentId) return;
+            if (!treatmentPlanAllocationsByPaymentId.has(paymentId)) treatmentPlanAllocationsByPaymentId.set(paymentId, []);
+            treatmentPlanAllocationsByPaymentId.get(paymentId)?.push(allocation);
+          });
+        }
+      }
     }
 
     if (relevantTreatmentPlanIds.size > 0) {
@@ -1889,8 +1997,8 @@ export default function ReceiptsPage() {
 
       const [allPlanPaymentsResult, allPlanVisitsResult] = await Promise.all([
         supabase
-          .from("treatment_plan_payments")
-          .select("treatment_plan_id, amount")
+          .from("treatment_plan_payment_records")
+          .select("treatment_plan_id, total_invoice_amount_settled, created_at")
           .in("treatment_plan_id", planIds)
           .lte("created_at", endUtcIso),
         supabase
@@ -1902,7 +2010,7 @@ export default function ReceiptsPage() {
       if (!allPlanPaymentsResult.error) {
         (allPlanPaymentsResult.data || []).forEach((payment: any) => {
           const planId = String(payment.treatment_plan_id || "");
-          treatmentPlanPaidToDate.set(planId, (treatmentPlanPaidToDate.get(planId) || 0) + Number(payment.amount || 0));
+          treatmentPlanPaidToDate.set(planId, (treatmentPlanPaidToDate.get(planId) || 0) + Number(payment.total_invoice_amount_settled || 0));
         });
       }
       if (!allPlanVisitsResult.error) {
@@ -1938,74 +2046,59 @@ export default function ReceiptsPage() {
     }
 
     const treatmentPlanPaymentRows: Array<(string | number)[]> = [];
-    const { data: treatmentPlanPaymentDetailsData, error: treatmentPlanPaymentDetailsError } = await supabase
-      .from("treatment_plan_payments")
-      .select("id, treatment_plan_id, patient_id, amount, payment_method, notes, created_at, treatment_plans(title, total_amount, planned_visits, status), patients(name, patient_number)")
-      .in("receptionist_id", receptionistIds)
-      .gte("created_at", startUtcIso)
-      .lte("created_at", endUtcIso)
-      .order("created_at", { ascending: true });
-    if (treatmentPlanPaymentDetailsError) {
-      console.warn("Failed loading treatment plan payment details for report", treatmentPlanPaymentDetailsError);
-    } else {
-      const planIds = [...new Set((treatmentPlanPaymentDetailsData || []).map((payment: any) => String(payment.treatment_plan_id || "")).filter(Boolean))];
-      const paidByPlanBeforeEnd = new Map<string, number>();
-      const visitsByPlan = new Map<string, number>();
+    treatmentPlanPaymentRecordsForDay.forEach((payment) => {
+      const plan = Array.isArray(payment.treatment_plans) ? payment.treatment_plans[0] : payment.treatment_plans;
+      const patient = Array.isArray(payment.patients) ? payment.patients[0] : payment.patients;
+      const planId = String(payment.treatment_plan_id || "");
+      const totalAmount = Number(plan?.total_amount || 0);
+      const invoiceSettled = Number(payment.total_invoice_amount_settled || 0);
+      const paidAfterToday = treatmentPlanPaidToDate.get(planId) || invoiceSettled;
+      const remainingAfterToday = Math.max(0, totalAmount - paidAfterToday);
+      const paymentAllocations = treatmentPlanAllocationsByPaymentId.get(String(payment.id || "")) || [];
+      const allocationNotes = paymentAllocations
+        .map((allocation) => {
+          const label = paymentVariantLabel(allocation.method_variant as PaymentMethodVariant);
+          const fee = Number(allocation.fee_amount || 0);
+          const charged = Number(allocation.customer_charged_amount || 0);
+          return `${label}: Invoice AED ${Number(allocation.invoice_allocation_amount || 0).toFixed(2)}${fee > 0 ? ` | Fee AED ${fee.toFixed(2)}` : ""} | Charged AED ${charged.toFixed(2)}`;
+        })
+        .join(" || ");
 
-      if (planIds.length > 0) {
-        const [allPlanPaymentsResult, allPlanVisitsResult] = await Promise.all([
-          supabase
-            .from("treatment_plan_payments")
-            .select("treatment_plan_id, amount")
-            .in("treatment_plan_id", planIds)
-            .lte("created_at", endUtcIso),
-          supabase
-            .from("treatment_plan_visits")
-            .select("treatment_plan_id")
-            .in("treatment_plan_id", planIds),
-        ]);
-
-        if (!allPlanPaymentsResult.error) {
-          (allPlanPaymentsResult.data || []).forEach((payment: any) => {
-            const planId = String(payment.treatment_plan_id || "");
-            paidByPlanBeforeEnd.set(planId, (paidByPlanBeforeEnd.get(planId) || 0) + Number(payment.amount || 0));
-          });
+      paymentAllocations.forEach((allocation) => {
+        const feeAmount = Number(allocation.fee_amount || 0);
+        if (allocation.method_variant === "tabby_standard" || allocation.method_variant === "tabby_card") {
+          treatmentPlanTabbyFeeTotal += feeAmount;
+        } else if (allocation.method_variant === "tamara") {
+          treatmentPlanTamaraFeeTotal += feeAmount;
         }
-        if (!allPlanVisitsResult.error) {
-          (allPlanVisitsResult.data || []).forEach((visit: any) => {
-            const planId = String(visit.treatment_plan_id || "");
-            visitsByPlan.set(planId, (visitsByPlan.get(planId) || 0) + 1);
-          });
-        }
-      }
-
-      (treatmentPlanPaymentDetailsData || []).forEach((payment: any) => {
-        const plan = Array.isArray(payment.treatment_plans) ? payment.treatment_plans[0] : payment.treatment_plans;
-        const patient = Array.isArray(payment.patients) ? payment.patients[0] : payment.patients;
-        const planId = String(payment.treatment_plan_id || "");
-        const totalAmount = Number(plan?.total_amount || 0);
-        const paidAfterToday = paidByPlanBeforeEnd.get(planId) || Number(payment.amount || 0);
-        const remainingAfterToday = Math.max(0, totalAmount - paidAfterToday);
-        treatmentPlanPaymentRows.push([
-          new Date(payment.created_at || now).toLocaleTimeString("en-US", {
-            timeZone: "Asia/Dubai",
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: true,
-          }),
-          patient?.name || "",
-          patient?.patient_number ? String(patient.patient_number) : "",
-          plan?.title || "Treatment Plan",
-          totalAmount,
-          Number(payment.amount || 0),
-          paidAfterToday,
-          remainingAfterToday,
-          `${visitsByPlan.get(planId) || 0} / ${Number(plan?.planned_visits || 1)}`,
-          payment.payment_method || "",
-          payment.notes || "",
-        ]);
+        treatmentPlanPaymentSummaries.push({
+          methodVariant: allocation.method_variant as PaymentMethodVariant,
+          invoiceAllocated: Number(allocation.invoice_allocation_amount || 0),
+          feeAmount,
+          customerChargedAmount: Number(allocation.customer_charged_amount || 0),
+          allocationCount: 1,
+        });
       });
-    }
+
+      treatmentPlanPaymentRows.push([
+        new Date(payment.created_at || now).toLocaleTimeString("en-US", {
+          timeZone: "Asia/Dubai",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        }),
+        patient?.name || "",
+        patient?.patient_number ? String(patient.patient_number) : "",
+        plan?.title || "Treatment Plan",
+        totalAmount,
+        invoiceSettled,
+        paidAfterToday,
+        remainingAfterToday,
+        `${treatmentPlanVisitCounts.get(planId) || 0} / ${Number(plan?.planned_visits || 1)}`,
+        payment.payment_method_summary || "",
+        allocationNotes,
+      ]);
+    });
 
     const detailHeaders = [
       "Time",
@@ -2061,6 +2154,11 @@ export default function ReceiptsPage() {
 
     receipts.forEach((receipt) => {
       const receiptId = String(receipt.id || "");
+      const structuredPaymentAllocations = paymentAllocationsByReceiptId.get(receiptId) || [];
+      const structuredPaymentRecords = paymentRecordsByReceiptId.get(receiptId) || [];
+      const structuredPaymentSummary = structuredPaymentAllocations.length > 0
+        ? summarizeStoredAllocationRows(structuredPaymentAllocations)
+        : null;
       const createdAt = new Date(receipt.created_at || now);
       const patientInfo = patientMap.get(String(receipt.patient_id || ""));
       const doctorName = doctorMap.get(String(receipt.doctor_id || "")) || "";
@@ -2077,15 +2175,35 @@ export default function ReceiptsPage() {
       // Prepaid patient credit covering part of the invoice — not money
       // received today and not outstanding either.
       const creditUsed = Number(receipt.credit_applied || 0);
-      const outstandingCreated = Math.max(0, Math.round((netTotal - paidToday - creditUsed) * 100) / 100);
-      const breakdown = getPaymentBreakdown(paymentMethodRaw, Math.max(0, paidToday - gatewayFee));
+      const outstandingCreated = Math.max(0, truncateCurrency(netTotal - paidToday - creditUsed));
+      const breakdown = structuredPaymentSummary
+        ? {
+            ...structuredPaymentSummary.breakdown,
+            insurance: 0,
+            bankTransfer: 0,
+            addOn: 0,
+            mop: structuredPaymentAllocations.length > 1 ? "SPLIT" : "STRUCTURED",
+          }
+        : getPaymentBreakdown(paymentMethodRaw, Math.max(0, paidToday - gatewayFee));
+      const tabbyFee = structuredPaymentSummary ? structuredPaymentSummary.tabbyFee : (gatewayProvider.includes("tabby") ? gatewayFee : 0);
+      const tamaraFee = structuredPaymentSummary ? structuredPaymentSummary.tamaraFee : (gatewayProvider.includes("tamara") ? gatewayFee : 0);
+      const cardReference = structuredPaymentSummary?.references.card || extractTransactionReference(paymentMethodRaw, "card");
+      const tabbyReference = structuredPaymentSummary?.references.tabby || extractTransactionReference(paymentMethodRaw, "tabby");
+      const tamaraReference = structuredPaymentSummary?.references.tamara || extractTransactionReference(paymentMethodRaw, "tamara");
+      const paidTodayInStructuredAllocations = structuredPaymentRecords.reduce(
+        (sum, row) => sum + Number(row.total_customer_charged_amount || 0),
+        0
+      );
+      const paidTodayForDetail = structuredPaymentSummary && paidTodayInStructuredAllocations > 0
+        ? paidTodayInStructuredAllocations
+        : paidToday;
 
       grossRevenue += grossTotal;
       totalDiscounts += discountAmount;
       netRevenue += netTotal;
       totalVat += vatAmount;
       totalRefunds += refundAmount;
-      collectedTodayTotal += paidToday;
+      collectedTodayTotal += paidTodayForDetail;
       creditUsedTotal += creditUsed;
       outstandingCreatedTotal += outstandingCreated;
 
@@ -2093,9 +2211,9 @@ export default function ReceiptsPage() {
       cardTotal += breakdown.card;
       tabbyTotal += breakdown.tabby;
       tabbyCardTotal += breakdown.tabbyCard;
-      tabbyFeeTotal += gatewayProvider.includes("tabby") ? gatewayFee : 0;
+      tabbyFeeTotal += tabbyFee;
       tamaraTotal += breakdown.tamara;
-      tamaraFeeTotal += gatewayProvider.includes("tamara") ? gatewayFee : 0;
+      tamaraFeeTotal += tamaraFee;
       insuranceTotal += breakdown.insurance;
       bankTransferTotal += breakdown.bankTransfer;
 
@@ -2121,27 +2239,34 @@ export default function ReceiptsPage() {
         vatAmount,
         breakdown.cash,
         breakdown.card,
-        extractTransactionReference(paymentMethodRaw, "card"),
+        cardReference,
         breakdown.tabby,
-        extractTransactionReference(paymentMethodRaw, "tabby"),
+        tabbyReference,
         breakdown.tabbyCard,
-        gatewayProvider.includes("tabby") ? gatewayFee : 0,
+        tabbyFee,
         breakdown.tamara,
-        extractTransactionReference(paymentMethodRaw, "tamara"),
-        gatewayProvider.includes("tamara") ? gatewayFee : 0,
+        tamaraReference,
+        tamaraFee,
         breakdown.insurance,
         refundAmount,
         paymentMethodRaw,
-        paidToday,
+        paidTodayForDetail,
         creditUsed,
         outstandingCreated,
       ]);
     });
 
+    tabbyFeeTotal += treatmentPlanTabbyFeeTotal;
+    tamaraFeeTotal += treatmentPlanTamaraFeeTotal;
+
     const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tabbyFeeTotal + tamaraTotal + tamaraFeeTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal + depositsReceivedTotal + treatmentPlanPaymentsTotal;
     const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
 
     const workbook = XLSX.utils.book_new();
+    const normalizeReportCellValue = (value: string | number) => (
+      typeof value === "number" && Number.isFinite(value) ? truncateCurrency(value) : value
+    );
+    const normalizeReportRows = (rows: (string | number)[][]) => rows.map((row) => row.map(normalizeReportCellValue));
     const thinBorder = {
       top: { style: "thin", color: { rgb: "D9D9D9" } },
       bottom: { style: "thin", color: { rgb: "D9D9D9" } },
@@ -2209,7 +2334,7 @@ export default function ReceiptsPage() {
       ["Total Collected", totalCollected],
     ];
 
-    const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
+    const summarySheet = XLSX.utils.aoa_to_sheet(normalizeReportRows(summaryRows));
     summarySheet["!cols"] = [{ wch: 36 }, { wch: 24 }];
     summarySheet["!merges"] = [
       { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
@@ -2277,18 +2402,18 @@ export default function ReceiptsPage() {
     (summarySheet as any)["B38"] = {
       t: "n",
       f: "SUM(B25:B37)",
-      v: Math.round(totalCollected * 100) / 100,
+      v: truncateCurrency(totalCollected),
       s: (summarySheet as any)["B38"]?.s,
     };
 
     const blankDetailRow = new Array(detailHeaders.length).fill("") as string[];
     const visibleDetailRows = detailRows.length > 0 ? detailRows : [blankDetailRow];
     const detailsData: (string | number)[][] = [detailHeaders, ...visibleDetailRows, new Array(detailHeaders.length).fill("") as string[]];
-    const detailsSheet = XLSX.utils.aoa_to_sheet(detailsData);
+    const detailsSheet = XLSX.utils.aoa_to_sheet(normalizeReportRows(detailsData));
     const totalsRow = visibleDetailRows.length + 2;
 
     const writeCell = (address: string, value: string | number) => {
-      const safeValue = typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) / 100 : value;
+      const safeValue = normalizeReportCellValue(value);
       (detailsSheet as any)[address] = { ...(detailsSheet as any)[address], v: safeValue };
     };
 
@@ -2394,7 +2519,7 @@ export default function ReceiptsPage() {
         ? treatmentPlanRows
         : [["", "No treatment plans created, visited, or paid today", "", "", "", "", "", "", "", ""]]),
     ];
-    const planSheet = XLSX.utils.aoa_to_sheet(planData);
+    const planSheet = XLSX.utils.aoa_to_sheet(normalizeReportRows(planData));
     planSheet["!autofilter"] = { ref: `A1:J${planData.length}` };
     planSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
     planSheet["!cols"] = [
@@ -2462,7 +2587,7 @@ export default function ReceiptsPage() {
         ? treatmentPlanPaymentRows
         : [["", "No treatment plan payments today", "", "", "", "", "", "", "", "", ""]]),
     ];
-    const planPaymentSheet = XLSX.utils.aoa_to_sheet(planPaymentData);
+    const planPaymentSheet = XLSX.utils.aoa_to_sheet(normalizeReportRows(planPaymentData));
     planPaymentSheet["!autofilter"] = { ref: `A1:K${planPaymentData.length}` };
     planPaymentSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
     planPaymentSheet["!cols"] = [
@@ -2574,7 +2699,7 @@ export default function ReceiptsPage() {
           payment.status || "",
         ];
       });
-      const transactionSheet = XLSX.utils.aoa_to_sheet([transactionHeaders, ...transactionRows]);
+      const transactionSheet = XLSX.utils.aoa_to_sheet(normalizeReportRows([transactionHeaders, ...transactionRows]));
       transactionSheet["!autofilter"] = { ref: `A1:P${Math.max(2, transactionRows.length + 1)}` };
       transactionSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
       transactionSheet["!cols"] = transactionHeaders.map((header) => ({ wch: Math.max(14, header.length + 2) }));
@@ -2632,10 +2757,10 @@ export default function ReceiptsPage() {
           Number(row.refunded_treatment_amount || 0),
           Number(row.refunded_vat_amount || 0),
           Number(row.refunded_fee_amount || 0),
-          Math.round((Number(row.customer_charged_amount || 0) - totalAllocationRefunded) * 100) / 100,
+          truncateCurrency(Number(row.customer_charged_amount || 0) - totalAllocationRefunded),
         ];
       });
-      const allocationSheet = XLSX.utils.aoa_to_sheet([allocationHeaders, ...allocationRows]);
+      const allocationSheet = XLSX.utils.aoa_to_sheet(normalizeReportRows([allocationHeaders, ...allocationRows]));
       allocationSheet["!autofilter"] = { ref: `A1:V${Math.max(2, allocationRows.length + 1)}` };
       allocationSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
       allocationSheet["!cols"] = allocationHeaders.map((header) => ({ wch: Math.max(14, header.length + 2) }));
@@ -2678,7 +2803,7 @@ export default function ReceiptsPage() {
           row.status || "",
         ];
       });
-      const refundSheet = XLSX.utils.aoa_to_sheet([refundHeaders, ...refundRows]);
+      const refundSheet = XLSX.utils.aoa_to_sheet(normalizeReportRows([refundHeaders, ...refundRows]));
       refundSheet["!autofilter"] = { ref: `A1:O${Math.max(2, refundRows.length + 1)}` };
       refundSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
       refundSheet["!cols"] = refundHeaders.map((header) => ({ wch: Math.max(14, header.length + 2) }));
@@ -2702,18 +2827,23 @@ export default function ReceiptsPage() {
       ];
       const dailySummaryRows = methodRows.map((entry) => {
         const rows = paymentAllocationsForDay.filter((row) => row.method_variant === entry.key);
+        const treatmentPlanRowsForMethod = treatmentPlanPaymentSummaries.filter((row) => row.methodVariant === entry.key);
         const refunds = paymentAllocationRefundsForDay.filter((row) => {
           const allocation = paymentAllocationsForDay.find((allocationRow) => String(allocationRow.id) === String(row.payment_allocation_id));
           return allocation?.method_variant === entry.key;
         });
-        const invoiceAllocated = rows.reduce((sum, row) => sum + Number(row.invoice_allocation_amount || 0), 0);
-        const fees = rows.reduce((sum, row) => sum + Number(row.fee_amount || 0), 0);
-        const charged = rows.reduce((sum, row) => sum + Number(row.customer_charged_amount || 0), 0);
+        const invoiceAllocated = rows.reduce((sum, row) => sum + Number(row.invoice_allocation_amount || 0), 0)
+          + treatmentPlanRowsForMethod.reduce((sum, row) => sum + row.invoiceAllocated, 0);
+        const fees = rows.reduce((sum, row) => sum + Number(row.fee_amount || 0), 0)
+          + treatmentPlanRowsForMethod.reduce((sum, row) => sum + row.feeAmount, 0);
+        const charged = rows.reduce((sum, row) => sum + Number(row.customer_charged_amount || 0), 0)
+          + treatmentPlanRowsForMethod.reduce((sum, row) => sum + row.customerChargedAmount, 0);
         const refunded = refunds.reduce((sum, row) => sum + Number(row.total_returned_amount || 0), 0);
-        return [entry.label, invoiceAllocated, fees, charged, refunded, Math.round((charged - refunded) * 100) / 100, rows.length];
+        const treatmentPlanAllocationCount = treatmentPlanRowsForMethod.reduce((sum, row) => sum + row.allocationCount, 0);
+        return [entry.label, invoiceAllocated, fees, charged, refunded, truncateCurrency(charged - refunded), rows.length + treatmentPlanAllocationCount];
       });
       const summarySheetRows = [summaryHeaders, ...dailySummaryRows];
-      const dailySummarySheet = XLSX.utils.aoa_to_sheet(summarySheetRows);
+      const dailySummarySheet = XLSX.utils.aoa_to_sheet(normalizeReportRows(summarySheetRows));
       dailySummarySheet["!autofilter"] = { ref: `A1:G${summarySheetRows.length}` };
       dailySummarySheet["!freeze"] = { xSplit: 0, ySplit: 1 };
       dailySummarySheet["!cols"] = summaryHeaders.map((header) => ({ wch: Math.max(18, header.length + 2) }));
@@ -3100,12 +3230,7 @@ export default function ReceiptsPage() {
     if (rows.length === 0) {
       return selectedPaymentMethod;
     }
-    return rows
-      .map((row) => {
-        const ref = row.providerReferenceNumber ? `, Ref: ${row.providerReferenceNumber}` : "";
-        return `${paymentVariantLabel(row.methodVariant)} AED ${row.invoiceAllocationAmount.toFixed(2)}${ref}`;
-      })
-      .join(" + ");
+    return paymentSummaryLabel(rows, { includeAmounts: true, includeReferences: true });
   }
 
   function buildPaymentDetailsHtml() {
@@ -3368,7 +3493,7 @@ export default function ReceiptsPage() {
         p_total_vat_amount: Math.round(vatSettled * 100) / 100,
         p_total_payment_fee_amount: Math.round(feeSettled * 100) / 100,
         p_total_customer_charged_amount: Math.round(customerChargedSettled * 100) / 100,
-        p_payment_method_summary: paymentSummaryLabel(computedAllocations),
+        p_payment_method_summary: paymentSummaryLabel(computedAllocations, { includeAmounts: true }),
         p_is_split: computedAllocations.length > 1,
         p_status: "completed",
         p_allocations: rpcAllocations,

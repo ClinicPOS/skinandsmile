@@ -253,6 +253,52 @@ create index if not exists treatment_plan_payments_patient_id_idx on public.trea
 create index if not exists treatment_plan_payments_clinic_id_idx on public.treatment_plan_payments(clinic_id);
 create index if not exists treatment_plan_payments_created_at_idx on public.treatment_plan_payments(created_at desc);
 
+create table if not exists public.treatment_plan_payment_records (
+  id uuid primary key default gen_random_uuid(),
+  treatment_plan_id uuid not null references public.treatment_plans(id) on delete cascade,
+  patient_id uuid not null references public.patients(id) on delete cascade,
+  clinic_id uuid not null references public.clinics(id) on delete cascade,
+  receptionist_id uuid not null references public.receptionist(id) on delete restrict,
+  register_session_id uuid references public.cash_register_sessions(id) on delete set null,
+  total_invoice_amount_settled numeric(12,2) not null check (total_invoice_amount_settled >= 0),
+  total_vat_amount numeric(12,2) not null default 0 check (total_vat_amount >= 0),
+  total_payment_fee_amount numeric(12,2) not null default 0 check (total_payment_fee_amount >= 0),
+  total_customer_charged_amount numeric(12,2) not null check (total_customer_charged_amount >= 0),
+  payment_method_summary text not null default '',
+  is_split boolean not null default false,
+  status text not null default 'completed',
+  created_by uuid references public.receptionist(id) on delete set null,
+  legacy_treatment_plan_payment_id uuid unique references public.treatment_plan_payments(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists treatment_plan_payment_records_plan_id_idx on public.treatment_plan_payment_records(treatment_plan_id);
+create index if not exists treatment_plan_payment_records_clinic_id_idx on public.treatment_plan_payment_records(clinic_id);
+create index if not exists treatment_plan_payment_records_created_at_idx on public.treatment_plan_payment_records(created_at desc);
+
+create table if not exists public.treatment_plan_payment_allocations (
+  id uuid primary key default gen_random_uuid(),
+  payment_id uuid not null references public.treatment_plan_payment_records(id) on delete cascade,
+  method_group text not null,
+  method_variant text not null,
+  treatment_net_amount numeric(12,2) not null,
+  vat_amount numeric(12,2) not null default 0,
+  invoice_allocation_amount numeric(12,2) not null,
+  fee_rate numeric(8,6) not null default 0,
+  fee_amount numeric(12,2) not null default 0,
+  customer_charged_amount numeric(12,2) not null,
+  provider_reference_number text,
+  terminal_authorization_code text,
+  card_network text,
+  status text not null default 'completed',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists treatment_plan_payment_allocations_payment_id_idx on public.treatment_plan_payment_allocations(payment_id);
+create index if not exists treatment_plan_payment_allocations_group_variant_idx on public.treatment_plan_payment_allocations(method_group, method_variant);
+
 create table if not exists public.clinic_monthly_targets (
   id uuid primary key default gen_random_uuid(),
   clinic_id uuid not null references public.clinics(id) on delete cascade,

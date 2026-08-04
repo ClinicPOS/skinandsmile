@@ -14,6 +14,7 @@ import {
 } from "../lib/payment-allocation";
 import { toMinorUnits } from "../lib/money";
 import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-payment-receipt";
+import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 
 const PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"] as const;
 const PAYMENT_ARRANGEMENTS = [
@@ -49,13 +50,6 @@ function modeToVariant(mode: string): PaymentMethodVariant {
   if (mode === "Tabby") return "tabby_standard";
   if (mode === "Tamara") return "tamara";
   return "cash";
-}
-
-function formatNetworkLabel(value: string) {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (normalized === "visa") return "Visa";
-  if (normalized === "mastercard") return "Mastercard";
-  return "";
 }
 
 export function PosPlanCheckoutModal({
@@ -207,6 +201,7 @@ export function PosPlanCheckoutModal({
       }
 
       let savedPayments: TreatmentPlanPayment[] = [];
+      let structuredPaymentRecord: { payment_record_id: string; created_at: string } | null = null;
 
       if (amountTodayNum > 0.001) {
         const validationErrors = validatePaymentAllocations(paymentAllocationDrafts, amountTodayNum);
@@ -218,50 +213,34 @@ export function PosPlanCheckoutModal({
         }
 
         const allocations = buildPaymentAllocations(paymentAllocationDrafts, amountTodayNum, amountTodayNum, 0);
-        const paymentRows = allocations.map((allocation) => {
-          const methodName = paymentVariantLabel(allocation.methodVariant);
-          const networkLabel = allocation.methodVariant === "card" && allocation.cardNetwork
-            ? ` (${formatNetworkLabel(allocation.cardNetwork) || allocation.cardNetwork})`
-            : "";
-          const refLabel = allocation.providerReferenceNumber ? ` (Ref: ${allocation.providerReferenceNumber})` : "";
-          const methodLabel = `${methodName}${networkLabel}${refLabel}`;
-
-          const parts = [
-            `Initial payment for plan: ${planTitle.trim()}`,
-            `Invoice settled AED ${allocation.invoiceAllocationAmount.toFixed(2)}`,
-            `Fee AED ${allocation.feeAmount.toFixed(2)} @ ${(allocation.feeRate * 100).toFixed(1)}%`,
-            `Customer charged AED ${allocation.customerChargedAmount.toFixed(2)}`,
-          ];
-          if (allocation.terminalAuthorizationCode) {
-            parts.push(`Terminal auth: ${allocation.terminalAuthorizationCode}`);
-          }
-
-          return {
-            treatment_plan_id: planData.id,
-            patient_id: patientId,
-            clinic_id: clinicId,
-            // Store invoice allocation amount so plan balance tracks cleanly;
-            // customer charged (fee-inclusive) amount is in notes.
-            amount: allocation.invoiceAllocationAmount,
-            payment_method: methodLabel,
-            receptionist_id: receptionistId,
-            register_session_id: registerSessionId || null,
-            notes: parts.join(" | "),
-          };
-        });
-
         const { data: pmtData, error: pmtError } = await supabase
-          .from("treatment_plan_payments")
-          .insert(paymentRows)
-          .select();
+          .rpc("create_treatment_plan_payment_record_with_allocations", buildTreatmentPlanPaymentRpcArgs({
+            treatmentPlanId: planData.id,
+            patientId,
+            clinicId,
+            receptionistId,
+            registerSessionId,
+            paymentNotePrefix: `Initial payment for plan: ${planTitle.trim()}`,
+            allocations,
+          }))
+          .single();
 
         if (pmtError) {
           alert(`Plan created but payment failed: ${pmtError.message || "Unknown error"}`);
         } else {
-          savedPayments = (pmtData as TreatmentPlanPayment[]) || [];
+          structuredPaymentRecord = pmtData as { payment_record_id: string; created_at: string };
+          const { data: legacyPayments, error: legacyPaymentsError } = await supabase
+            .from("treatment_plan_payments")
+            .select("*")
+            .eq("treatment_plan_id", planData.id)
+            .order("created_at", { ascending: false });
+          if (legacyPaymentsError) {
+            alert(`Plan payment saved, but reloading the payment rows failed: ${legacyPaymentsError.message || "Unknown error"}`);
+          } else {
+            savedPayments = (legacyPayments as TreatmentPlanPayment[]) || [];
+          }
           const totalCustomerPaid = allocations.reduce((sum, allocation) => sum + allocation.customerChargedAmount, 0);
           const totalFee = allocations.reduce((sum, allocation) => sum + allocation.feeAmount, 0);
-          const firstPayment = savedPayments[0];
 
           printTreatmentPlanPaymentReceipt({
             clinic,
@@ -282,8 +261,8 @@ export function PosPlanCheckoutModal({
               feeAmount: allocation.feeAmount,
               customerChargedAmount: allocation.customerChargedAmount,
             })),
-            createdAt: firstPayment?.created_at,
-            referenceNo: firstPayment?.id ? `TPP-${String(firstPayment.id).slice(0, 8).toUpperCase()}` : undefined,
+            createdAt: structuredPaymentRecord?.created_at,
+            referenceNo: structuredPaymentRecord?.payment_record_id ? `TPP-${String(structuredPaymentRecord.payment_record_id).slice(0, 8).toUpperCase()}` : undefined,
           });
         }
       }

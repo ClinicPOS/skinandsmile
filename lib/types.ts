@@ -180,6 +180,45 @@ export type TreatmentPlanPayment = {
   created_at: string;
 };
 
+export type TreatmentPlanPaymentRecord = {
+  id: string;
+  treatment_plan_id: string;
+  patient_id: string;
+  clinic_id: string;
+  receptionist_id: string;
+  register_session_id: string | null;
+  total_invoice_amount_settled: number;
+  total_vat_amount: number;
+  total_payment_fee_amount: number;
+  total_customer_charged_amount: number;
+  payment_method_summary: string;
+  is_split: boolean;
+  status: "pending" | "completed" | "partially_refunded" | "refunded" | "cancelled";
+  created_by: string | null;
+  legacy_treatment_plan_payment_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TreatmentPlanPaymentAllocation = {
+  id: string;
+  payment_id: string;
+  method_group: "cash" | "card" | "tabby" | "tamara";
+  method_variant: "cash" | "card" | "tabby_standard" | "tabby_card" | "tamara";
+  treatment_net_amount: number;
+  vat_amount: number;
+  invoice_allocation_amount: number;
+  fee_rate: number;
+  fee_amount: number;
+  customer_charged_amount: number;
+  provider_reference_number: string | null;
+  terminal_authorization_code: string | null;
+  card_network: string | null;
+  status: "completed" | "partially_refunded" | "refunded" | "voided";
+  created_at: string;
+  updated_at: string;
+};
+
 export type PosHold = {
   id: string;
   clinic_id: string;

@@ -42,6 +42,11 @@ export type PaymentValidationError = {
   message: string;
 };
 
+type PaymentSummaryOptions = {
+  includeAmounts?: boolean;
+  includeReferences?: boolean;
+};
+
 export function paymentGroupFromVariant(variant: PaymentMethodVariant): PaymentMethodGroup {
   if (variant === "cash") return "cash";
   if (variant === "card") return "card";
@@ -258,7 +263,21 @@ export function validatePaymentAllocations(
   return errors;
 }
 
-export function paymentSummaryLabel(allocations: PaymentAllocationComputed[]): string {
+export function paymentSummaryLabel(
+  allocations: PaymentAllocationComputed[],
+  options: PaymentSummaryOptions = {}
+): string {
+  if (options.includeAmounts) {
+    return allocations
+      .map((allocation) => {
+        const reference = options.includeReferences && allocation.providerReferenceNumber
+          ? `, Ref: ${allocation.providerReferenceNumber}`
+          : "";
+        return `${paymentVariantLabel(allocation.methodVariant)} AED ${allocation.invoiceAllocationAmount.toFixed(2)}${reference}`;
+      })
+      .join(" + ");
+  }
+
   const labels = [...new Set(allocations.map((allocation) => paymentVariantLabel(allocation.methodVariant)))];
   return labels.join(" + ");
 }
