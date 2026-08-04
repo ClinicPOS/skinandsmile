@@ -13,6 +13,12 @@ export function roundCurrency(value: number): number {
   return fromMinorUnits(toMinorUnits(value));
 }
 
+export function truncateCurrency(value: number): number {
+  const normalized = Number(value) || 0;
+  if (normalized < 0) return Math.ceil(normalized * AED_MINOR_UNITS) / AED_MINOR_UNITS;
+  return Math.floor(normalized * AED_MINOR_UNITS) / AED_MINOR_UNITS;
+}
+
 export function sumMinorUnits(values: number[]): number {
   return values.reduce((sum, value) => sum + Math.trunc(value || 0), 0);
 }
