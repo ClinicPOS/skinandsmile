@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { generateInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 
 const PAGE_SIZE = 10;
@@ -40,6 +41,7 @@ export default function ReceiptLogPage() {
   const [lastRefund, setLastRefund] = useState<any | null>(null);
   const [refundedItems, setRefundedItems] = useState<any[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
 
   async function fetchAllRows(table: string, select: string): Promise<any[]> {
     const BATCH = 1000;
@@ -463,6 +465,98 @@ export default function ReceiptLogPage() {
     printHtmlWhenImagesReady(html, "Please allow popups.");
   }
 
+  function buildInvoiceHtmlForLog(): string {
+    if (!selectedReceipt) return "";
+    const receptionist = receptionists.find((r: any) => r.id === selectedReceipt.receptionist_id);
+    const clinic = clinics.find((c: any) => c.id === receptionist?.clinic_id) ?? clinics[0] ?? null;
+    const patient = patients.find((p: any) => p.id === selectedReceipt.patient_id);
+    const doctor = doctors.find((d: any) => d.id === selectedReceipt.doctor_id);
+    const issuedAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
+    const invoiceNum = selectedReceipt.receipt_number
+      ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
+      : selectedReceipt.id.slice(0, 8).toUpperCase();
+    const grandTotal = Number(selectedReceipt.total ?? 0);
+    const gatewayFee = Number(selectedReceipt.gateway_fee ?? 0);
+    const amountPaidRaw = selectedReceipt.amount_paid;
+    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : grandTotal;
+    const previouslyRefunded = receiptRefunds.reduce((s: number, r: any) => s + Number(r.total_amount || 0), 0);
+    const hasRefund = previouslyRefunded > 0.005;
+    const outstandingBalance = Math.max(0, grandTotal - amountPaid);
+    const invoiceStatus: InvoiceStatus =
+      hasRefund ? "REFUNDED"
+      : outstandingBalance > 0.005 ? "PARTIALLY PAID"
+      : amountPaid < 0.005 ? "UNPAID"
+      : "PAID";
+
+    return generateInvoiceHtml({
+      clinic: clinic as any,
+      receiptNumber: invoiceNum,
+      invoiceStatus,
+      issuedAt,
+      posReceiptNumber: invoiceNum,
+      cashierName: receptionist?.name ?? null,
+      patient: {
+        name: patient?.name || "-",
+        phone: patient?.phone ?? null,
+        patientNumber: patient?.patient_number ?? null,
+      },
+      doctorName: doctor?.name ?? null,
+      items: receiptItems.map((item: any) => {
+        const svc = services.find((s: any) => s.id === item.service_id);
+        return {
+          description: svc?.name || "Service",
+          quantity: Number(item.quantity ?? 1),
+          unitPrice: Number(item.price ?? 0),
+        };
+      }),
+      vatAmount: Number(selectedReceipt.vat ?? 0),
+      paymentFeeAmount: gatewayFee > 0 ? gatewayFee : 0,
+      grandTotal,
+      amountPaid,
+      outstandingBalance,
+      notes: selectedReceipt.notes || null,
+    });
+  }
+
+  async function downloadInvoicePdfFromLog() {
+    if (!selectedReceipt) return;
+    const html = buildInvoiceHtmlForLog();
+    const receptionist = receptionists.find((r: any) => r.id === selectedReceipt.receptionist_id);
+    const clinic = clinics.find((c: any) => c.id === receptionist?.clinic_id) ?? clinics[0];
+    const clinicSlug = (clinic?.name || "Clinic").replace(/\s+/g, "_").replace(/[^\w-]/g, "");
+    const invoiceNum = selectedReceipt.receipt_number
+      ? String(selectedReceipt.receipt_number).padStart(5, "0")
+      : selectedReceipt.id.slice(0, 8).toUpperCase();
+    const dateStr = new Date(selectedReceipt.created_at || Date.now()).toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" });
+    const filename = `${clinicSlug}_Invoice_${invoiceNum}_${dateStr}.pdf`;
+
+    setIsDownloadingInvoice(true);
+    try {
+      const res = await fetch("/api/generate-invoice-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ html, filename }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Could not generate invoice PDF: ${err.error || res.statusText}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err: any) {
+      alert(`Invoice download failed: ${err?.message || "Unknown error"}`);
+    } finally {
+      setIsDownloadingInvoice(false);
+    }
+  }
+
+
   async function deleteReceipt(receipt: any) {
     const receiptLabel = receipt.receipt_number
       ? `#${String(receipt.receipt_number).padStart(5, "0")}`
@@ -694,7 +788,7 @@ export default function ReceiptLogPage() {
                               </div>
                             )}
 
-                            <div className="mt-4 flex gap-2">
+                            <div className="mt-4 flex flex-wrap gap-2">
                               <button
                                 onClick={() => deleteReceipt(receipt)}
                                 disabled={isDeleting}
@@ -713,6 +807,19 @@ export default function ReceiptLogPage() {
                                 className="flex-1 rounded-2xl border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
                               >
                                 Refund
+                              </button>
+                              <button
+                                onClick={downloadInvoicePdfFromLog}
+                                disabled={isDownloadingInvoice}
+                                className="flex-1 rounded-2xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
+                              >
+                                {isDownloadingInvoice ? "PDF…" : "⬇ Invoice"}
+                              </button>
+                              <button
+                                onClick={() => printHtmlWhenImagesReady(buildInvoiceHtmlForLog(), "Please allow popups.")}
+                                className="flex-1 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+                              >
+                                🖨 A4
                               </button>
                             </div>
 

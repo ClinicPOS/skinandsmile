@@ -29,6 +29,7 @@ import {
 import { fromMinorUnits, toMinorUnits, truncateCurrency } from "../../lib/money";
 import { getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { generateInvoiceHtml as buildInvoiceHtml, type InvoiceAllocationRow, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
 import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 
@@ -364,6 +365,7 @@ export default function ReceiptsPage() {
   const [discountType, setDiscountType] = useState<"AED" | "%">("AED");
   const [showPrintModal, setShowPrintModal] = useState(false);
   const [isSavingReceipt, setIsSavingReceipt] = useState(false);
+  const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
   const [isPosUnlocked, setIsPosUnlocked] = useState(false);
   const [loginReceptionistId, setLoginReceptionistId] = useState("");
   const [pinInput, setPinInput] = useState("");
@@ -3628,719 +3630,113 @@ export default function ReceiptsPage() {
     router.refresh();
   }
 
-  function generateInvoiceHtml() {
+  /** Build the A4 invoice HTML for the current transaction using the clinic brand theme. */
+  function generateInvoiceHtml(savedReceipt?: any): string {
     const now = new Date();
-    const invoiceNumber = `INV-${String(now.getTime()).slice(-6)}`;
-    const dateStr = now.toLocaleDateString("en-GB");
+    const receiptForInvoice = savedReceipt ?? currentReceipt;
+    const invoiceNumber = receiptForInvoice?.receipt_number
+      ? `#${String(receiptForInvoice.receipt_number).padStart(5, "0")}`
+      : `INV-${String(now.getTime()).slice(-6)}`;
 
     const selectedPatient = patients.find((p) => p.id === transactionPatientId);
-    const patientNameForInvoice = selectedPatient?.name || patientName || "Patient Name";
-    const patientPhoneForInvoice = selectedPatient?.phone || patientPhoneInput || "-";
-    const patientEmailForInvoice = selectedPatient?.email || patientEmailInput || "-";
-    const patientAddressForInvoice = "Address Line 1";
-    const doctorNameForInvoice = doctors.find((d) => d.id === doctorId)?.name || "Doctor";
-
-    const itemsRows = selectedServices
-      .map(
-        (service, index) => {
-          const price = Number(service.price);
-          const priceLabel = price === 0 ? "Free" : `AED ${price.toFixed(2)}`;
-          return `<tr>
-            <td style="text-align:center; padding: 10px 8px; font-weight: 600; color: #333;">${index + 1}</td>
-            <td style="padding: 10px 8px; color: #333;">${service.name}</td>
-            <td style="text-align:center; padding: 10px 8px; color: #333;">1</td>
-            <td style="text-align:right; padding: 10px 8px; color: #333;">${priceLabel}</td>
-            <td style="text-align:right; padding: 10px 8px; font-weight: 600; color: #d4af37;">${priceLabel}</td>
-          </tr>`;
-        }
-      )
-      .join("");
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Invoice</title>
-  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Cairo:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    @page {
-      size: A4;
-      margin: 0;
-    }
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    html, body {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      height: 100%;
-    }
-
-    body {
-      font-family: 'Poppins', 'Cairo', sans-serif;
-      background: #fff;
-      color: #333;
-    }
-
-    .invoice-container {
-      width: 210mm;
-      height: 297mm;
-      background: white;
-      display: flex;
-      flex-direction: column;
-      margin: 0;
-      padding: 0;
-      page-break-after: always;
-      overflow: hidden;
-    }
-
-    @media print {
-      @page {
-        size: A4;
-        margin: 0;
-      }
-      html, body {
-        margin: 0;
-        padding: 0;
-        width: 100%;
-        -webkit-print-color-adjust: exact;
-        print-color-adjust: exact;
-      }
-      .invoice-container {
-        width: 210mm;
-        height: 297mm;
-        margin: 0;
-        padding: 0;
-        box-shadow: none;
-        page-break-after: always;
-        overflow: hidden;
-      }
-    }
-
-    /* HEADER */
-    .header {
-      background: #000;
-      padding: 20mm 15mm 0 15mm;
-      position: relative;
-    }
-
-    .header-top {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      margin-bottom: 15mm;
-    }
-
-    .logo-section {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      width: 58mm;
-    }
-
-    .logo-section img {
-      width: 52mm;
-      height: 52mm;
-      object-fit: contain;
-      margin-bottom: 3mm;
-    }
-
-    .clinic-name {
-      font-family: 'Poppins', sans-serif;
-      font-size: 20px;
-      font-weight: 700;
-      color: #fff;
-      text-align: center;
-      line-height: 1.2;
-    }
-
-    .clinic-sub {
-      font-family: 'Cairo', sans-serif;
-      font-size: 11px;
-      color: #d4af37;
-      margin-top: 2px;
-      text-align: center;
-      line-height: 1.3;
-    }
-
-    .header-right {
-      text-align: right;
-    }
-
-    .invoice-title {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 3mm;
-    }
-
-    .invoice-main-title {
-      font-family: 'Poppins', sans-serif;
-      font-size: 48px;
-      font-weight: 700;
-      color: #d4af37;
-      letter-spacing: 2px;
-    }
-
-    .invoice-main-title-ar {
-      font-family: 'Cairo', sans-serif;
-      font-size: 28px;
-      font-weight: 700;
-      color: #d4af37;
-      margin-top: -5px;
-    }
-
-    .invoice-meta {
-      font-size: 10px;
-      color: #fff;
-      line-height: 1.6;
-    }
-
-    .invoice-meta p {
-      margin: 2px 0;
-      display: flex;
-      justify-content: flex-end;
-      gap: 8mm;
-    }
-
-    .invoice-meta-label {
-      font-weight: 600;
-      color: #d4af37;
-      min-width: 30mm;
-      text-align: right;
-    }
-
-    .invoice-meta-value {
-      color: #fff;
-      min-width: 40mm;
-      text-align: left;
-    }
-
-    /* CURVED DIVIDER */
-    .curved-divider {
-      height: 15mm;
-      background: white;
-      overflow: hidden;
-    }
-
-    .curved-divider svg {
-      width: 100%;
-      height: 100%;
-    }
-
-    /* CONTENT */
-    .content {
-      flex: 1;
-      padding: 12mm 15mm;
-      display: flex;
-      flex-direction: column;
-      gap: 8mm;
-    }
-
-    .section-title {
-      font-family: 'Poppins', sans-serif;
-      font-size: 10px;
-      font-weight: 600;
-      color: #d4af37;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      border-bottom: 2px solid #d4af37;
-      padding-bottom: 2mm;
-      margin-bottom: 4mm;
-    }
-
-    /* BILL TO / FROM */
-    .bill-from-section {
-      display: grid;
-      grid-template-columns: 1fr 1.2fr;
-      gap: 15mm;
-      margin-bottom: 4mm;
-    }
-
-    .bill-box {
-      display: flex;
-      flex-direction: column;
-    }
-
-    .bill-box h3 {
-      font-family: 'Poppins', sans-serif;
-      font-size: 9px;
-      font-weight: 700;
-      color: #d4af37;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-bottom: 4mm;
-    }
-
-    .bill-item {
-      font-size: 9px;
-      line-height: 1.5;
-      margin: 2px 0;
-    }
-
-    .bill-item-label {
-      color: #d4af37;
-      font-weight: 600;
-      display: inline-block;
-      width: 35mm;
-    }
-
-    .bill-item-value {
-      color: #333;
-    }
-
-    /* ITEMS TABLE */
-    .items-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 6mm 0;
-      font-size: 9px;
-    }
-
-    .items-table thead {
-      background: #000;
-      color: #d4af37;
-    }
-
-    .items-table thead th {
-      padding: 8px;
-      text-align: left;
-      font-family: 'Poppins', sans-serif;
-      font-size: 9px;
-      font-weight: 700;
-      border: 1px solid #000;
-      text-transform: uppercase;
-    }
-
-    .items-table tbody td {
-      padding: 8px;
-      border-bottom: 1px solid #e0e0e0;
-      font-size: 9px;
-    }
-
-    .items-table tbody tr:nth-child(even) {
-      background: #fafafa;
-    }
-
-    .items-table tbody tr:hover {
-      background: #f5f5f5;
-    }
-
-    /* PAYMENT & SUMMARY */
-    .bottom-section {
-      display: grid;
-      grid-template-columns: 1fr 1.2fr;
-      gap: 15mm;
-      margin-top: 6mm;
-    }
-
-    .payment-info {
-      font-size: 9px;
-      line-height: 1.6;
-    }
-
-    .payment-info-item {
-      display: flex;
-      justify-content: space-between;
-      margin: 3mm 0;
-      padding-bottom: 2mm;
-    }
-
-    .payment-info-label {
-      color: #d4af37;
-      font-weight: 600;
-      min-width: 35mm;
-    }
-
-    .payment-info-value {
-      color: #333;
-      text-align: right;
-    }
-
-    .summary-box {
-      display: flex;
-      flex-direction: column;
-    }
-
-    .summary-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 9px;
-    }
-
-    .summary-table tr {
-      border-bottom: 1px solid #e0e0e0;
-    }
-
-    .summary-table tr td {
-      padding: 6mm 6mm;
-    }
-
-    .summary-label {
-      text-align: left;
-      color: #333;
-      font-weight: 500;
-    }
-
-    .summary-value {
-      text-align: right;
-      color: #333;
-      font-weight: 500;
-    }
-
-    .summary-table tr:last-child {
-      background: #d4af37;
-      border: none;
-    }
-
-    .summary-table tr:last-child .summary-label,
-    .summary-table tr:last-child .summary-value {
-      color: #000;
-      font-weight: 700;
-      font-size: 10px;
-    }
-
-    /* NOTES & THANK YOU */
-    .notes-thank-section {
-      display: grid;
-      grid-template-columns: 1fr 1.2fr;
-      gap: 15mm;
-      margin-top: 6mm;
-    }
-
-    .notes-section h3 {
-      font-family: 'Poppins', sans-serif;
-      font-size: 9px;
-      font-weight: 700;
-      color: #d4af37;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-bottom: 3mm;
-    }
-
-    .notes-section p {
-      font-size: 8px;
-      line-height: 1.5;
-      color: #333;
-    }
-
-    .thank-you-section {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      text-align: center;
-    }
-
-    .thank-you-text {
-      font-family: 'Poppins', sans-serif;
-      font-size: 32px;
-      font-weight: 700;
-      color: #d4af37;
-      font-style: italic;
-      line-height: 1;
-    }
-
-    .thank-you-sub {
-      font-family: 'Cairo', sans-serif;
-      font-size: 14px;
-      color: #d4af37;
-      margin-top: 2mm;
-    }
-
-    .thank-you-tooth {
-      font-size: 28px;
-      margin-top: 2mm;
-    }
-
-    /* FOOTER */
-    .footer {
-      background: #000;
-      color: #fff;
-      padding: 10mm 15mm;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 8px;
-      border-top: 3mm solid #d4af37;
-    }
-
-    .footer-contact {
-      flex: 1;
-      line-height: 1.6;
-    }
-
-    .footer-contact p {
-      margin: 1mm 0;
-    }
-
-    .footer-social {
-      flex: 1;
-      text-align: center;
-      padding: 0 15mm;
-      border-left: 1px solid #d4af37;
-      border-right: 1px solid #d4af37;
-      line-height: 1.6;
-    }
-
-    .footer-social p {
-      margin: 1mm 0;
-    }
-
-    .footer-address {
-      flex: 1;
-      text-align: right;
-      line-height: 1.6;
-    }
-
-    .footer-address p {
-      margin: 1mm 0;
-    }
-
-    .footer-icon {
-      color: #000;
-      margin-right: 2mm;
-    }
-
-    @media print {
-      body, html {
-        margin: 0;
-        padding: 0;
-        -webkit-print-color-adjust: exact;
-        print-color-adjust: exact;
-      }
-      .invoice-container {
-        box-shadow: none;
-        margin: 0;
-        width: 210mm;
-        height: 297mm;
-        -webkit-print-color-adjust: exact;
-        print-color-adjust: exact;
-      }
-      .invoice-container,
-      .invoice-container * {
-        color: #000 !important;
-        border-color: #000 !important;
-        background-color: #fff !important;
-        text-shadow: none !important;
-        box-shadow: none !important;
-        -webkit-print-color-adjust: exact;
-        print-color-adjust: exact;
-        font-weight: 600;
-      }
-      .invoice-container img {
-        -webkit-print-color-adjust: exact;
-        print-color-adjust: exact;
-        image-rendering: -webkit-optimize-contrast;
-        image-rendering: crisp-edges;
-        -webkit-backface-visibility: hidden;
-        backface-visibility: hidden;
-      }
-    }
-  </style>
-</head>
-<body>
-  <div class="invoice-container">
-    <!-- HEADER -->
-    <div class="header">
-      <div class="header-top">
-        <div class="logo-section">
-          <img src="/images/logo6.jpg" alt="Skin and Smile Logo">
-          <div class="clinic-name">Skin and Smile</div>
-          <div class="clinic-sub">Dental Clinic</div>
-        </div>
-        <div class="header-right">
-          <div class="invoice-title">
-            <div class="invoice-main-title">INVOICE</div>
-            <div class="invoice-main-title-ar">فاتورة</div>
-          </div>
-          <div class="invoice-meta">
-            <p>
-              <span class="invoice-meta-label">Invoice No.</span>
-              <span class="invoice-meta-value">${invoiceNumber}</span>
-            </p>
-            <p>
-              <span class="invoice-meta-label">Invoice Date</span>
-              <span class="invoice-meta-value">${dateStr}</span>
-            </p>
-            <p>
-              <span class="invoice-meta-label">Due Date</span>
-              <span class="invoice-meta-value">${dateStr}</span>
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- CURVED DIVIDER -->
-    <div class="curved-divider">
-      <svg viewBox="0 0 1000 100" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="goldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" style="stop-color:#d4af37;stop-opacity:1" />
-            <stop offset="100%" style="stop-color:#b8941f;stop-opacity:1" />
-          </linearGradient>
-        </defs>
-        <path d="M 0,30 Q 250,5 500,30 T 1000,30 L 1000,100 L 0,100 Z" fill="url(#goldGrad)" />
-      </svg>
-    </div>
-
-    <!-- CONTENT -->
-    <div class="content">
-      <!-- BILL TO / FROM -->
-      <div class="bill-from-section">
-        <div class="bill-box">
-          <h3>BILL TO</h3>
-          <div class="bill-item">
-            <span class="bill-item-label">Patient Name</span>
-            <span class="bill-item-value">${patientNameForInvoice}</span>
-          </div>
-          <div class="bill-item">
-            <span class="bill-item-label">Address Line 1</span>
-            <span class="bill-item-value">${patientAddressForInvoice}</span>
-          </div>
-          <div class="bill-item">
-            <span class="bill-item-label">Phone Number</span>
-            <span class="bill-item-value">${patientPhoneForInvoice}</span>
-          </div>
-          <div class="bill-item">
-            <span class="bill-item-label">Email Address</span>
-            <span class="bill-item-value">${patientEmailForInvoice}</span>
-          </div>
-        </div>
-
-        <div class="bill-box">
-          <h3>FROM</h3>
-          <div class="bill-item">
-            <strong>Skin and Smile Dental Clinic</strong>
-          </div>
-          <div class="bill-item" style="margin-top: 2mm;">
-            Al Satwa, Dubai, UAE
-          </div>
-          <div class="bill-item">
-            Same Building of Almaya Supermarket,<br>
-            Near Satwa Bus Station, 2nd Floor, Room 207
-          </div>
-          <div class="bill-item" style="margin-top: 3mm;">
-            <span class="bill-item-label" style="color: #d4af37;">📞</span>
-            <span class="bill-item-value">+971 56 423 443</span>
-          </div>
-          <div class="bill-item">
-            <span class="bill-item-label" style="color: #d4af37;">📧</span>
-            <span class="bill-item-value">info@skinandsmile.com</span>
-          </div>
-          <div class="bill-item">
-            <span class="bill-item-label" style="color: #d4af37;">🌐</span>
-            <span class="bill-item-value">www.skinandsmile.com</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- ITEMS TABLE -->
-      <table class="items-table">
-        <thead>
-          <tr>
-            <th style="width: 25px;">NO.</th>
-            <th>DESCRIPTION</th>
-            <th style="width: 55px;">QUANTITY</th>
-            <th style="width: 70px;">UNIT PRICE</th>
-            <th style="width: 70px;">AMOUNT</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${itemsRows}
-        </tbody>
-      </table>
-
-      <!-- PAYMENT INFO & SUMMARY -->
-      <div class="bottom-section">
-        <div class="payment-info">
-          <div class="section-title">PAYMENT INFORMATION</div>
-          <div class="payment-info-item">
-            <span class="payment-info-label">Bank Name</span>
-            <span class="payment-info-value">-</span>
-          </div>
-          <div class="payment-info-item">
-            <span class="payment-info-label">Account Name</span>
-            <span class="payment-info-value">Skin and Smile Dental Clinic</span>
-          </div>
-          <div class="payment-info-item">
-            <span class="payment-info-label">Account No.</span>
-            <span class="payment-info-value">-</span>
-          </div>
-          <div class="payment-info-item">
-            <span class="payment-info-label">IBAN</span>
-            <span class="payment-info-value">-</span>
-          </div>
-          <div class="payment-info-item">
-            <span class="payment-info-label">Payment Method</span>
-            <span class="payment-info-value">Cash / Card / Bank Transfer</span>
-          </div>
-        </div>
-
-        <div class="summary-box">
-          <table class="summary-table">
-            <tr>
-              <td class="summary-label">SUBTOTAL</td>
-              <td class="summary-value">AED ${subtotal.toFixed(2)}</td>
-            </tr>
-            <tr>
-              <td class="summary-label">DISCOUNT</td>
-              <td class="summary-value">AED 0.00</td>
-            </tr>
-            <tr>
-              <td class="summary-label">TAX (0%)</td>
-              <td class="summary-value">AED ${vat.toFixed(2)}</td>
-            </tr>
-            <tr>
-              <td class="summary-label">TOTAL DUE</td>
-              <td class="summary-value">AED ${total.toFixed(2)}</td>
-            </tr>
-          </table>
-        </div>
-      </div>
-
-      <!-- NOTES & THANK YOU -->
-      <div class="notes-thank-section">
-        <div class="notes-section">
-          <h3>NOTES</h3>
-          <p>${notes || "Thank you for choosing Skin and Smile Dental Clinic. We appreciate your trust in us!"}</p>
-        </div>
-        <div class="thank-you-section">
-          <div class="thank-you-text">Thank You!</div>
-          <div class="thank-you-sub">شكراً لك!</div>
-          <div class="thank-you-tooth">🦷</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- FOOTER -->
-    <div class="footer">
-      <div class="footer-contact">
-        <p><span class="footer-icon">📞</span>+971 56 423 443</p>
-        <p><span class="footer-icon">📧</span>info@skinandsmile.com</p>
-      </div>
-      <div class="footer-social">
-        <p><span class="footer-icon">📱</span>@skinandsmile</p>
-        <p><span class="footer-icon">📸</span>@skinandsmiledentalclinic</p>
-        <p><span class="footer-icon">👍</span>Skin and Smile Dental Clinic Official</p>
-      </div>
-      <div class="footer-address">
-        <p>Al Satwa, Dubai, UAE</p>
-        <p>Same Building of Almaya Supermarket</p>
-        <p>2nd Floor, Room 207</p>
-      </div>
-    </div>
-  </div>
-</body>
-</html>`;
+    const doctorForInvoice = doctors.find((d) => d.id === doctorId);
+    const activeReceptionistId = receptionistId || loginReceptionistId;
+    const cashierForInvoice = receptionists.find((r: any) => r.id === activeReceptionistId)?.name;
+
+    const isFullyCoveredByCredit = getRemainingAfterCredit() <= 0.0049;
+    const computedAllocs = isFullyCoveredByCredit ? [] : buildComputedAllocationsForSave();
+    const creditApplied = getCreditApplied();
+    const grandTotal = total + computedAllocs.reduce((s, r) => s + r.feeAmount, 0);
+    const amountPaid = isFullyCoveredByCredit ? grandTotal : computedAllocs.reduce((s, r) => s + r.customerChargedAmount, 0) + creditApplied;
+    const outstandingBalance = getOutstandingAfterPayment();
+
+    const allocRows: InvoiceAllocationRow[] = computedAllocs.map((row) => ({
+      methodLabel: paymentVariantLabel(row.methodVariant),
+      invoiceAllocationAmount: row.invoiceAllocationAmount,
+      feeAmount: row.feeAmount,
+      customerChargedAmount: row.customerChargedAmount,
+      providerReferenceNumber: row.providerReferenceNumber,
+      terminalAuthorizationCode: row.terminalAuthorizationCode,
+    }));
+
+    const invoiceStatus: InvoiceStatus =
+      outstandingBalance > 0.005 ? "PARTIALLY PAID"
+      : amountPaid < 0.005 ? "UNPAID"
+      : "PAID";
+
+    return buildInvoiceHtml({
+      clinic: activeClinic,
+      receiptNumber: invoiceNumber,
+      invoiceStatus,
+      issuedAt: now,
+      posReceiptNumber: invoiceNumber,
+      cashierName: cashierForInvoice,
+      patient: {
+        name: selectedPatient?.name || patientName || "-",
+        phone: selectedPatient?.phone || patientPhoneInput || null,
+        email: selectedPatient?.email || patientEmailInput || null,
+        fileNumber: patientFileNumberInput.trim() || null,
+        patientNumber: selectedPatient?.patient_number ?? null,
+      },
+      doctorName: doctorForInvoice?.name || null,
+      items: selectedServices.map((svc, i) => ({
+        description: svc.name,
+        quantity: svc.quantity ?? 1,
+        unitPrice: Number(svc.price),
+        discountAmount: svc.originalPrice != null ? Math.max(0, Number(svc.originalPrice) - Number(svc.price)) * (svc.quantity ?? 1) : 0,
+        teeth: cartItemTeeth[i] || [],
+      })),
+      totalDiscount: discountAmount,
+      vatAmount: vat,
+      paymentFeeAmount: computedAllocs.reduce((s, r) => s + r.feeAmount, 0),
+      grandTotal,
+      creditApplied: creditApplied > 0.005 ? creditApplied : 0,
+      amountPaid,
+      outstandingBalance,
+      paymentAllocations: allocRows,
+      notes: notes.trim() || null,
+    });
   }
+
+  /** Download the invoice as an A4 PDF using the server-side Puppeteer renderer. */
+  async function downloadInvoicePdf(savedReceipt?: any) {
+    const html = generateInvoiceHtml(savedReceipt);
+    const clinicSlug = (activeClinic?.name || "Clinic").replace(/\s+/g, "_").replace(/[^\w-]/g, "");
+    const receiptForFilename = savedReceipt ?? currentReceipt;
+    const invoiceNum = receiptForFilename?.receipt_number
+      ? String(receiptForFilename.receipt_number).padStart(5, "0")
+      : String(Date.now()).slice(-6);
+    const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" }); // YYYY-MM-DD
+    const filename = `${clinicSlug}_Invoice_${invoiceNum}_${dateStr}.pdf`;
+
+    try {
+      const res = await fetch("/api/generate-invoice-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ html, filename }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Could not generate invoice PDF: ${err.error || res.statusText}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err: any) {
+      alert(`Invoice download failed: ${err?.message || "Unknown error"}`);
+    }
+  }
+
+  /** Print the invoice as a full A4 page via a popup window. */
+  function printInvoiceA4(savedReceipt?: any) {
+    printHtmlWhenImagesReady(generateInvoiceHtml(savedReceipt), "Please allow popups to print the invoice.");
+  }
+
 
   function buildThermalReceiptHtml(title: string, savedReceipt?: any) {
     const logoPath = getReceiptLogoPath(activeClinic);
@@ -5849,6 +5245,38 @@ export default function ReceiptsPage() {
                       disabled={isSavingReceipt}
                     >
                       {isSavingReceipt ? "Saving..." : "Proceed without Printing"}
+                    </button>
+                    <div className="my-1 border-t border-slate-100" />
+                    <button
+                      onClick={async () => {
+                        const saved = await confirmPaymentAndSave();
+                        if (!saved) return;
+                        setShowPrintModal(false);
+                        setIsDownloadingInvoice(true);
+                        try {
+                          await downloadInvoicePdf(saved);
+                        } finally {
+                          setIsDownloadingInvoice(false);
+                        }
+                        clearPosForm();
+                      }}
+                      className="inline-flex items-center justify-center gap-2 rounded-2xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-500"
+                      disabled={isSavingReceipt || isDownloadingInvoice}
+                    >
+                      {isDownloadingInvoice ? "Generating PDF…" : "⬇ Download Invoice PDF"}
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const saved = await confirmPaymentAndSave();
+                        if (!saved) return;
+                        setShowPrintModal(false);
+                        printInvoiceA4(saved);
+                        clearPosForm();
+                      }}
+                      className="inline-flex items-center justify-center gap-2 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+                      disabled={isSavingReceipt}
+                    >
+                      🖨 Print A4 Invoice
                     </button>
                     <button
                       onClick={() => {

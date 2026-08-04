@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
+import { generateInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { useClinicAccess } from "../../lib/clinic-access";
 
 type Receipt = {
@@ -72,6 +73,7 @@ export default function ReceiptHistoryPage() {
   const [receiptItems, setReceiptItems] = useState<ReceiptItem[]>([]);
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [selectedReceiptId, setSelectedReceiptId] = useState<string>("");
+  const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
 
   async function fetchAllRows(table: string, select: string): Promise<any[]> {
     const BATCH = 1000;
@@ -161,6 +163,92 @@ export default function ReceiptHistoryPage() {
   function getPatientName(patientId: string) {
     return patients.find((patient) => patient.id === patientId)?.name || "Unknown patient";
   }
+
+  function buildInvoiceHtmlForSelected(): string {
+    if (!selectedReceipt) return "";
+    const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
+    const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0] ?? null;
+    const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
+    const doctor = doctors.find((d) => d.id === selectedReceipt.doctor_id);
+    const issuedAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
+    const invoiceNum = selectedReceipt.receipt_number
+      ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
+      : selectedReceipt.id.slice(0, 8).toUpperCase();
+    const grandTotal = Number(selectedReceipt.total ?? 0);
+    const gatewayFee = Number(selectedReceipt.gateway_fee ?? 0);
+    const amountPaidRaw = (selectedReceipt as any).amount_paid;
+    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : grandTotal;
+    const outstandingBalance = Math.max(0, grandTotal - amountPaid);
+    const invoiceStatus: InvoiceStatus =
+      outstandingBalance > 0.005 ? "PARTIALLY PAID"
+      : amountPaid < 0.005 ? "UNPAID"
+      : "PAID";
+
+    return generateInvoiceHtml({
+      clinic: clinic as any,
+      receiptNumber: invoiceNum,
+      invoiceStatus,
+      issuedAt,
+      posReceiptNumber: invoiceNum,
+      cashierName: receptionist?.name ?? null,
+      patient: {
+        name: patient?.name || "-",
+        phone: patient?.phone ?? null,
+        patientNumber: patient?.patient_number ?? null,
+      },
+      doctorName: doctor?.name ?? null,
+      items: selectedReceiptLineItems.map((item) => ({
+        description: item.name,
+        quantity: item.quantity,
+        unitPrice: Number(item.total) / Math.max(1, item.quantity),
+      })),
+      vatAmount: Number(selectedReceipt.vat ?? 0),
+      paymentFeeAmount: gatewayFee > 0 ? gatewayFee : 0,
+      grandTotal,
+      amountPaid,
+      outstandingBalance,
+      notes: selectedReceipt.notes || null,
+    });
+  }
+
+  async function downloadInvoicePdfFromHistory() {
+    if (!selectedReceipt) return;
+    const html = buildInvoiceHtmlForSelected();
+    const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
+    const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
+    const clinicSlug = (clinic?.name || "Clinic").replace(/\s+/g, "_").replace(/[^\w-]/g, "");
+    const invoiceNum = selectedReceipt.receipt_number
+      ? String(selectedReceipt.receipt_number).padStart(5, "0")
+      : selectedReceipt.id.slice(0, 8).toUpperCase();
+    const dateStr = new Date(selectedReceipt.created_at || Date.now()).toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" });
+    const filename = `${clinicSlug}_Invoice_${invoiceNum}_${dateStr}.pdf`;
+
+    setIsDownloadingInvoice(true);
+    try {
+      const res = await fetch("/api/generate-invoice-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ html, filename }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Could not generate invoice PDF: ${err.error || res.statusText}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err: any) {
+      alert(`Invoice download failed: ${err?.message || "Unknown error"}`);
+    } finally {
+      setIsDownloadingInvoice(false);
+    }
+  }
+
 
   function printSelectedReceipt() {
     if (!selectedReceipt) return;
@@ -411,6 +499,19 @@ export default function ReceiptHistoryPage() {
                     className="rounded-full bg-gradient-to-r from-teal-700 to-cyan-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:from-teal-600 hover:to-cyan-600 print:hidden"
                   >
                     Print Receipt
+                  </button>
+                  <button
+                    onClick={downloadInvoicePdfFromHistory}
+                    disabled={isDownloadingInvoice}
+                    className="rounded-full bg-amber-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-500 print:hidden disabled:opacity-60"
+                  >
+                    {isDownloadingInvoice ? "Generating…" : "⬇ Invoice PDF"}
+                  </button>
+                  <button
+                    onClick={() => printHtmlWhenImagesReady(buildInvoiceHtmlForSelected(), "Please allow popups to print the invoice.")}
+                    className="rounded-full border border-amber-300 bg-amber-50 px-5 py-2.5 text-sm font-semibold text-amber-700 shadow-sm transition hover:bg-amber-100 print:hidden"
+                  >
+                    🖨 Print A4 Invoice
                   </button>
                 </div>
 

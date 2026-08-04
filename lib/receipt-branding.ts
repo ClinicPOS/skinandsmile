@@ -4,12 +4,17 @@ import type { Clinic } from "./types";
 export const receiptLogoOptions = [
   { value: "skin-smile", label: "Skin and Smile default", path: "/images/logo6.jpg" },
   { value: "skin-smile-alt", label: "Skin and Smile alternate", path: "/images/logo7.PNG" },
+  { value: "dental", label: "Skin and Smile Dental", path: "/images/dental.png" },
+  { value: "aesthetic", label: "Skin and Smile Aesthetic", path: "/images/invoiceskinandsmile-aesthetic.png" },
+  { value: "al-dana", label: "Skin and Smile Dental (Al Dana)", path: "/images/aldana.jpeg" },
   { value: "altamuze", label: "Al Tamuze", path: "/images/logo5.jpg" },
   { value: "altamuze-compact", label: "Al Tamuze compact", path: "/images/logo4.png" },
+  { value: "altamuze-new", label: "Altamuze Medical Center", path: "/images/altamuze.png" },
   { value: "logo", label: "Logo 1", path: "/images/logo.png" },
   { value: "logo2", label: "Logo 2", path: "/images/logo2.png" },
   { value: "logo3", label: "Logo 3", path: "/images/logo3.png" },
   { value: "al-jameelah", label: "Al Jameelah Clinic", path: "/images/logo11.png" },
+  { value: "al-jameelah-new", label: "Al Jameelah Clinic (new)", path: "/images/aljameelah.png" },
 ] as const;
 
 export function getReceiptLogoPath(clinic: Pick<Clinic, "logo"> | { logo?: string | null } | null | undefined, fallbackPath = "/images/logo6.jpg") {
