@@ -13,11 +13,6 @@ function makeAbsoluteAssetUrls(html: string, baseUrl: string) {
 }
 
 export async function POST(request: NextRequest) {
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
   try {
     const { html, filename } = await request.json();
 
@@ -26,34 +21,52 @@ export async function POST(request: NextRequest) {
     }
 
     const baseUrl = new URL(request.url).origin;
-    const page = await browser.newPage();
-    const htmlWithAbsoluteAssets = makeAbsoluteAssetUrls(html, baseUrl);
+    const browserLaunchOptions = {
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_BIN || process.env.CHROMIUM_PATH || undefined,
+    };
 
-    await page.setContent(htmlWithAbsoluteAssets, { waitUntil: "load" });
+    const browser = await puppeteer.launch(browserLaunchOptions);
+    try {
+      const page = await browser.newPage();
+      const htmlWithAbsoluteAssets = makeAbsoluteAssetUrls(html, baseUrl);
 
-    const pdf = await page.pdf({
-      format: "A4",
-      margin: {
-        top: "10mm",
-        right: "10mm",
-        bottom: "10mm",
-        left: "10mm",
-      },
-      printBackground: true,
-    });
+      await page.setContent(htmlWithAbsoluteAssets, { waitUntil: "domcontentloaded" });
+      await page.evaluate(async () => {
+        await Promise.all(Array.from(document.images).map((img) => {
+          if (img.complete) return Promise.resolve();
+          return new Promise<void>((resolve) => {
+            img.addEventListener("load", () => resolve(), { once: true });
+            img.addEventListener("error", () => resolve(), { once: true });
+          });
+        }));
+      });
 
-    return new Response(Buffer.from(pdf), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `attachment; filename="${filename || "invoice.pdf"}"`,
-      },
-    });
+      const pdf = await page.pdf({
+        format: "A4",
+        margin: {
+          top: "10mm",
+          right: "10mm",
+          bottom: "10mm",
+          left: "10mm",
+        },
+        printBackground: true,
+      });
+
+      return new Response(Buffer.from(pdf), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/pdf",
+          "Content-Disposition": `attachment; filename="${filename || "invoice.pdf"}"`,
+        },
+      });
+    } finally {
+      await browser.close();
+    }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Failed to generate PDF";
     console.error("PDF generation error:", error);
     return Response.json({ error: errorMessage }, { status: 500 });
-  } finally {
-    await browser.close();
   }
 }
