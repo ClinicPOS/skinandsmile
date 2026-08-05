@@ -2682,6 +2682,7 @@ export function ReceiptHistoryModal({
     const thermalItems = receiptItems.map((item) => {
       const quantity = Number(item.quantity ?? 1);
       const finalUnitPrice = Number(item.price ?? 0);
+      // For original price: use saved original_price if available, otherwise final price
       const originalUnitPrice = Number(
         item.original_price ?? item.price ?? 0
       );
@@ -2763,6 +2764,7 @@ export function ReceiptHistoryModal({
       items: (receiptItems || []).map((item: any) => {
         const quantity = Number(item.quantity ?? 1);
         const finalUnitPrice = Number(item.price ?? 0);
+        // For original price: use saved original_price if available, otherwise final price
         const originalUnitPrice = Number(
           item.original_price ?? item.price ?? 0
         );
