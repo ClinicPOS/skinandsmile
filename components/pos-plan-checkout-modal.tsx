@@ -857,7 +857,7 @@ export function PosPlanCheckoutModal({
               <div className="mx-4 w-full max-w-md rounded-3xl border border-cyan-100 bg-white p-6 shadow-2xl">
                 <p className="text-xs font-bold uppercase tracking-[0.3em] text-cyan-700">Plan Payment Saved</p>
                 <h3 className="mt-2 text-xl font-semibold text-slate-900">What would you like to do next?</h3>
-                <p className="mt-2 text-sm text-slate-600">Print, download, or keep going without sharing the invoice.</p>
+                <p className="mt-2 text-sm text-slate-600">Print the invoice or keep going without sharing it.</p>
 
                 <div className="mt-5 grid gap-3">
                   <button
@@ -865,13 +865,6 @@ export function PosPlanCheckoutModal({
                     className="rounded-2xl bg-slate-900 px-3 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
                   >
                     Print Receipt
-                  </button>
-                  <button
-                    onClick={handleDownloadInvoicePdf}
-                    disabled={isDownloadingInvoice}
-                    className="rounded-2xl bg-amber-600 px-3 py-3 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
-                  >
-                    {isDownloadingInvoice ? "Generating…" : "⬇ Download PDF"}
                   </button>
                   <button
                     onClick={handlePrintA4Invoice}

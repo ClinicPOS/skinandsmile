@@ -703,13 +703,6 @@ export default function ReceiptHistoryPage() {
                     Print Receipt
                   </button>
                   <button
-                    onClick={downloadInvoicePdfFromHistory}
-                    disabled={isDownloadingInvoice}
-                    className="rounded-full bg-amber-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-500 print:hidden disabled:opacity-60"
-                  >
-                    {isDownloadingInvoice ? "Generating…" : "⬇ Invoice PDF"}
-                  </button>
-                  <button
                     onClick={() => printHtmlWhenImagesReady(buildInvoiceHtmlForSelected(), "Please allow popups to print the invoice.")}
                     className="rounded-full border border-amber-300 bg-amber-50 px-5 py-2.5 text-sm font-semibold text-amber-700 shadow-sm transition hover:bg-amber-100 print:hidden"
                   >

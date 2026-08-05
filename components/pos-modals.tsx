@@ -2237,7 +2237,7 @@ export function SearchPatientModal({
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
           <div className="mx-4 w-full max-w-md rounded-3xl border border-cyan-100 bg-white p-6 shadow-2xl">
             <p className="text-xs font-bold uppercase tracking-[0.3em] text-cyan-700">Treatment Plan Saved</p>
-            <h3 className="mt-2 text-xl font-semibold text-slate-900">Do you want to print or download it?</h3>
+            <h3 className="mt-2 text-xl font-semibold text-slate-900">Do you want to print it?</h3>
             <p className="mt-2 text-sm text-slate-600">
               Choose how you want to share this active treatment plan.
             </p>
@@ -2248,13 +2248,6 @@ export function SearchPatientModal({
                 className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
               >
                 Print Summary
-              </button>
-              <button
-                onClick={downloadSavedTreatmentPlanPdf}
-                disabled={isDownloadingTreatmentPlanPdf}
-                className="rounded-2xl bg-amber-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
-              >
-                {isDownloadingTreatmentPlanPdf ? "Generating…" : "⬇ Download PDF"}
               </button>
               <button
                 onClick={() => printHtmlWhenImagesReady(buildTreatmentPlanSummaryHtml(savedTreatmentPlanActionContext), "Please allow popups to print the treatment plan.")}
@@ -2555,34 +2548,7 @@ export function ReceiptHistoryModal({
       completedVisits: plan?.clinic_patient_file_id ? 1 : 0,
       notes: plan?.notes || null,
     });
-
-    const clinicSlug = (clinic?.name || "Clinic").replace(/\s+/g, "_").replace(/[^\w-]/g, "");
-    const filename = `${clinicSlug}_Invoice_TPP-${String(record.id).slice(0, 8).toUpperCase()}_${new Date(record.created_at || Date.now()).toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" })}.pdf`;
-
-    setDownloadingTreatmentPlanInvoiceId(record.id);
-    try {
-      const res = await fetch("/api/generate-invoice-pdf", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ html, filename }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert(`Could not generate invoice PDF: ${err.error || res.statusText}`);
-        return;
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-    } catch (error: any) {
-      alert(`Invoice download failed: ${error?.message || "Unknown error"}`);
-    } finally {
-      setDownloadingTreatmentPlanInvoiceId(null);
-    }
+    printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
   }
 
   // Refunds can't exceed money actually collected: partial-payment receipts
@@ -2873,29 +2839,7 @@ export function ReceiptHistoryModal({
       outstandingBalance,
       notes: receipt.notes || null,
     });
-
-    const clinicSlug = (clinicForReceipt?.name || "Clinic").replace(/\s+/g, "_").replace(/[^\w-]/g, "");
-    const invoiceNum = receipt.receipt_number ? String(receipt.receipt_number).padStart(5, "0") : receipt.id.slice(0, 8).toUpperCase();
-    const dateStr = new Date(receipt.created_at || Date.now()).toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" });
-    const filename = `${clinicSlug}_Invoice_${invoiceNum}_${dateStr}.pdf`;
-
-    const res = await fetch("/api/generate-invoice-pdf", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ html, filename }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      alert(`Could not generate invoice PDF: ${err.error || res.statusText}`);
-      return;
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
   }
 
   function formatReceiptNo(receipt: Receipt) {
@@ -3008,13 +2952,7 @@ export function ReceiptHistoryModal({
                                 >
                                   Print A4 Invoice
                                 </button>
-                                <button
-                                  onClick={() => downloadTreatmentPlanPaymentInvoice(record, plan, allocations)}
-                                  disabled={downloadingTreatmentPlanInvoiceId === record.id}
-                                  className="flex-1 rounded-xl bg-amber-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
-                                >
-                                  {downloadingTreatmentPlanInvoiceId === record.id ? "Generating…" : "⬇ PDF"}
-                                </button>
+                                
                               </div>
                             </div>
                           );
@@ -3103,9 +3041,9 @@ export function ReceiptHistoryModal({
                                             .finally(() => setDownloadingRegularReceiptId(null));
                                         }}
                                         disabled={downloadingRegularReceiptId === receipt.id}
-                                        className="flex-1 rounded-xl bg-amber-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
+                                        className="flex-1 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 transition hover:bg-amber-100 disabled:opacity-60"
                                       >
-                                        {downloadingRegularReceiptId === receipt.id ? "Generating…" : "⬇ PDF"}
+                                        {downloadingRegularReceiptId === receipt.id ? "Generating…" : "Print A4 Invoice"}
                                       </button>
                                       <button
                                         onClick={() => startRefund(receipt)}
