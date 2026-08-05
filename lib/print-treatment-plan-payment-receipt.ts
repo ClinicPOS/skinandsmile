@@ -90,93 +90,119 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
   <meta charset="utf-8" />
   <title>Treatment Plan Payment Receipt</title>
   <style>
-    @page { size: 80mm auto; margin: 4mm; }
+    * { box-sizing: border-box; }
+    @page { size: 80mm auto; margin: 0; }
     body {
-      font-family: 'Segoe UI', Arial, sans-serif;
+      font-family: Arial, Helvetica, sans-serif;
       width: 72mm;
       margin: 0;
-      color: #111827;
-      line-height: 1.2;
+      padding: 2mm;
+      font-size: 10px;
+      line-height: 1.25;
+      color: #000;
+      background: #fff;
+      overflow-x: hidden;
+      -webkit-text-size-adjust: 100%;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      font-weight: 500;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
     .center { text-align: center; }
-    .divider { border-top: 1px dashed #334155; margin: 6px 0; }
-    .row { display: flex; justify-content: space-between; gap: 6px; margin: 2px 0; font-size: 10.5px; }
-    .row span:last-child { text-align: right; white-space: nowrap; }
-    .row.sub { font-size: 10px; color: #475569; }
-    .title { font-size: 12px; letter-spacing: 1px; font-weight: 700; margin-top: 4px; }
-    .clinic { font-size: 11px; font-weight: 700; margin-top: 2px; }
-    .meta { font-size: 9.5px; color: #475569; }
-    .totals .row { font-size: 10.5px; }
-    .totals .total { font-size: 11px; font-weight: 700; }
-    .footer { text-align: center; font-size: 9.5px; color: #475569; margin-top: 6px; }
-    .logo-wrap {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 18mm;
-      margin: 1mm 0 2mm;
+    .hr { border-top: 1px dashed #000; margin: 5px 0; }
+    .double {
+      border-top: 2px solid #000;
+      border-bottom: 2px solid #000;
+      padding: 3px 0;
+      margin: 5px 0;
+      text-align: center;
+      font-weight: 700;
     }
-    img.logo {
+    .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
+    .logo {
       display: block;
-      width: auto;
-      max-width: 56mm;
-      max-height: 16mm;
+      width: 100%;
+      max-width: 68mm;
+      max-height: 36mm;
       height: auto;
       object-fit: contain;
-      margin: 0 auto;
       image-rendering: -webkit-optimize-contrast;
       image-rendering: crisp-edges;
+    }
+    .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
+    .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      margin: 1px 0;
+    }
+    .row span:first-child { min-width: 30mm; }
+    .row span:last-child {
+      text-align: right;
+      flex: 1;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .head-row { display: flex; justify-content: space-between; font-weight: 700; }
+    .footer-center { text-align: center; margin-top: 4px; }
+    .meta { font-size: 9px; line-height: 1.25; }
+    @media print {
+      @page { size: 80mm auto; margin: 0; }
+      body { width: 72mm; padding: 2mm; }
+      * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; }
+      .logo { width: 100%; max-width: 68mm; max-height: 36mm; height: auto; }
     }
   </style>
 </head>
 <body>
-  <div class="center">
-    <div class="logo-wrap">
-      <img class="logo" src="${logoPath}" alt="Clinic logo" loading="eager" decoding="async" />
-    </div>
-    <div class="clinic">${escapeHtml(clinicName)}</div>
-    <div class="meta">${escapeHtml(clinicTitle)}</div>
-    ${clinicAddress ? `<div class="meta">${escapeHtml(clinicAddress).replace(/\n/g, "<br/>")}</div>` : ""}
-    ${clinicPhone ? `<div class="meta">Tel / هاتف: ${escapeHtml(clinicPhone)}</div>` : ""}
-    ${clinicTrn ? `<div class="meta">TRN / الرقم الضريبي: ${escapeHtml(clinicTrn)}</div>` : ""}
+  <div class="logo-wrap" id="logo-wrap">
+    <img class="logo" src="${logoPath}" alt="Clinic logo" loading="eager" decoding="async" onerror="document.getElementById('logo-wrap').style.display='none'" />
   </div>
 
-  <div class="title center">PAYMENT RECEIPT / إيصال الدفع</div>
-  <div class="meta center">Treatment Plan Collection / تحصيل خطة العلاج</div>
-  <div class="divider"></div>
+  <div class="double">PAYMENT RECEIPT / إيصال الدفع</div>
+
+  <div class="clinic-name">${escapeHtml(clinicName)}</div>
+  <div class="address">
+    ${clinicTitle ? `<div>${escapeHtml(clinicTitle)}</div>` : ""}
+    ${clinicAddress ? clinicAddress.split(/\n|\n/).map((line: string) => `<div>${escapeHtml(line)}</div>`).join("") : ""}
+    ${clinicPhone ? `<div>${escapeHtml(`Tel / هاتف: ${clinicPhone}`)}</div>` : ""}
+    ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN / الرقم الضريبي: ${escapeHtml(clinicTrn)}</div>` : ""}
+  </div>
+
+  <div class="hr"></div>
 
   <div class="row"><span>Date / التاريخ</span><span>${dateStr} ${timeStr}</span></div>
   <div class="row"><span>Cashier / أمين الصندوق</span><span>${escapeHtml(ctx.cashierName || "Reception")}</span></div>
   <div class="row"><span>Ref / المرجع</span><span>${escapeHtml(referenceNo)}</span></div>
 
-  <div class="divider"></div>
+  <div class="hr"></div>
   <div class="row"><span>Patient / المريض</span><span>${escapeHtml(ctx.patientName)}</span></div>
   ${ctx.patientFileNo ? `<div class="row"><span>File No. / رقم الملف</span><span>#${escapeHtml(ctx.patientFileNo)}</span></div>` : ""}
   <div class="row"><span>Plan / الخطة</span><span>${escapeHtml(ctx.planTitle)}</span></div>
   <div class="row"><span>Arrangement / الترتيب</span><span>${escapeHtml(ctx.paymentArrangement)}</span></div>
 
-  <div class="divider"></div>
-  <div class="meta" style="font-weight:700; margin-bottom:2px;">Selected Services / الخدمات المختارة</div>
+  <div class="hr"></div>
+  <div class="head-row"><span>Selected Services / الخدمات المختارة</span><span></span></div>
   ${serviceRows}
 
-  <div class="divider"></div>
-  <div class="meta" style="font-weight:700; margin-bottom:2px;">Payment Breakdown / تفاصيل الدفع</div>
+  <div class="hr"></div>
+  <div class="head-row"><span>Payment Breakdown / تفاصيل الدفع</span><span></span></div>
   ${allocationRows}
 
-  <div class="divider"></div>
-  <div class="totals">
-    <div class="row"><span>Plan Total / إجمالي الخطة</span><span>AED ${Number(ctx.agreedTotal || 0).toFixed(2)}</span></div>
-    <div class="row"><span>Invoice Settled Today / الفاتورة المسددة اليوم</span><span>AED ${Number(ctx.amountSettledToday || 0).toFixed(2)}</span></div>
-    <div class="row"><span>Payment Fee / رسوم الدفع</span><span>AED ${Number(ctx.totalFeeAmount || 0).toFixed(2)}</span></div>
-    <div class="row total"><span>Total Customer Paid / إجمالي ما دفعه العميل</span><span>AED ${Number(ctx.totalCustomerPaid || 0).toFixed(2)}</span></div>
-    <div class="row"><span>Remaining Plan Balance / الرصيد المتبقي للخطة</span><span>AED ${Number(ctx.remainingAfterToday || 0).toFixed(2)}</span></div>
-  </div>
+  <div class="hr"></div>
+  <div class="row"><span>Plan Total / إجمالي الخطة</span><span>AED ${Number(ctx.agreedTotal || 0).toFixed(2)}</span></div>
+  <div class="row"><span>Invoice Settled Today / الفاتورة المسددة اليوم</span><span>AED ${Number(ctx.amountSettledToday || 0).toFixed(2)}</span></div>
+  <div class="row"><span>Payment Fee / رسوم الدفع</span><span>AED ${Number(ctx.totalFeeAmount || 0).toFixed(2)}</span></div>
+  <div class="row" style="font-weight:700;"><span>Total Customer Paid / إجمالي ما دفعه العميل</span><span>AED ${Number(ctx.totalCustomerPaid || 0).toFixed(2)}</span></div>
+  <div class="row"><span>Remaining Plan Balance / الرصيد المتبقي للخطة</span><span>AED ${Number(ctx.remainingAfterToday || 0).toFixed(2)}</span></div>
 
-  <div class="footer">${escapeHtml(receiptThankYou)}</div>
-  <div class="footer">${escapeHtml(receiptFinalMessage)}</div>
-  <div class="divider"></div>
+  <div class="hr"></div>
+  <div class="footer-center">${escapeHtml(receiptThankYou)}</div>
+  <div class="footer-center">${escapeHtml(receiptFinalMessage)}</div>
+  <div class="hr"></div>
   ${qrHtml}
 </body>
 </html>`;
