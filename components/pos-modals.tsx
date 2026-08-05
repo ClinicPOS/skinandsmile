@@ -2658,9 +2658,16 @@ export function ReceiptHistoryModal({
     alert(`Refund of AED ${totalRefund.toFixed(2)} processed successfully.`);
   }
 
-  function reprintReceipt(receipt: Receipt) {
+  async function reprintReceipt(receipt: Receipt) {
+    let receiptItems = receiptItemsMap[receipt.id] || [];
+    
+    // Load items if not already in the map
+    if (receiptItems.length === 0) {
+      const { data } = await supabase.from("receipt_items").select("*").eq("receipt_id", receipt.id);
+      receiptItems = data || [];
+    }
+    
     const receptionist = allReceptionists.find((r) => r.id === receipt.receptionist_id);
-    const receiptItems = receiptItemsMap[receipt.id] || [];
     const receiptDate = receipt.created_at ? new Date(receipt.created_at) : new Date();
     const dateValue = receiptDate.toLocaleDateString("en-GB");
     const timeValue = receiptDate.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
