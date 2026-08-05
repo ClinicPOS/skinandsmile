@@ -80,6 +80,7 @@ create table if not exists public.receipt_items (
   doctor_id uuid,
   quantity int default 1,
   price numeric(10,2),
+  original_price numeric(12,2),
   total numeric(12,2),
   created_at timestamptz not null default now()
 );

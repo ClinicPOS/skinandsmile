@@ -29,6 +29,8 @@ type LookupItem = {
   id: string;
   name: string;
   clinic_id?: string;
+  price?: number | null;
+  standard_price?: number | null;
 };
 
 type Patient = {
@@ -70,6 +72,7 @@ type ReceiptItem = {
   quantity: number;
   price: number;
   total: number;
+  original_price?: number | null;
 };
 
 type HistoryEntry = {
@@ -83,6 +86,7 @@ type HistoryEntry = {
   total: number;
   subtotal?: number;
   vat?: number;
+  discount_amount?: number | null;
   payment_method?: string | null;
   notes?: string | null;
   receipt_number?: number | null;
@@ -146,8 +150,8 @@ export default function ReceiptHistoryPage() {
       fetchAllRows("patients", "id, name, phone, patient_number"),
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
       supabase.from("receptionist").select("id, name, clinic_id").order("name", { ascending: true }),
-      supabase.from("services").select("id, name").order("name", { ascending: true }),
-      supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total"),
+      supabase.from("services").select("id, name, price, standard_price, pricing_type").order("name", { ascending: true }),
+      supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total, original_price"),
       supabase.from("clinics").select("*"),
       fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no"),
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
@@ -264,6 +268,8 @@ export default function ReceiptHistoryPage() {
           id: selectedReceipt.id,
           name: selectedReceipt.treatment_plan_title || "Treatment plan payment",
           quantity: 1,
+          price: Number(selectedReceipt.total || 0),
+          originalPrice: null,
           total: Number(selectedReceipt.total || 0),
         },
       ];
@@ -278,6 +284,14 @@ export default function ReceiptHistoryPage() {
           id: item.service_id,
           name: service?.name || "Service",
           quantity: item.quantity,
+          price: Number(item.price ?? 0),
+          originalPrice: item.original_price != null
+            ? Number(item.original_price)
+            : service?.standard_price != null
+              ? Number(service.standard_price)
+              : service?.price != null
+                ? Number(service.price)
+                : null,
           total: item.total,
         };
       });
@@ -345,6 +359,20 @@ export default function ReceiptHistoryPage() {
       outstandingBalance > 0.005 ? "PARTIALLY PAID"
       : amountPaid < 0.005 ? "UNPAID"
       : "PAID";
+    const receiptDiscountAmount = (() => {
+      const storedDiscount = Number(selectedReceipt.discount_amount ?? 0);
+      if (storedDiscount > 0.0049) {
+        return storedDiscount;
+      }
+      return selectedReceiptLineItems.reduce((sum, item) => {
+        const currentPrice = item.quantity > 0 ? Number(item.total || 0) / item.quantity : Number(item.total || 0);
+        const originalPrice = item.originalPrice != null ? Number(item.originalPrice) : null;
+        if (originalPrice != null && originalPrice > currentPrice + 0.0049) {
+          return sum + (originalPrice - currentPrice) * item.quantity;
+        }
+        return sum;
+      }, 0);
+    })();
 
     return generateInvoiceHtml({
       clinic: clinic as any,
@@ -362,8 +390,13 @@ export default function ReceiptHistoryPage() {
       items: selectedReceiptLineItems.map((item) => ({
         description: item.name,
         quantity: item.quantity,
-        unitPrice: Number(item.total) / Math.max(1, item.quantity),
+        originalUnitPrice: item.originalPrice != null ? Number(item.originalPrice) : null,
+        unitPrice: Number(item.price ?? 0),
+        discountAmount: item.originalPrice != null && item.quantity ? 
+          Math.max(0, (Number(item.originalPrice) - Number(item.price ?? 0)) * item.quantity) : 
+          undefined,
       })),
+      totalDiscount: receiptDiscountAmount,
       vatAmount: Number(selectedReceipt.vat ?? 0),
       paymentFeeAmount: gatewayFee > 0 ? gatewayFee : 0,
       grandTotal,
@@ -512,12 +545,41 @@ export default function ReceiptHistoryPage() {
     const doctorNameForReceipt = doctors.find((d) => d.id === selectedReceipt.doctor_id)?.name || "-";
     const cashierName = receptionists.find((r) => r.id === selectedReceipt.receptionist_id)?.name || "Reception";
 
+    const receiptDiscountAmount = (() => {
+      const storedDiscount = Number(selectedReceipt.discount_amount ?? 0);
+      if (storedDiscount > 0.0049) {
+        return storedDiscount;
+      }
+      return selectedReceiptLineItems.reduce((sum, item) => {
+        const quantity = Number(item.quantity ?? 1);
+        const finalUnitPrice = Number(item.price ?? 0);
+        const originalUnitPrice = item.originalPrice != null ? Number(item.originalPrice) : finalUnitPrice;
+        if (originalUnitPrice > finalUnitPrice + 0.0049) {
+          return sum + (originalUnitPrice - finalUnitPrice) * quantity;
+        }
+        return sum;
+      }, 0);
+    })();
+
     const itemsHtml = selectedReceiptLineItems
-      .map((item) => `
+      .map((item) => {
+        const quantity = Number(item.quantity ?? 1);
+        const finalUnitPrice = Number(item.price ?? 0);
+        const originalUnitPrice = item.originalPrice != null ? Number(item.originalPrice) : finalUnitPrice;
+        
+        const originalLineTotal = originalUnitPrice * quantity;
+        const finalLineTotal = finalUnitPrice * quantity;
+        const hasDiscount = originalUnitPrice > finalUnitPrice + 0.0049;
+        
+        const priceHtml = hasDiscount
+          ? `AED ${originalLineTotal.toFixed(2)}`
+          : `AED ${originalLineTotal.toFixed(2)}`;
+        return `
         <div class="row item-row">
           <span class="item-name">${item.name}</span>
-          <span class="amount">AED ${Number(item.total).toFixed(2)}</span>
-        </div>`)
+          <span class="amount">${priceHtml}</span>
+        </div>`;
+      })
       .join("");
 
     const paymentSection = `
@@ -577,6 +639,7 @@ export default function ReceiptHistoryPage() {
         ${itemsHtml || '<div class="center">No services selected</div>'}
         <div class="hr"></div>
         <div class="row"><span>Subtotal / \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0627\u0644\u062c\u0632\u0626\u064a</span><span>AED ${Number(selectedReceipt.subtotal).toFixed(2)}</span></div>
+        ${receiptDiscountAmount > 0 ? `<div class="row"><span>Discount / \u062e\u0635\u0645</span><span>- AED ${receiptDiscountAmount.toFixed(2)}</span></div>` : ""}
         <div class="row"><span>VAT / \u0627\u0644\u0636\u0631\u064a\u0628\u0629</span><span>AED ${Number(selectedReceipt.vat).toFixed(2)}</span></div>
         ${Number(selectedReceipt.gateway_fee || 0) > 0 ? `<div class="row"><span>${selectedReceipt.gateway_fee_provider || "Installment"} Fee</span><span>AED ${Number(selectedReceipt.gateway_fee || 0).toFixed(2)}</span></div>` : ""}
         <div class="hr" style="margin:4px 0;"></div>

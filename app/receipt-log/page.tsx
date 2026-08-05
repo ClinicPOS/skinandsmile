@@ -82,7 +82,7 @@ export default function ReceiptLogPage() {
       supabase.from("receptionist").select("*"),
       supabase.from("clinics").select("*"),
       supabase.from("doctors").select("*"),
-      supabase.from("services").select("id, name"),
+      supabase.from("services").select("id, name, price, standard_price, pricing_type"),
       supabase.from("refunds").select("*"),
     ]);
     if (receiptsRes.status === "fulfilled") setReceipts(receiptsRes.value.data || []);
@@ -382,11 +382,25 @@ export default function ReceiptLogPage() {
     const vat = Number(selectedReceipt.vat || 0);
     const total = Number(selectedReceipt.total || 0);
     const itemsHtml = receiptItems
-      .map((item) => `
+      .map((item) => {
+        const service = services.find((s) => s.id === item.service_id);
+        const originalPrice = (item as any).original_price != null
+          ? Number((item as any).original_price)
+          : service?.standard_price != null
+            ? Number(service.standard_price)
+            : service?.price != null
+              ? Number(service.price)
+              : null;
+        const currentPrice = Number(item.price || 0);
+        const priceHtml = originalPrice != null && originalPrice > currentPrice + 0.0049
+          ? `<span style="display:block;text-decoration:line-through;font-size:9px;color:#9ca3af;">AED ${originalPrice.toFixed(2)}</span><span style="display:block;">AED ${currentPrice.toFixed(2)}</span>`
+          : `AED ${currentPrice.toFixed(2)}`;
+        return `
         <div class="row item-row">
-          <span class="item-name">${services.find((s) => s.id === item.service_id)?.name || "Service"}</span>
-          <span class="amount">AED ${Number(item.price).toFixed(2)}</span>
-        </div>`)
+          <span class="item-name">${service?.name || "Service"}</span>
+          <span class="amount">${priceHtml}</span>
+        </div>`;
+      })
       .join("");
 
     return `<!doctype html>
@@ -482,6 +496,21 @@ export default function ReceiptLogPage() {
     const previouslyRefunded = receiptRefunds.reduce((s: number, r: any) => s + Number(r.total_amount || 0), 0);
     const hasRefund = previouslyRefunded > 0.005;
     const outstandingBalance = Math.max(0, grandTotal - amountPaid);
+    const computedDiscountAmount = (() => {
+      const storedDiscount = Number(selectedReceipt.discount_amount ?? 0);
+      if (storedDiscount > 0.0049) {
+        return storedDiscount;
+      }
+      return receiptItems.reduce((sum: number, item: any) => {
+        const currentPrice = Number(item.price ?? 0);
+        const originalPrice = item.original_price != null ? Number(item.original_price) : null;
+        const quantity = Number(item.quantity ?? 1);
+        if (originalPrice != null && originalPrice > currentPrice + 0.0049) {
+          return sum + (originalPrice - currentPrice) * quantity;
+        }
+        return sum;
+      }, 0);
+    })();
     const invoiceStatus: InvoiceStatus =
       hasRefund ? "REFUNDED"
       : outstandingBalance > 0.005 ? "PARTIALLY PAID"
@@ -506,9 +535,17 @@ export default function ReceiptLogPage() {
         return {
           description: svc?.name || "Service",
           quantity: Number(item.quantity ?? 1),
+          originalUnitPrice: item.original_price != null
+            ? Number(item.original_price)
+            : svc?.standard_price != null
+              ? Number(svc.standard_price)
+              : svc?.price != null
+                ? Number(svc.price)
+                : null,
           unitPrice: Number(item.price ?? 0),
         };
       }),
+      totalDiscount: computedDiscountAmount,
       vatAmount: Number(selectedReceipt.vat ?? 0),
       paymentFeeAmount: gatewayFee > 0 ? gatewayFee : 0,
       grandTotal,
@@ -723,7 +760,25 @@ export default function ReceiptLogPage() {
                               {receiptItems.map((item) => (
                                 <div key={item.id} className="flex justify-between text-sm">
                                   <span className="text-slate-700">{services.find((s) => s.id === item.service_id)?.name || "Service"}</span>
-                                  <span className="font-semibold text-slate-900">AED {Number(item.price).toFixed(2)}</span>
+                                  <span className="font-semibold text-slate-900">
+                                    {(() => {
+                                      const service = services.find((s) => s.id === item.service_id);
+                                      const original = service?.standard_price != null
+                                        ? Number(service.standard_price)
+                                        : service?.price != null
+                                          ? Number(service.price)
+                                          : null;
+                                      const current = Number(item.price || 0);
+                                      return original != null && original > current + 0.0049 ? (
+                                      <>
+                                        <span className="block text-xs font-normal text-slate-400 line-through">AED {original.toFixed(2)}</span>
+                                        <span className="block">AED {current.toFixed(2)}</span>
+                                      </>
+                                      ) : (
+                                        <>AED {current.toFixed(2)}</>
+                                      );
+                                    })()}
+                                  </span>
                                 </div>
                               ))}
                             </div>

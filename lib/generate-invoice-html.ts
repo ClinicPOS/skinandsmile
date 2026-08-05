@@ -19,6 +19,8 @@ export interface InvoiceItem {
   description: string;
   providerName?: string | null;
   quantity: number;
+  /** Original unit price before a manual edit or promotion, when available */
+  originalUnitPrice?: number | null;
   unitPrice: number;
   /** Reduction from the list price for this single line */
   discountAmount?: number;
@@ -201,9 +203,15 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
   });
 
   // ── computed totals ────────────────────────────────────────────────────────
-  const subtotal = opts.items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
-  const totalDiscount = opts.totalDiscount ?? opts.items.reduce((sum, item) => sum + (item.discountAmount ?? 0), 0);
-  const preVat = subtotal - totalDiscount;
+  const subtotal = opts.items.reduce((sum, item) => {
+    const originalUnitPrice = item.originalUnitPrice != null ? Number(item.originalUnitPrice) : null;
+    const priceWasEdited = originalUnitPrice != null && originalUnitPrice > Number(item.unitPrice) + 0.0049;
+    const baseUnitPrice = priceWasEdited ? originalUnitPrice : Number(item.unitPrice);
+    return sum + baseUnitPrice * item.quantity;
+  }, 0);
+  const totalDiscount = Math.max(0, Math.min(subtotal, opts.totalDiscount ?? opts.items.reduce((sum, item) => sum + (item.discountAmount ?? 0), 0)));
+  const originalSubtotal = subtotal;
+  const preVat = Math.max(0, subtotal - totalDiscount);
   const vatAmount = opts.vatAmount ?? 0;
   const paymentFee = opts.paymentFeeAmount ?? 0;
   const grandTotal = opts.grandTotal;
@@ -215,20 +223,25 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
 
   // ── services table rows ────────────────────────────────────────────────────
   const itemsRows = opts.items.map((item, idx) => {
-    const lineNet = item.unitPrice * item.quantity;
+    const originalUnitPrice = item.originalUnitPrice != null ? Number(item.originalUnitPrice) : null;
+    const priceWasEdited = originalUnitPrice != null && originalUnitPrice > Number(item.unitPrice) + 0.0049;
+    const displayUnitPrice = priceWasEdited ? originalUnitPrice : Number(item.unitPrice);
+    const lineBasePrice = priceWasEdited ? originalUnitPrice : Number(item.unitPrice);
+    const lineNet = lineBasePrice * item.quantity;
     const disc = item.discountAmount ?? 0;
-    const taxable = lineNet - disc;
+    const taxable = Math.max(0, lineNet - disc);
     const vatRate = item.vatRate ?? (vatAmount > 0 ? 0.05 : 0);
     const vatLine = truncateCurrency(taxable * vatRate);
     const lineTotal = truncateCurrency(taxable + vatLine);
     const teethLabel = item.teeth && item.teeth.length > 0 ? ` <span style="font-size:8px;color:#888;">(Tooth #${item.teeth.join(", #")})</span>` : "";
+    const unitPriceHtml = fmt(displayUnitPrice);
     return `
       <tr>
         <td style="text-align:center;">${idx + 1}</td>
         <td>${escHtml(item.description)}${teethLabel}</td>
         <td>${escHtml(item.providerName || "-")}</td>
         <td style="text-align:center;">${item.quantity}</td>
-        <td style="text-align:right;">${fmt(item.unitPrice)}</td>
+        <td style="text-align:right;">${unitPriceHtml}</td>
         <td style="text-align:right;">${disc > 0 ? fmt(disc) : "-"}</td>
         <td style="text-align:right;">${fmt(taxable)}</td>
         <td style="text-align:center;">${vatRate > 0 ? `${(vatRate * 100).toFixed(0)}%` : "0%"}</td>
@@ -622,7 +635,11 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
     <div>
       <div class="section-heading">Summary / الملخص</div>
       <table class="totals-table">
-        <tr><td class="label">Subtotal / المجموع الفرعي</td><td class="value">${fmt(subtotal)}</td></tr>
+        ${totalDiscount > 0.005 ? `
+        <tr>
+          <td class="label">Subtotal / المجموع الفرعي</td>
+          <td class="value">${fmt(originalSubtotal)}</td>
+        </tr>` : `<tr><td class="label">Subtotal / المجموع الفرعي</td><td class="value">${fmt(subtotal)}</td></tr>`}
         ${totalDiscount > 0.005 ? `<tr><td class="label">Discount / الخصم</td><td class="value" style="color:var(--primary);">− ${fmt(totalDiscount)}</td></tr>` : ""}
         ${vatAmount > 0.005 ? `
         <tr><td class="label">Amount Before VAT</td><td class="value">${fmt(preVat)}</td></tr>

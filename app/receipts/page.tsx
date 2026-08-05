@@ -33,6 +33,52 @@ import { generateInvoiceHtml as buildInvoiceHtml, type InvoiceAllocationRow, typ
 import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
 import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 
+type PosPricingService = {
+  originalPrice?: number | null;
+  price?: number | null;
+  quantity?: number | null;
+};
+
+function summarizePosServicePricing(service: PosPricingService) {
+  const originalPrice = Number(service.originalPrice ?? 0);
+  const currentPrice = Number(service.price ?? 0);
+  const quantity = Number(service.quantity ?? 1);
+  const hasManualDiscount = originalPrice > 0 && originalPrice > currentPrice + 0.0049;
+  const originalLineTotal = hasManualDiscount ? originalPrice * quantity : currentPrice * quantity;
+  const discountedLineTotal = currentPrice * quantity;
+  const manualDiscountAmount = hasManualDiscount ? (originalPrice - currentPrice) * quantity : 0;
+
+  return {
+    originalLineTotal,
+    discountedLineTotal,
+    manualDiscountAmount,
+  };
+}
+
+function summarizeCartPricing(services: PosPricingService[], discountInput: string, discountType: "AED" | "%") {
+  const lineSummaries = services.map(summarizePosServicePricing);
+  const originalSubtotal = lineSummaries.reduce((sum, line) => sum + line.originalLineTotal, 0);
+  const discountedSubtotal = lineSummaries.reduce((sum, line) => sum + line.discountedLineTotal, 0);
+  const itemDiscountAmount = lineSummaries.reduce((sum, line) => sum + line.manualDiscountAmount, 0);
+  const parsedDiscountInput = parseFloat(discountInput) || 0;
+  const globalDiscountAmount = parsedDiscountInput <= 0
+    ? 0
+    : discountType === "%"
+      ? Math.min(originalSubtotal, (originalSubtotal * parsedDiscountInput) / 100)
+      : Math.min(originalSubtotal, parsedDiscountInput);
+  const totalDiscount = Math.max(0, Math.min(originalSubtotal, itemDiscountAmount + globalDiscountAmount));
+  const netSubtotal = Math.max(0, originalSubtotal - totalDiscount);
+
+  return {
+    originalSubtotal,
+    discountedSubtotal,
+    itemDiscountAmount,
+    globalDiscountAmount,
+    totalDiscount,
+    netSubtotal,
+  };
+}
+
 const paymentOptions = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"];
 const allocationMethodOptions: Array<{ value: PaymentMethodVariant; label: string }> = [
   { value: "cash", label: "Cash" },
@@ -1087,14 +1133,10 @@ export default function ReceiptsPage() {
     await loadHoldCount();
   }
 
-  const subtotal = selectedServices.reduce((sum, service) => sum + Number(service.price) * (service.quantity ?? 1), 0);
-  const discountAmount = (() => {
-    const v = parseFloat(discountInput) || 0;
-    if (v <= 0) return 0;
-    if (discountType === "%") return Math.min(subtotal, (subtotal * v) / 100);
-    return Math.min(subtotal, v);
-  })();
-  const preVatTotal = subtotal - discountAmount;
+  const pricingSummary = summarizeCartPricing(selectedServices, discountInput, discountType);
+  const subtotal = pricingSummary.originalSubtotal;
+  const discountAmount = pricingSummary.totalDiscount;
+  const preVatTotal = pricingSummary.netSubtotal;
   const vat = activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? Math.round(preVatTotal * 0.05 * 100) / 100 : 0;
   const total = preVatTotal + vat;
   const previewAllocations = buildPaymentAllocations(paymentAllocationDrafts, getAmountDueToday(), total, vat);
@@ -3413,11 +3455,7 @@ export default function ReceiptsPage() {
           total_before_gateway_fee: total,
           gateway_fee: roundedPaymentFees > 0 ? roundedPaymentFees : null,
           gateway_fee_provider: gatewayFeeProvider,
-          discount_amount: (() => {
-            const itemDiscount = selectedServices.reduce((sum, s) => s.originalPrice != null ? sum + Math.max(0, Number(s.originalPrice) - Number(s.price)) : sum, 0);
-            const total = itemDiscount + discountAmount;
-            return total > 0 ? total : null;
-          })(),
+          discount_amount: discountAmount > 0 ? discountAmount : null,
           notes: null,
           payment_method: isFullyCoveredByCredit && creditApplied > 0.0049
             ? `Patient Credit (AED ${creditApplied.toFixed(2)})`
@@ -3443,12 +3481,15 @@ export default function ReceiptsPage() {
 
     const items = selectedServices.map((service, i) => {
       const qty = service.quantity ?? 1;
+      const currentPrice = Number(service.price ?? 0);
+      const originalPrice = service.originalPrice != null ? Number(service.originalPrice) : currentPrice;
       return {
         receipt_id: receiptData.id,
         service_id: service.id,
         quantity: qty,
-        price: service.price,
-        total: service.price * qty,
+        price: currentPrice,
+        total: currentPrice * qty,
+        original_price: originalPrice,
         teeth: normalizeTeethForItem(service, i),
       };
     });
@@ -3682,6 +3723,7 @@ export default function ReceiptsPage() {
       items: selectedServices.map((svc, i) => ({
         description: svc.name,
         quantity: svc.quantity ?? 1,
+        originalUnitPrice: svc.originalPrice != null ? Number(svc.originalPrice) : null,
         unitPrice: Number(svc.price),
         discountAmount: svc.originalPrice != null ? Math.max(0, Number(svc.originalPrice) - Number(svc.price)) * (svc.quantity ?? 1) : 0,
         teeth: cartItemTeeth[i] || [],
@@ -3801,7 +3843,9 @@ export default function ReceiptsPage() {
     const itemsHtml = selectedServices
       .map((service, index) => {
         const qty = service.quantity ?? 1;
-        const lineTotal = Number(service.price) * qty;
+        const discountedLineTotal = Number(service.price) * qty;
+        const originalLineTotal = service.originalPrice != null ? Number(service.originalPrice) * qty : null;
+        const displayLineTotal = originalLineTotal != null ? originalLineTotal : discountedLineTotal;
         const qtyLabel = qty > 1
           ? ` <span style="font-size:9px;">×${qty} ${service.billing_unit || "Unit"}</span>`
           : "";
@@ -3811,15 +3855,12 @@ export default function ReceiptsPage() {
           ? `
           <div class="row item-row">
             <span class="item-name">${service.name}${qtyLabel}${teethDisplay} <span style="font-size:10px;">(Promo)</span></span>
-            <span class="amount" style="text-align:right;">
-              <span style="text-decoration:line-through;font-size:10px;">AED ${Number(service.originalPrice * qty).toFixed(2)}</span><br/>
-              ${lineTotal === 0 ? "Free" : `AED ${lineTotal.toFixed(2)}`}
-            </span>
+            <span class="amount" style="text-align:right;">${displayLineTotal === 0 ? "Free" : `AED ${displayLineTotal.toFixed(2)}`}</span>
           </div>`
           : `
           <div class="row item-row">
             <span class="item-name">${service.name}${qtyLabel}${teethDisplay}</span>
-            <span class="amount">${lineTotal === 0 ? "Free" : `AED ${lineTotal.toFixed(2)}`}</span>
+            <span class="amount">${discountedLineTotal === 0 ? "Free" : `AED ${discountedLineTotal.toFixed(2)}`}</span>
           </div>`;
       })
       .join("");
@@ -3831,6 +3872,8 @@ export default function ReceiptsPage() {
     const remainingForReceipt = getRemainingAfterCredit();
     const outstandingForReceipt = getOutstandingAfterPayment();
     const isPartialForReceipt = outstandingForReceipt > 0.0049;
+    const originalSubtotal = subtotal;
+    const grandTotalBeforeFees = Math.max(0, subtotal - discountAmount);
     const escapeReceiptText = (value: string) =>
       value
         .replace(/&/g, "&amp;")
@@ -3968,8 +4011,9 @@ export default function ReceiptsPage() {
 
         <div class="hr"></div>
 
-        <div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>
+        ${discountAmount > 0 ? `<div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${originalSubtotal.toFixed(2)}</span></div>` : `<div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>`}
         ${discountAmount > 0 ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
+        <div class="row"><span>Grand Total / الإجمالي</span><span>AED ${grandTotalBeforeFees.toFixed(2)}</span></div>
         <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
         ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee</span><span>AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
         <div class="hr" style="margin:4px 0;"></div>
