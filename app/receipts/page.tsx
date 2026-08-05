@@ -30,6 +30,7 @@ import { fromMinorUnits, toMinorUnits, truncateCurrency } from "../../lib/money"
 import { getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { generateInvoiceHtml as buildInvoiceHtml, type InvoiceAllocationRow, type InvoiceStatus } from "../../lib/generate-invoice-html";
+import { buildThermalReceiptHtml as buildThermalReceiptHtmlShared, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
 import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
 import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 
@@ -3781,50 +3782,11 @@ export default function ReceiptsPage() {
 
 
   function buildThermalReceiptHtml(title: string, savedReceipt?: any) {
-    const logoPath = getReceiptLogoPath(activeClinic);
-    const clinicDisplayName = (activeClinic?.receipt_print_name || activeClinic?.name || "Skin and Smile Dental Clinic")
-      .replace(/\s*\([^)]*\)\s*/g, " ")
-      .replace(/\s{2,}/g, " ")
-      .trim();
-    const receiptTitle = activeClinic?.receipt_title || "TAX INVOICE";
-    const isAlDanaClinic = (activeClinic?.name || "").toLowerCase().includes("al dana");
-    const clinicAddress = activeClinic?.address || (
-      isAlDanaClinic
-        ? "Al Dana Center - 4th Floor room 408 - Al Maktoum Rd - Al Muraqqabat - Deira - Dubai"
-        : "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station"
-    );
-    const clinicRoom = activeClinic?.room ? `2nd Floor, Room ${activeClinic.room.replace(/^Room\s+/i, '')}` : "";
-    const clinicTrn = activeClinic?.trn || "";
-    const clinicPhone = activeClinic?.phone || (isAlDanaClinic ? "054 460 1011" : "");
-    const clinicWhatsapp = activeClinic?.whatsapp || "";
-    const isSkinAndSmile = !activeClinic || activeClinic.logo !== "altamuze";
-    const clinicInstagram = activeClinic?.instagram || (isSkinAndSmile ? "@skinandsmiledentalclinic" : "");
-    const clinicFacebook = activeClinic?.facebook || "";
-    const clinicTiktok = activeClinic?.tiktok || (isSkinAndSmile ? "@skinandsmile" : "");
-    const receiptVatNote = activeClinic?.receipt_vat_note || "VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه";
-    const receiptThankYou = activeClinic?.receipt_thank_you || "Thank you for visiting us / شكراً لزيارتك لنا";
-    const receiptFinalMessage = activeClinic?.receipt_final_message || "Thank you for Visiting US!";
-    const socialHtml = clinicInstagram || clinicFacebook || clinicTiktok ? `
-      <div class="footer-center" style="margin-top:6px;">Follow us:</div>
-      ${clinicInstagram ? `<div class="footer-center">Instagram: ${clinicInstagram}</div>` : ""}
-      ${clinicFacebook ? `<div class="footer-center">Facebook: ${clinicFacebook}</div>` : ""}
-      ${clinicTiktok ? `<div class="footer-center">TikTok: ${clinicTiktok}</div>` : ""}
-      ` : "";
     const now = new Date();
     const receiptForDisplay = savedReceipt ?? currentReceipt;
     const invoiceNo = receiptForDisplay?.receipt_number
       ? `#${String(receiptForDisplay.receipt_number).padStart(5, "0")}`
       : "DRAFT";
-    const qrHtml = buildReceiptQrHtml({
-      clinic: activeClinic,
-      clinicDisplayName,
-      clinicPhone,
-      clinicWhatsapp,
-      clinicInstagram,
-      clinicFacebook,
-      clinicTiktok,
-      invoiceNo,
-    });
     const dateValue = now.toLocaleDateString("en-GB");
     const timeValue = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
 
@@ -3840,216 +3802,47 @@ export default function ReceiptsPage() {
     const cashierName =
       receptionists.find((person) => person.id === (receptionistId || loginReceptionistId))?.name || "Reception";
 
-    const itemsHtml = selectedServices
-      .map((service, index) => {
-        const qty = service.quantity ?? 1;
-        const discountedLineTotal = Number(service.price) * qty;
-        const originalLineTotal = service.originalPrice != null ? Number(service.originalPrice) * qty : null;
-        const displayLineTotal = originalLineTotal != null ? originalLineTotal : discountedLineTotal;
-        const qtyLabel = qty > 1
-          ? ` <span style="font-size:9px;">×${qty} ${service.billing_unit || "Unit"}</span>`
-          : "";
-        const teethLabel = normalizeTeethForItem(service, index);
-        const teethDisplay = teethLabel.length > 0 ? ` (Tooth #${teethLabel.join(", #")})` : "";
-        return service.originalPrice != null
-          ? `
-          <div class="row item-row">
-            <span class="item-name">${service.name}${qtyLabel}${teethDisplay} <span style="font-size:10px;">(Promo)</span></span>
-            <span class="amount" style="text-align:right;">${displayLineTotal === 0 ? "Free" : `AED ${displayLineTotal.toFixed(2)}`}</span>
-          </div>`
-          : `
-          <div class="row item-row">
-            <span class="item-name">${service.name}${qtyLabel}${teethDisplay}</span>
-            <span class="amount">${discountedLineTotal === 0 ? "Free" : `AED ${discountedLineTotal.toFixed(2)}`}</span>
-          </div>`;
-      })
-      .join("");
-
     const receiptAllocations = buildComputedAllocationsForSave();
     const allocationFeeTotal = receiptAllocations.reduce((sum, row) => sum + row.feeAmount, 0);
     const paidTodayForReceipt = Math.round((getAmountDueToday() + allocationFeeTotal) * 100) / 100;
     const creditUsedForReceipt = getCreditApplied();
     const remainingForReceipt = getRemainingAfterCredit();
     const outstandingForReceipt = getOutstandingAfterPayment();
-    const isPartialForReceipt = outstandingForReceipt > 0.0049;
     const originalSubtotal = subtotal;
-    const grandTotalBeforeFees = Math.max(0, subtotal - discountAmount);
-    const escapeReceiptText = (value: string) =>
-      value
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-    const notesForReceipt = escapeReceiptText(notes.trim());
-    const paymentStatusRows = `
-      ${creditUsedForReceipt > 0.0049 ? `
-      <div class="row"><span>Patient Credit Used / الرصيد المستخدم</span><span>: - AED ${creditUsedForReceipt.toFixed(2)}</span></div>
-      <div class="row"><span>Payment Received / المبلغ المستلم</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>` : ""}
-      ${isPartialForReceipt ? `
-      ${creditUsedForReceipt <= 0.0049 ? `<div class="row"><span>Paid Today / المدفوع اليوم</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>` : ""}
-      <div class="row"><span>Outstanding / المبلغ المتبقي</span><span>: AED ${outstandingForReceipt.toFixed(2)}</span></div>` : ""}
-      <div class="row" style="font-weight:700;"><span>Payment Status / حالة الدفع</span><span>: ${isPartialForReceipt ? "PARTIAL PAYMENT" : "PAID"}</span></div>
-    `;
 
-    let paymentSection = `
-      <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${
-        creditUsedForReceipt > 0.0049 && remainingForReceipt <= 0.0049
-          ? "PATIENT CREDIT"
-          : (paymentSummaryLabel(receiptAllocations) || selectedPaymentMethod || "-").toUpperCase()
-      }</span></div>
-      ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee / رسوم الدفع</span><span>: AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
-      <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
-    `;
-    if (receiptAllocations.length > 0) {
-      paymentSection = `
-        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${paymentSummaryLabel(receiptAllocations).toUpperCase()}</span></div>
-        ${receiptAllocations.map((row) => `
-          <div class="row"><span>${paymentVariantLabel(row.methodVariant)}</span><span>: AED ${row.customerChargedAmount.toFixed(2)}</span></div>
-          <div class="row"><span>Invoice Allocated</span><span>: AED ${row.invoiceAllocationAmount.toFixed(2)}</span></div>
-          ${row.feeAmount > 0 ? `<div class="row"><span>Fee (${(row.feeRate * 100).toFixed(1)}%)</span><span>: AED ${row.feeAmount.toFixed(2)}</span></div>` : ""}
-          ${row.providerReferenceNumber ? `<div class="row"><span>Provider Reference</span><span>: ${row.providerReferenceNumber}</span></div>` : ""}
-        `).join("")}
-        <div class="row"><span>Total Customer Pays</span><span>: AED ${paidTodayForReceipt.toFixed(2)}</span></div>
-      `;
-    }
+    const options: BuildThermalReceiptHtmlOptions = {
+      title,
+      clinic: activeClinic,
+      invoiceNumber: invoiceNo,
+      dateValue,
+      timeValue,
+      cashierName,
+      doctorName: doctorNameForReceipt,
+      patientName: patientNameForReceipt,
+      patientPhone: patientMobileForReceipt,
+      patientFileNumber: String(patientIdForReceipt),
+      doctorField: activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب",
+      items: selectedServices.map((service) => ({
+        name: service.name,
+        quantity: service.quantity ?? 1,
+        price: Number(service.price),
+        originalPrice: service.originalPrice != null ? Number(service.originalPrice) : undefined,
+        teeth: normalizeTeethForItem(service, selectedServices.indexOf(service)).map(String),
+      })),
+      subtotal,
+      discountAmount,
+      discountType,
+      discountInput,
+      vat,
+      total,
+      allocations: receiptAllocations,
+      creditUsed: creditUsedForReceipt,
+      outstandingBalance: outstandingForReceipt,
+      notes: notes.trim(),
+      paymentMethod: selectedPaymentMethod,
+    };
 
-    return `<!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>${title}</title>
-        <style>
-          * { box-sizing: border-box; }
-          body {
-            font-family: Arial, Helvetica, sans-serif;
-            width: 72mm;
-            margin: 0;
-            padding: 2mm;
-            font-size: 10px;
-            line-height: 1.25;
-            color: #000;
-            background: #fff;
-            overflow-x: hidden;
-            -webkit-text-size-adjust: 100%;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
-            font-weight: 500;
-          }
-          .center { text-align: center; }
-          .hr { border-top: 1px dashed #000; margin: 5px 0; }
-          .double {
-            border-top: 2px solid #000;
-            border-bottom: 2px solid #000;
-            padding: 3px 0;
-            margin: 5px 0;
-            text-align: center;
-            font-weight: 700;
-          }
-          .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-          .logo { max-width: 68mm; max-height: 36mm; object-fit: contain; }
-          .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
-          .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
-          .row {
-            display: flex;
-            justify-content: space-between;
-            gap: 6px;
-            margin: 1px 0;
-          }
-          .row span:first-child { min-width: 30mm; }
-          .row span:last-child {
-            text-align: right;
-            flex: 1;
-            min-width: 0;
-            overflow-wrap: anywhere;
-            word-break: break-word;
-          }
-          .head-row { display: flex; justify-content: space-between; font-weight: 700; }
-          .item-row { margin: 2px 0; }
-          .item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-          .amount { text-align: right; white-space: nowrap; }
-          .footer-center { text-align: center; margin-top: 4px; }
-          @media print {
-            @page { size: 80mm auto; margin: 0; }
-            body { width: 72mm; }
-            * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; }
-            .logo { width: 100%; max-width: 68mm; max-height: 36mm; height: auto; }
-          }
-        </style>
-      </head>
-      <body>
-        <div class="logo-wrap" id="logo-wrap">
-          <img src="${logoPath}" alt="Clinic logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'" />
-        </div>
-
-        <div class="double">${receiptTitle}</div>
-
-        <div class="clinic-name">${clinicDisplayName}</div>
-
-        <div class="address">
-          ${clinicAddress.split(/\\n|\n/).map((line: string) => `<div>${line}</div>`).join("")}
-          ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
-          ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
-        </div>
-
-        <div class="hr"></div>
-
-        <div class="row"><span>Invoice No / رقم الفاتورة</span><span>: ${invoiceNo}</span></div>
-        <div class="row"><span>Date / التاريخ</span><span>: ${dateValue}</span></div>
-        <div class="row"><span>Time / الوقت</span><span>: ${timeValue}</span></div>
-        <div class="row"><span>Cashier / أمين الصندوق</span><span>: ${cashierName}</span></div>
-        <div class="row"><span>${activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب"}</span><span>: ${doctorNameForReceipt}</span></div>
-        <div class="row"><span>Patient Name / اسم المريض</span><span>: ${patientNameForReceipt}</span></div>
-        <div class="row"><span>Patient ID / معرف المريض</span><span>: ${String(patientIdForReceipt)}</span></div>
-        <div class="row"><span>Mobile / الهاتف</span><span>: ${patientMobileForReceipt}</span></div>
-
-        <div class="hr"></div>
-
-        <div class="head-row"><span>DESCRIPTION / الوصف</span><span>AMOUNT / المبلغ</span></div>
-        <div class="hr" style="margin-top:2px;"></div>
-        ${itemsHtml || '<div class="center">No services selected</div>'}
-
-        <div class="hr"></div>
-
-        ${discountAmount > 0 ? `<div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${originalSubtotal.toFixed(2)}</span></div>` : `<div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>`}
-        ${discountAmount > 0 ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
-        <div class="row"><span>Grand Total / الإجمالي</span><span>AED ${grandTotalBeforeFees.toFixed(2)}</span></div>
-        <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
-        ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee</span><span>AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
-        <div class="hr" style="margin:4px 0;"></div>
-        <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${(total + allocationFeeTotal).toFixed(2)}</span></div>
-
-        <div class="hr"></div>
-
-        ${paymentSection}
-        ${paymentStatusRows}
-  ${notesForReceipt ? `
-  <div class="hr"></div>
-  <div style="font-weight:700;">Notes / ملاحظات</div>
-  <div style="white-space:pre-wrap;overflow-wrap:anywhere;">${notesForReceipt}</div>` : ""}
-
-        <div class="hr"></div>
-
-        <div class="footer-center">${receiptVatNote}</div>
-        <div class="footer-center">${receiptThankYou}</div>
-        ${socialHtml}
-
-        <div class="hr"></div>
-
-        <div style="text-align:center;font-size:9px;line-height:1.4;">
-          ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
-          ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
-        </div>
-
-        <div class="hr"></div>
-
-        ${qrHtml}
-
-        <div class="hr"></div>
-
-        <div class="double">${receiptFinalMessage}</div>
-      </body>
-    </html>`;
+    return buildThermalReceiptHtmlShared(options);
   }
 
   function printReceipt(savedReceipt?: any) {

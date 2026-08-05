@@ -5,6 +5,7 @@ import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { generateInvoiceHtml, generateTreatmentPlanPaymentInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
+import { buildThermalReceiptHtml as buildThermalReceiptHtmlShared, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
 import { useClinicAccess } from "../../lib/clinic-access";
 import type { TreatmentPlan, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, TreatmentPlanVisit } from "../../lib/types";
 import { printTreatmentPlanPaymentReceipt } from "../../lib/print-treatment-plan-payment-receipt";
@@ -102,6 +103,7 @@ type HistoryEntry = {
   total_customer_charged_amount?: number | null;
   payment_method_summary?: string | null;
   treatment_plan_payment_allocations?: TreatmentPlanPaymentAllocation[];
+  payment_allocations?: Array<{ method_variant?: string; customer_charged_amount?: number; invoice_allocation_amount?: number; fee_amount?: number; provider_reference_number?: string | null }>;
 };
 
 export default function ReceiptHistoryPage() {
@@ -301,6 +303,75 @@ export default function ReceiptHistoryPage() {
     return patients.find((patient) => patient.id === patientId)?.name || "Unknown patient";
   }
 
+  function buildThermalReceiptHtmlForSelected(): string {
+    if (!selectedReceipt || selectedReceipt.kind === "treatment-plan") return "";
+
+    const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
+    const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
+    const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
+    const doctor = doctors.find((d) => d.id === selectedReceipt.doctor_id);
+    const issuedAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
+
+    const invoiceNo = selectedReceipt.receipt_number
+      ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
+      : selectedReceipt.id.slice(0, 8).toUpperCase();
+    const dateValue = issuedAt.toLocaleDateString("en-GB");
+    const timeValue = issuedAt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+
+    const patientName = patient?.name || "-";
+    const patientPhone = patient?.phone || "-";
+    const patientFileNumber = selectedReceipt.receipt_number
+      ? `-#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
+      : patient?.patient_number
+      ? `#${String(patient.patient_number).padStart(5, "0")}`
+      : "-";
+    const doctorName = doctor?.name || "-";
+    const cashierName = receptionist?.name || "Reception";
+
+    const grandTotal = Number(selectedReceipt.total ?? 0);
+    const discountAmount = Number(selectedReceipt.discount_amount ?? 0);
+    const subtotal = discountAmount > 0.0049 ? grandTotal + discountAmount : grandTotal;
+    const vat = Number(selectedReceipt.vat ?? 0);
+    const gatewayFee = Number(selectedReceipt.gateway_fee ?? 0);
+    const amountPaidRaw = (selectedReceipt as any).amount_paid;
+    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : grandTotal;
+    const outstandingBalance = Math.max(0, grandTotal - amountPaid);
+
+    const options: BuildThermalReceiptHtmlOptions = {
+      title: "Receipt",
+      clinic: clinic as any,
+      invoiceNumber: invoiceNo,
+      dateValue,
+      timeValue,
+      cashierName,
+      doctorName,
+      patientName,
+      patientPhone,
+      patientFileNumber,
+      doctorField: clinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب",
+      items: selectedReceiptLineItems,
+      subtotal,
+      discountAmount,
+      vat,
+      total: grandTotal,
+      allocations: (selectedReceipt.payment_allocations || []).map((allocation: any) => ({
+        methodVariant: allocation.method_variant || "payment",
+        customerChargedAmount: Number(allocation.customer_charged_amount || 0),
+        invoiceAllocationAmount: Number(allocation.invoice_allocation_amount || 0),
+        feeAmount: Number(allocation.fee_amount || 0),
+        feeRate: allocation.fee_amount && allocation.invoice_allocation_amount ? 
+          Number(allocation.fee_amount) / Number(allocation.invoice_allocation_amount) : 0,
+        providerReferenceNumber: allocation.provider_reference_number,
+      })),
+      creditUsed: 0,
+      outstandingBalance,
+      notes: selectedReceipt.notes || "",
+      paymentMethod: selectedReceipt.payment_method || "",
+    };
+
+    return buildThermalReceiptHtmlShared(options);
+  }
+
   function buildInvoiceHtmlForSelected(): string {
     if (!selectedReceipt) return "";
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
@@ -488,179 +559,7 @@ export default function ReceiptHistoryPage() {
       return;
     }
 
-    const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
-    const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
-    const logoPath = getReceiptLogoPath(clinic);
-    const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
-      .replace(/\s*\([^)]*\)\s*/g, " ")
-      .replace(/\s{2,}/g, " ")
-      .trim();
-    const receiptTitle = clinic?.receipt_title || "TAX INVOICE";
-    const isAlDanaClinic = (clinic?.name || "").toLowerCase().includes("al dana");
-    const clinicAddress = clinic?.address || (
-      isAlDanaClinic
-        ? "Al Dana Center - 4th Floor room 408 - Al Maktoum Rd - Al Muraqqabat - Deira - Dubai"
-        : "Al Satwa, Dubai, UAE\nSame Building of Almaya Supermarket\nNear Satwa Bus Station"
-    );
-    const clinicRoom = clinic?.room ? `2nd Floor, Room ${clinic.room}` : "";
-    const clinicTrn = clinic?.trn || "";
-    const clinicPhone = clinic?.phone || (isAlDanaClinic ? "054 460 1011" : "");
-    const clinicWhatsapp = clinic?.whatsapp || "";
-    const isSkinAndSmile = !clinic || clinic.logo !== "altamuze";
-    const clinicInstagram = clinic?.instagram || (isSkinAndSmile ? "@skinandsmiledentalclinic" : "");
-    const clinicFacebook = clinic?.facebook || "";
-    const clinicTiktok = clinic?.tiktok || (isSkinAndSmile ? "@skinandsmile" : "");
-    const receiptVatNote = clinic?.receipt_vat_note || "VAT Included in Above Amount / \u0627\u0644\u0636\u0631\u064a\u0628\u0629 \u0645\u0634\u0645\u0648\u0644\u0629 \u0641\u064a \u0627\u0644\u0645\u0628\u0644\u063a \u0623\u0639\u0644\u0627\u0647";
-    const receiptThankYou = clinic?.receipt_thank_you || "Thank you for visiting us / \u0634\u0643\u0631\u0627\u064b \u0644\u0632\u064a\u0627\u0631\u062a\u0643 \u0644\u0646\u0627";
-    const receiptFinalMessage = clinic?.receipt_final_message || "Thank you for Visiting US!";
-    const socialHtml = clinicInstagram || clinicFacebook || clinicTiktok ? `
-      <div class="footer-center" style="margin-top:6px;">Follow us:</div>
-      ${clinicInstagram ? `<div class="footer-center">Instagram: ${clinicInstagram}</div>` : ""}
-      ${clinicFacebook ? `<div class="footer-center">Facebook: ${clinicFacebook}</div>` : ""}
-      ${clinicTiktok ? `<div class="footer-center">TikTok: ${clinicTiktok}</div>` : ""}
-      ` : "";
-    const createdAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
-    const invoiceNo = selectedReceipt.receipt_number
-      ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
-      : "-";
-    const qrHtml = buildReceiptQrHtml({
-      clinic,
-      clinicDisplayName,
-      clinicPhone,
-      clinicWhatsapp,
-      clinicInstagram,
-      clinicFacebook,
-      clinicTiktok,
-      invoiceNo,
-    });
-    const dateValue = createdAt.toLocaleDateString("en-GB");
-    const timeValue = createdAt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
-
-    const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
-    const patientNameForReceipt = patient?.name || "-";
-    const patientMobileForReceipt = patient?.phone || "-";
-    const patientIdForReceipt = patient?.patient_number
-      ? `#${String(patient.patient_number).padStart(5, "0")}`
-      : "-";
-    const doctorNameForReceipt = doctors.find((d) => d.id === selectedReceipt.doctor_id)?.name || "-";
-    const cashierName = receptionists.find((r) => r.id === selectedReceipt.receptionist_id)?.name || "Reception";
-
-    const receiptDiscountAmount = (() => {
-      const storedDiscount = Number(selectedReceipt.discount_amount ?? 0);
-      if (storedDiscount > 0.0049) {
-        return storedDiscount;
-      }
-      return selectedReceiptLineItems.reduce((sum, item) => {
-        const quantity = Number(item.quantity ?? 1);
-        const finalUnitPrice = Number(item.price ?? 0);
-        const originalUnitPrice = item.originalPrice != null ? Number(item.originalPrice) : finalUnitPrice;
-        if (originalUnitPrice > finalUnitPrice + 0.0049) {
-          return sum + (originalUnitPrice - finalUnitPrice) * quantity;
-        }
-        return sum;
-      }, 0);
-    })();
-
-    const itemsHtml = selectedReceiptLineItems
-      .map((item) => {
-        const quantity = Number(item.quantity ?? 1);
-        const finalUnitPrice = Number(item.price ?? 0);
-        const originalUnitPrice = item.originalPrice != null ? Number(item.originalPrice) : finalUnitPrice;
-        
-        const originalLineTotal = originalUnitPrice * quantity;
-        const finalLineTotal = finalUnitPrice * quantity;
-        const hasDiscount = originalUnitPrice > finalUnitPrice + 0.0049;
-        
-        const priceHtml = hasDiscount
-          ? `AED ${originalLineTotal.toFixed(2)}`
-          : `AED ${originalLineTotal.toFixed(2)}`;
-        return `
-        <div class="row item-row">
-          <span class="item-name">${item.name}</span>
-          <span class="amount">${priceHtml}</span>
-        </div>`;
-      })
-      .join("");
-
-    const paymentSection = `
-      <div class="row"><span>Payment Method / \u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u062f\u0641\u0639</span><span>: ${(selectedReceipt.payment_method || "-").toUpperCase()}</span></div>
-      <div class="row"><span>Amount Paid / \u0627\u0644\u0645\u0628\u0644\u063a \u0627\u0644\u0645\u062f\u0641\u0648\u0639</span><span>: AED ${Number(selectedReceipt.total).toFixed(2)}</span></div>
-    `;
-
-    const receiptHtml = `<!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>Receipt</title>
-        <style>
-          * { box-sizing: border-box; }
-          body { font-family: Arial, Helvetica, sans-serif; width: 72mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.25; color: #000; background: #fff; overflow-x: hidden; }
-          .center { text-align: center; }
-          .hr { border-top: 1px dashed #000; margin: 5px 0; }
-          .double { border-top: 2px solid #000; border-bottom: 2px solid #000; padding: 3px 0; margin: 5px 0; text-align: center; font-weight: 700; }
-          .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-          .logo { max-width: 68mm; max-height: 36mm; object-fit: contain; }
-          .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
-          .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
-          .row { display: flex; justify-content: space-between; gap: 6px; margin: 1px 0; }
-          .row span:first-child { min-width: 30mm; }
-          .row span:last-child { text-align: right; flex: 1; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
-          .head-row { display: flex; justify-content: space-between; font-weight: 700; }
-          .item-row { margin: 2px 0; }
-          .item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-          .amount { text-align: right; white-space: nowrap; }
-          .footer-center { text-align: center; margin-top: 4px; }
-          @media print { @page { size: 80mm auto; margin: 0; } body { width: 72mm; -webkit-print-color-adjust: exact; print-color-adjust: exact; } * { color: #000 !important; border-color: #000 !important; } img { -webkit-print-color-adjust: exact; print-color-adjust: exact; image-rendering: crisp-edges; } }
-        </style>
-      </head>
-      <body>
-        <div class="logo-wrap" id="logo-wrap">
-          <img src="${logoPath}" alt="Clinic logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'" />
-        </div>
-        <div class="double">${receiptTitle}</div>
-        <div class="clinic-name">${clinicDisplayName}</div>
-        <div class="address">
-          ${clinicAddress.split("\n").map((line: string) => `<div>${line}</div>`).join("")}
-          ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
-          ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
-        </div>
-        <div class="hr"></div>
-        <div class="row"><span>Invoice No / \u0631\u0642\u0645 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629</span><span>: ${invoiceNo}</span></div>
-        <div class="row"><span>Date / \u0627\u0644\u062a\u0627\u0631\u064a\u062e</span><span>: ${dateValue}</span></div>
-        <div class="row"><span>Time / \u0627\u0644\u0648\u0642\u062a</span><span>: ${timeValue}</span></div>
-        <div class="row"><span>Cashier / \u0623\u0645\u064a\u0646 \u0627\u0644\u0635\u0646\u062f\u0648\u0642</span><span>: ${cashierName}</span></div>
-        <div class="row"><span>Doctor / \u0627\u0644\u0637\u0628\u064a\u0628</span><span>: ${doctorNameForReceipt}</span></div>
-        <div class="row"><span>Patient Name / \u0627\u0633\u0645 \u0627\u0644\u0645\u0631\u064a\u0636</span><span>: ${patientNameForReceipt}</span></div>
-        <div class="row"><span>Patient ID / \u0645\u0639\u0631\u0641 \u0627\u0644\u0645\u0631\u064a\u0636</span><span>: ${patientIdForReceipt}</span></div>
-        <div class="row"><span>Mobile / \u0627\u0644\u0647\u0627\u062a\u0641</span><span>: ${patientMobileForReceipt}</span></div>
-        <div class="hr"></div>
-        <div class="head-row"><span>DESCRIPTION / \u0627\u0644\u0648\u0635\u0641</span><span>AMOUNT / \u0627\u0644\u0645\u0628\u0644\u063a</span></div>
-        <div class="hr" style="margin-top:2px;"></div>
-        ${itemsHtml || '<div class="center">No services selected</div>'}
-        <div class="hr"></div>
-        <div class="row"><span>Subtotal / \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0627\u0644\u062c\u0632\u0626\u064a</span><span>AED ${Number(selectedReceipt.subtotal).toFixed(2)}</span></div>
-        ${receiptDiscountAmount > 0 ? `<div class="row"><span>Discount / \u062e\u0635\u0645</span><span>- AED ${receiptDiscountAmount.toFixed(2)}</span></div>` : ""}
-        <div class="row"><span>VAT / \u0627\u0644\u0636\u0631\u064a\u0628\u0629</span><span>AED ${Number(selectedReceipt.vat).toFixed(2)}</span></div>
-        ${Number(selectedReceipt.gateway_fee || 0) > 0 ? `<div class="row"><span>${selectedReceipt.gateway_fee_provider || "Installment"} Fee</span><span>AED ${Number(selectedReceipt.gateway_fee || 0).toFixed(2)}</span></div>` : ""}
-        <div class="hr" style="margin:4px 0;"></div>
-        <div class="row" style="font-weight:700;"><span>TOTAL / \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a</span><span>AED ${Number(selectedReceipt.total).toFixed(2)}</span></div>
-        <div class="hr"></div>
-        ${paymentSection}
-        ${selectedReceipt.notes ? `<div style="margin-top:4px;">Note / \u0645\u0644\u0627\u062d\u0638\u0629: ${selectedReceipt.notes}</div>` : ""}
-        <div class="hr"></div>
-        <div class="footer-center">${receiptVatNote}</div>
-        <div class="footer-center">${receiptThankYou}</div>
-        ${socialHtml}
-        <div class="hr"></div>
-        ${clinicPhone ? `<div class="row"><span>For appointments - Number</span><span>: ${clinicPhone}</span></div>` : ""}
-        ${clinicWhatsapp ? `<div class="row"><span>WhatsApp</span><span>: ${clinicWhatsapp}</span></div>` : ""}
-        <div class="hr"></div>
-        ${qrHtml}
-        <div class="hr"></div>
-        <div class="double">${receiptFinalMessage}</div>
-      </body>
-    </html>`;
-
+    const receiptHtml = buildThermalReceiptHtmlForSelected();
     try {
       printHtmlWhenImagesReady(receiptHtml);
     } catch (error) {
