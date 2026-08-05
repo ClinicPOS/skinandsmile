@@ -1,20 +1,29 @@
 import qrcode from "qrcode-generator";
 import type { Clinic } from "./types";
 
-export const receiptLogoOptions = [
-  { value: "skin-smile", label: "Skin and Smile default", path: "/images/logo6.jpg" },
-  { value: "skin-smile-alt", label: "Skin and Smile alternate", path: "/images/dental.png" },
-  { value: "dental", label: "Skin and Smile Dental", path: "/images/dental.png" },
-  { value: "aesthetic", label: "Skin and Smile Aesthetic", path: "/images/invoiceskinandsmile-aesthetic.png" },
-  { value: "al-dana", label: "Skin and Smile Dental (Al Dana)", path: "/images/aldana.png" },
-  { value: "altamuze", label: "Al Tamuze", path: "/images/altamuze.png" },
-  { value: "altamuze-compact", label: "Al Tamuze compact", path: "/images/logo4.png" },
-  { value: "altamuze-new", label: "Altamuze Medical Center", path: "/images/altamuze.png" },
-  { value: "logo", label: "Logo 1", path: "/images/logo.png" },
-  { value: "logo2", label: "Logo 2", path: "/images/logo2.png" },
-  { value: "logo3", label: "Logo 3", path: "/images/logo3.png" },
-  { value: "al-jameelah", label: "Al Jameelah Clinic", path: "/images/aljameelah.png" },
-  { value: "al-jameelah-new", label: "Al Jameelah Clinic (new)", path: "/images/aljameelah.png" },
+export type ReceiptLogoVariant = "invoice" | "thermal";
+
+type ReceiptLogoOption = {
+  value: string;
+  label: string;
+  path: string;
+  thermalPath?: string;
+};
+
+export const receiptLogoOptions: ReceiptLogoOption[] = [
+  { value: "skin-smile", label: "Skin and Smile default", path: "/images/logo6.jpg", thermalPath: "/images/Alsatwathermal.png" },
+  { value: "skin-smile-alt", label: "Skin and Smile alternate", path: "/images/dental.png", thermalPath: "/images/Alsatwathermal.png" },
+  { value: "dental", label: "Skin and Smile Dental", path: "/images/dental.png", thermalPath: "/images/Alsatwathermal.png" },
+  { value: "aesthetic", label: "Skin and Smile Aesthetic", path: "/images/invoiceskinandsmile-aesthetic.png", thermalPath: "/images/aesthetic.png" },
+  { value: "al-dana", label: "Skin and Smile Dental (Al Dana)", path: "/images/aldana.png", thermalPath: "/images/aldanathermal.PNG" },
+  { value: "altamuze", label: "Al Tamuze", path: "/images/altamuze.png", thermalPath: "/images/altamuzethermal.jpg" },
+  { value: "altamuze-compact", label: "Al Tamuze compact", path: "/images/logo4.png", thermalPath: "/images/altamuzethermal.jpg" },
+  { value: "altamuze-new", label: "Altamuze Medical Center", path: "/images/altamuze.png", thermalPath: "/images/altamuzethermal.jpg" },
+  { value: "logo", label: "Logo 1", path: "/images/logo.png", thermalPath: "/images/Alsatwathermal.png" },
+  { value: "logo2", label: "Logo 2", path: "/images/logo2.png", thermalPath: "/images/Alsatwathermal.png" },
+  { value: "logo3", label: "Logo 3", path: "/images/logo3.png", thermalPath: "/images/Alsatwathermal.png" },
+  { value: "al-jameelah", label: "Al Jameelah Clinic", path: "/images/aljameelah.png", thermalPath: "/images/Jameelahthermal.png" },
+  { value: "al-jameelah-new", label: "Al Jameelah Clinic (new)", path: "/images/aljameelah.png", thermalPath: "/images/Jameelahthermal.png" },
 ] as const;
 
 function normalizeClinicName(value: string | null | undefined) {
@@ -27,37 +36,61 @@ function normalizeClinicName(value: string | null | undefined) {
 
 export function getReceiptLogoPath(
   clinic: Partial<Pick<Clinic, "logo" | "name" | "receipt_print_name">> | null | undefined,
-  fallbackPath = "/images/logo6.jpg"
+  fallbackPath?: string,
+  variant: ReceiptLogoVariant = "invoice",
 ) {
   const clinicName = [clinic?.name, clinic?.receipt_print_name].find(Boolean)?.toString().trim();
   const logo = clinic?.logo?.trim();
+  const resolvedFallbackPath = fallbackPath ?? (variant === "thermal" ? "/images/Alsatwathermal.png" : "/images/logo6.jpg");
 
   if (logo) {
     const option = receiptLogoOptions.find((item) => item.value === logo);
-    if (option) return `${option.path}?v=20260805-transparent`;
+    const selectedPath = variant === "thermal"
+      ? option?.thermalPath ?? option?.path
+      : option?.path;
+
+    if (selectedPath) return `${selectedPath}?v=20260805-transparent`;
 
     if (logo.startsWith("/")) return `${logo}?v=20260805-transparent`;
     if (/^https?:\/\//i.test(logo) || logo.startsWith("data:")) return logo;
   }
 
   const normalizedName = normalizeClinicName(clinicName);
-  if (normalizedName.includes("al dana") || normalizedName.includes("dana")) {
-    return "/images/aldana.png?v=20260805-transparent";
-  }
-  if (normalizedName.includes("al satwa") || normalizedName.includes("satwa")) {
-    return "/images/dental.png?v=20260805-transparent";
-  }
-  if (normalizedName.includes("aesthetic") || normalizedName.includes("aesthetics")) {
-    return "/images/invoiceskinandsmile-aesthetic.png?v=20260805-transparent";
-  }
-  if (normalizedName.includes("altamuze")) {
-    return "/images/altamuze.png?v=20260805-transparent";
-  }
-  if (normalizedName.includes("al jameelah") || normalizedName.includes("jameelah")) {
-    return "/images/aljameelah.png?v=20260805-transparent";
+  if (variant === "thermal") {
+    if (normalizedName.includes("al dana") || normalizedName.includes("dana")) {
+      return "/images/aldanathermal.PNG?v=20260805-transparent";
+    }
+    if (normalizedName.includes("al satwa") || normalizedName.includes("satwa")) {
+      return "/images/Alsatwathermal.png?v=20260805-transparent";
+    }
+    if (normalizedName.includes("aesthetic") || normalizedName.includes("aesthetics")) {
+      return "/images/aesthetic.png?v=20260805-transparent";
+    }
+    if (normalizedName.includes("altamuze")) {
+      return "/images/altamuzethermal.jpg?v=20260805-transparent";
+    }
+    if (normalizedName.includes("al jameelah") || normalizedName.includes("jameelah")) {
+      return "/images/Jameelahthermal.png?v=20260805-transparent";
+    }
+  } else {
+    if (normalizedName.includes("al dana") || normalizedName.includes("dana")) {
+      return "/images/aldana.png?v=20260805-transparent";
+    }
+    if (normalizedName.includes("al satwa") || normalizedName.includes("satwa")) {
+      return "/images/dental.png?v=20260805-transparent";
+    }
+    if (normalizedName.includes("aesthetic") || normalizedName.includes("aesthetics")) {
+      return "/images/invoiceskinandsmile-aesthetic.png?v=20260805-transparent";
+    }
+    if (normalizedName.includes("altamuze")) {
+      return "/images/altamuze.png?v=20260805-transparent";
+    }
+    if (normalizedName.includes("al jameelah") || normalizedName.includes("jameelah")) {
+      return "/images/aljameelah.png?v=20260805-transparent";
+    }
   }
 
-  return fallbackPath;
+  return resolvedFallbackPath;
 }
 
 type ReceiptQrClinic = Partial<Pick<Clinic, "name" | "phone" | "whatsapp" | "instagram" | "facebook" | "tiktok" | "receipt_qr_url">> | null | undefined;

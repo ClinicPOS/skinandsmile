@@ -333,7 +333,7 @@ export default function ReceiptLogPage() {
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id);
     const doctor = doctors.find((d) => d.id === selectedReceipt.doctor_id);
-    const logoPath = getReceiptLogoPath(clinic);
+    const logoPath = getReceiptLogoPath(clinic, undefined, "thermal");
     const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
       .replace(/\s*\([^)]*\)\s*/g, " ")
       .replace(/\s{2,}/g, " ")

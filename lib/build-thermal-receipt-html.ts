@@ -71,7 +71,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
     paymentMethod,
   } = options;
 
-  const logoPath = getReceiptLogoPath(clinic);
+  const logoPath = getReceiptLogoPath(clinic, undefined, "thermal");
   const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
     .replace(/\s*\([^)]*\)\s*/g, " ")
     .replace(/\s{2,}/g, " ")
@@ -232,7 +232,16 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
             font-weight: 700;
           }
           .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-          .logo { max-width: 68mm; max-height: 36mm; object-fit: contain; }
+          .logo {
+            display: block;
+            width: 100%;
+            max-width: 68mm;
+            max-height: 36mm;
+            height: auto;
+            object-fit: contain;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
+          }
           .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
           .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
           .row {
@@ -264,7 +273,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
       </head>
       <body>
         <div class="logo-wrap" id="logo-wrap">
-          <img src="${logoPath}" alt="Clinic logo" class="logo" onerror="document.getElementById('logo-wrap').style.display='none'" />
+          <img src="${logoPath}" alt="Clinic logo" class="logo" loading="eager" decoding="async" onerror="document.getElementById('logo-wrap').style.display='none'" />
         </div>
 
         <div class="double">${receiptTitle}</div>
