@@ -9,6 +9,8 @@ import type {
   PatientCredit,
   TreatmentPlan,
   TreatmentPlanPayment,
+  TreatmentPlanPaymentAllocation,
+  TreatmentPlanPaymentRecord,
   TreatmentPlanVisit,
   Clinic as ClinicRecord,
   Patient as PatientRecord,
@@ -16,6 +18,7 @@ import type {
 import { rollupBalance, formatBalanceReference } from "../lib/outstanding-balances";
 import { EditPatientModal } from "./edit-patient-modal";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../lib/receipt-branding";
+import { generateInvoiceHtml, generateTreatmentPlanPaymentInvoiceHtml } from "../lib/generate-invoice-html";
 import {
   buildPaymentAllocations,
   paymentVariantLabel,
@@ -84,6 +87,51 @@ function planModeToVariant(mode: PlanPaymentMode): PaymentMethodVariant {
   return "cash";
 }
 
+type SavedTreatmentPlanActionContext = {
+  clinic: ClinicRecord | null;
+  patientName: string;
+  patientFileNo: string;
+  planTitle: string;
+  planAmount: number;
+  plannedVisits: number;
+  planNotes: string | null;
+  cashierName: string;
+  createdAt: string;
+  referenceNo: string;
+};
+
+function buildTreatmentPlanSummaryHtml(context: SavedTreatmentPlanActionContext) {
+  return generateInvoiceHtml({
+    clinic: context.clinic,
+    receiptNumber: context.referenceNo,
+    invoiceStatus: "UNPAID",
+    issuedAt: new Date(context.createdAt),
+    cashierName: context.cashierName,
+    patient: {
+      name: context.patientName,
+      phone: null,
+      fileNumber: context.patientFileNo || undefined,
+    },
+    doctorName: null,
+    items: [
+      {
+        description: `Treatment Plan — ${context.planTitle}`,
+        quantity: 1,
+        unitPrice: Number(context.planAmount || 0),
+      },
+    ],
+    grandTotal: Number(context.planAmount || 0),
+    amountPaid: 0,
+    outstandingBalance: Number(context.planAmount || 0),
+    treatmentPlanReference: context.planTitle,
+    notes: [
+      context.planNotes ? `Notes: ${context.planNotes}` : null,
+      `Planned visits: ${context.plannedVisits}`,
+      "Treatment plan saved by the clinic POS system.",
+    ].filter(Boolean).join("\n"),
+  });
+}
+
 type LookupItem = {
   id: string;
   name: string;
@@ -132,7 +180,7 @@ type HistoricalVisit = {
   visit_sequence: number;
 };
 
-type Clinic = {
+type ClinicSummary = {
   id: string;
   name: string;
   address?: string | null;
@@ -205,7 +253,7 @@ export function SearchPatientModal({
   outstandingBalances?: OutstandingBalance[];
   balancePayments?: BalancePayment[];
   patientCredits?: PatientCredit[];
-  clinicsList?: Clinic[];
+  clinicsList?: ClinicSummary[];
   clinic?: ClinicRecord | null;
   receptionistId?: string | null;
   receptionistName?: string;
@@ -245,6 +293,8 @@ export function SearchPatientModal({
   const [newPlanVisits, setNewPlanVisits] = useState("5");
   const [newPlanNotes, setNewPlanNotes] = useState("");
   const [savingTreatmentPlan, setSavingTreatmentPlan] = useState(false);
+  const [savedTreatmentPlanActionContext, setSavedTreatmentPlanActionContext] = useState<SavedTreatmentPlanActionContext | null>(null);
+  const [isDownloadingTreatmentPlanPdf, setIsDownloadingTreatmentPlanPdf] = useState(false);
   // Legacy treatment form
   const [showLegacyTreatmentForm, setShowLegacyTreatmentForm] = useState(false);
   const [legacyServiceId, setLegacyServiceId] = useState("");
@@ -521,6 +571,10 @@ export function SearchPatientModal({
     return treatmentPlanVisitsByPlanId.get(planId)?.length || 0;
   }
 
+  function planCompletedVisits(plan: TreatmentPlan) {
+    return Math.max(planVisitsCount(plan.id), plan.clinic_patient_file_id ? 1 : 0);
+  }
+
   function startPlanPayment(plan: TreatmentPlan) {
     if (!receptionistId) { alert("Open the register first."); return; }
     const remaining = planRemaining(plan);
@@ -765,9 +819,59 @@ export function SearchPatientModal({
       setNewPlanAmount("");
       setNewPlanVisits("5");
       setNewPlanNotes("");
+      setSavedTreatmentPlanActionContext({
+        clinic: clinic ?? null,
+        patientName: selectedPatient.name,
+        patientFileNo: selectedPatient.clinic_file_no || (selectedPatient.patient_number != null ? String(selectedPatient.patient_number) : ""),
+        planTitle: title,
+        planAmount: amount,
+        plannedVisits,
+        planNotes: newPlanNotes.trim() || null,
+        cashierName: receptionistName || "Reception",
+        createdAt: (data as TreatmentPlan).created_at || new Date().toISOString(),
+        referenceNo: `TP-${String((data as TreatmentPlan).id).slice(0, 8).toUpperCase()}`,
+      });
     } finally {
       setSavingTreatmentPlan(false);
     }
+  }
+
+  async function downloadSavedTreatmentPlanPdf() {
+    if (!savedTreatmentPlanActionContext) return;
+    setIsDownloadingTreatmentPlanPdf(true);
+    try {
+      const html = buildTreatmentPlanSummaryHtml(savedTreatmentPlanActionContext);
+      const res = await fetch("/api/generate-invoice-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          html,
+          filename: `${savedTreatmentPlanActionContext.planTitle.replace(/\s+/g, "_").slice(0, 40)}_TreatmentPlan.pdf`,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Could not generate PDF: ${err.error || res.statusText}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${savedTreatmentPlanActionContext.planTitle.replace(/\s+/g, "_").slice(0, 40)}_TreatmentPlan.pdf`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (error: any) {
+      alert(`PDF download failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setIsDownloadingTreatmentPlanPdf(false);
+    }
+  }
+
+  function printSavedTreatmentPlanA4() {
+    if (!savedTreatmentPlanActionContext) return;
+    const html = buildTreatmentPlanSummaryHtml(savedTreatmentPlanActionContext);
+    printHtmlWhenImagesReady(html, "Please allow popups to print the treatment plan.");
   }
 
   async function saveTreatmentVisit(plan: TreatmentPlan) {
@@ -884,7 +988,7 @@ export function SearchPatientModal({
       const totalCustomerPaid = allocations.reduce((sum, a) => sum + a.customerChargedAmount, 0);
       const newRemaining = Math.max(0, remaining - invoiceAmount);
       printTreatmentPlanPaymentReceipt({
-        clinic: clinic as any,
+        clinic,
         patientName: selectedPatient.name,
         patientFileNo: selectedPatient.clinic_file_no || (selectedPatient.patient_number != null ? String(selectedPatient.patient_number) : undefined),
         planTitle: plan.title,
@@ -1400,7 +1504,8 @@ export function SearchPatientModal({
                       const remaining = planRemaining(plan);
                       const visits = treatmentPlanVisitsByPlanId.get(plan.id) || [];
                       const payments = treatmentPlanPaymentsByPlanId.get(plan.id) || [];
-                      const completedVisits = visits.length;
+                      const completedVisits = planCompletedVisits(plan);
+                      const remainingVisits = Math.max(0, Number(plan.planned_visits || 0) - completedVisits);
                       const isFullyPaid = remaining <= 0.0049;
                       return (
                         <div key={plan.id} className="rounded-2xl border border-cyan-200 bg-white p-4">
@@ -1408,7 +1513,7 @@ export function SearchPatientModal({
                             <div className="min-w-0">
                               <p className="text-sm font-bold text-slate-900">{plan.title}</p>
                               <p className="mt-1 text-xs text-slate-500">
-                                Visits {completedVisits} / {plan.planned_visits} · {isFullyPaid ? "Fully paid" : `AED ${remaining.toFixed(2)} remaining`}
+                                Visits {completedVisits} / {plan.planned_visits} · {remainingVisits} more visit{remainingVisits === 1 ? "" : "s"} · {isFullyPaid ? "Fully paid" : `AED ${remaining.toFixed(2)} remaining`}
                               </p>
                               {plan.notes && <p className="mt-1 text-xs text-slate-500">{plan.notes}</p>}
                             </div>
@@ -1468,7 +1573,7 @@ export function SearchPatientModal({
                                 <div>
                                   <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Visit Number</label>
                                   <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700">
-                                    {completedVisits + 1} / {plan.planned_visits}
+                                    {Math.min(completedVisits + 1, Number(plan.planned_visits || 0))} / {plan.planned_visits}
                                   </div>
                                 </div>
                               </div>
@@ -2128,6 +2233,46 @@ export function SearchPatientModal({
 
       </div>
 
+      {savedTreatmentPlanActionContext && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="mx-4 w-full max-w-md rounded-3xl border border-cyan-100 bg-white p-6 shadow-2xl">
+            <p className="text-xs font-bold uppercase tracking-[0.3em] text-cyan-700">Treatment Plan Saved</p>
+            <h3 className="mt-2 text-xl font-semibold text-slate-900">Do you want to print or download it?</h3>
+            <p className="mt-2 text-sm text-slate-600">
+              Choose how you want to share this active treatment plan.
+            </p>
+
+            <div className="mt-5 grid gap-3">
+              <button
+                onClick={() => printHtmlWhenImagesReady(buildTreatmentPlanSummaryHtml(savedTreatmentPlanActionContext), "Please allow popups to print the treatment plan.")}
+                className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+              >
+                Print Summary
+              </button>
+              <button
+                onClick={downloadSavedTreatmentPlanPdf}
+                disabled={isDownloadingTreatmentPlanPdf}
+                className="rounded-2xl bg-amber-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
+              >
+                {isDownloadingTreatmentPlanPdf ? "Generating…" : "⬇ Download PDF"}
+              </button>
+              <button
+                onClick={() => printHtmlWhenImagesReady(buildTreatmentPlanSummaryHtml(savedTreatmentPlanActionContext), "Please allow popups to print the treatment plan.")}
+                className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+              >
+                🖨 Print A4 Invoice
+              </button>
+              <button
+                onClick={() => setSavedTreatmentPlanActionContext(null)}
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <EditPatientModal
         isOpen={showEditModal}
         onClose={() => setShowEditModal(false)}
@@ -2152,13 +2297,16 @@ export function ReceiptHistoryModal({
   isOpen: boolean;
   onClose: () => void;
   clinicId: string | null | undefined;
-  clinic: Clinic | null;
+  clinic: ClinicRecord | null;
 }) {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [patients, setPatients] = useState<Patient[]>([]);
   const [services, setServices] = useState<LookupItem[]>([]);
   const [doctors, setDoctors] = useState<LookupItem[]>([]);
   const [allReceptionists, setAllReceptionists] = useState<LookupItem[]>([]);
+  const [treatmentPlanPayments, setTreatmentPlanPayments] = useState<TreatmentPlanPaymentRecord[]>([]);
+  const [treatmentPlanAllocations, setTreatmentPlanAllocations] = useState<TreatmentPlanPaymentAllocation[]>([]);
+  const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [receiptItemsMap, setReceiptItemsMap] = useState<Record<string, any[]>>({});
   const [refundsMap, setRefundsMap] = useState<Record<string, any[]>>({});
   const [expandedReceiptId, setExpandedReceiptId] = useState<string | null>(null);
@@ -2171,6 +2319,8 @@ export function ReceiptHistoryModal({
   const [refundAll, setRefundAll] = useState(false);
   const [refundReason, setRefundReason] = useState("");
   const [isProcessingRefund, setIsProcessingRefund] = useState(false);
+  const [downloadingTreatmentPlanInvoiceId, setDownloadingTreatmentPlanInvoiceId] = useState<string | null>(null);
+  const [downloadingRegularReceiptId, setDownloadingRegularReceiptId] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -2203,6 +2353,9 @@ export function ReceiptHistoryModal({
     if (!clinicId) {
       setReceipts([]);
       setPatients([]);
+      setTreatmentPlanPayments([]);
+      setTreatmentPlanAllocations([]);
+      setTreatmentPlans([]);
       return;
     }
 
@@ -2216,20 +2369,29 @@ export function ReceiptHistoryModal({
     if (receptionistIds.length === 0) {
       setReceipts([]);
       setPatients([]);
+      setTreatmentPlanPayments([]);
+      setTreatmentPlanAllocations([]);
+      setTreatmentPlans([]);
       return;
     }
 
-    const [receiptResult, patientResult, servicesResult, doctorsResult, receptionistsResult] = await Promise.all([
+    const [receiptResult, patientResult, servicesResult, doctorsResult, receptionistsResult, treatmentPlanResult, treatmentPlanPaymentResult, treatmentPlanAllocationResult] = await Promise.all([
       supabase.from("receipts").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
       fetchAllRows("patients", "id, name, phone, patient_number"),
       supabase.from("services").select("id, name"),
       supabase.from("doctors").select("id, name"),
       supabase.from("receptionist").select("id, name"),
+      supabase.from("treatment_plans").select("*").in("created_by", receptionistIds).order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payment_records").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payment_allocations").select("*").order("created_at", { ascending: false }),
     ]);
 
     const loadedReceipts = (receiptResult.data as Receipt[]) || [];
     const loadedPatients = ((patientResult as Patient[]) || []).map((p) => ({ ...p }));
-    const patientIds = [...new Set(loadedReceipts.map((r) => String(r.patient_id || "")).filter(Boolean))];
+    const patientIds = [...new Set([
+      ...loadedReceipts.map((r) => String(r.patient_id || "")).filter(Boolean),
+      ...((treatmentPlanPaymentResult.data as TreatmentPlanPaymentRecord[]) || []).map((r) => String(r.patient_id || "")).filter(Boolean),
+    ])];
     if (patientIds.length > 0) {
       const { data: clinicFiles } = await supabase
         .from("clinic_patient_files")
@@ -2250,6 +2412,9 @@ export function ReceiptHistoryModal({
     setServices((servicesResult.data as LookupItem[]) || []);
     setDoctors((doctorsResult.data as LookupItem[]) || []);
     setAllReceptionists((receptionistsResult.data as LookupItem[]) || []);
+    setTreatmentPlans((treatmentPlanResult.data as TreatmentPlan[]) || []);
+    setTreatmentPlanPayments((treatmentPlanPaymentResult.data as TreatmentPlanPaymentRecord[]) || []);
+    setTreatmentPlanAllocations((treatmentPlanAllocationResult.data as TreatmentPlanPaymentAllocation[]) || []);
   }
 
   async function loadReceiptItems(receiptId: string) {
@@ -2263,6 +2428,18 @@ export function ReceiptHistoryModal({
     setRefundsMap((prev) => ({ ...prev, [receiptId]: refundsRes.data || [] }));
     setLoadingItemsFor(null);
   }
+
+  const treatmentPlanPaymentEntries = useMemo(() => {
+    return treatmentPlanPayments.map((record) => {
+      const plan = treatmentPlans.find((entry) => entry.id === record.treatment_plan_id) || null;
+      const allocations = treatmentPlanAllocations.filter((allocation) => allocation.payment_id === record.id);
+      return {
+        record,
+        plan,
+        allocations,
+      };
+    });
+  }, [treatmentPlanAllocations, treatmentPlanPayments, treatmentPlans]);
 
   function toggleExpand(receiptId: string) {
     if (expandedReceiptId === receiptId) {
@@ -2280,6 +2457,132 @@ export function ReceiptHistoryModal({
     setRefundAll(false);
     setRefundReason("");
     setView("refund");
+  }
+
+  function printTreatmentPlanPaymentRecord(record: TreatmentPlanPaymentRecord, plan: TreatmentPlan | null, allocations: TreatmentPlanPaymentAllocation[]) {
+    const patient = patients.find((p) => p.id === record.patient_id);
+    const receptionist = allReceptionists.find((r) => r.id === record.receptionist_id);
+    const treatmentPlanReceiptAllocations = allocations.map((allocation) => ({
+      methodLabel: allocation.method_variant ? allocation.method_variant.replace(/_/g, " ").toUpperCase() : "Payment",
+      invoiceAllocationAmount: Number(allocation.invoice_allocation_amount || 0),
+      feeAmount: Number(allocation.fee_amount || 0),
+      customerChargedAmount: Number(allocation.customer_charged_amount || 0),
+      providerReferenceNumber: allocation.provider_reference_number,
+      terminalAuthorizationCode: allocation.terminal_authorization_code,
+    }));
+
+    printTreatmentPlanPaymentReceipt({
+      clinic,
+      patientName: patient?.name || "-",
+      patientFileNo: patient?.clinic_file_no || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
+      planTitle: plan?.title || "Treatment plan payment",
+      paymentArrangement: plan?.payment_arrangement || "Treatment plan payment",
+      agreedTotal: Number(plan?.total_amount || record.total_invoice_amount_settled || 0),
+      amountSettledToday: Number(record.total_invoice_amount_settled || 0),
+      remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - Number(record.total_invoice_amount_settled || 0)),
+      totalFeeAmount: Number(record.total_payment_fee_amount || 0),
+      totalCustomerPaid: Number(record.total_customer_charged_amount || 0),
+      cashierName: receptionist?.name || "Reception",
+      services: plan ? [{ name: plan.title, price: Number(record.total_invoice_amount_settled || 0), quantity: 1 }] : [],
+      allocations: treatmentPlanReceiptAllocations,
+      createdAt: record.created_at,
+      referenceNo: `TPP-${String(record.id).slice(0, 8).toUpperCase()}`,
+    });
+  }
+
+  function printTreatmentPlanPaymentInvoice(record: TreatmentPlanPaymentRecord, plan: TreatmentPlan | null, allocations: TreatmentPlanPaymentAllocation[]) {
+    const patient = patients.find((p) => p.id === record.patient_id);
+    const receptionist = allReceptionists.find((r) => r.id === record.receptionist_id);
+    const html = generateTreatmentPlanPaymentInvoiceHtml({
+      clinic,
+      receiptNumber: `TPP-${String(record.id).slice(0, 8).toUpperCase()}`,
+      issuedAt: new Date(record.created_at || Date.now()),
+      cashierName: receptionist?.name || "Reception",
+      patient: {
+        name: patient?.name || "-",
+        phone: null,
+        fileNumber: patient?.clinic_file_no || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
+      },
+      doctorName: null,
+      planTitle: plan?.title || "Treatment plan payment",
+      planTotalAmount: Number(plan?.total_amount || record.total_invoice_amount_settled || 0),
+      amountSettledToday: Number(record.total_invoice_amount_settled || 0),
+      paymentFeeAmount: Number(record.total_payment_fee_amount || 0),
+      paymentAllocations: allocations.map((allocation) => ({
+        methodLabel: allocation.method_variant ? allocation.method_variant.replace(/_/g, " ").toUpperCase() : "Payment",
+        invoiceAllocationAmount: Number(allocation.invoice_allocation_amount || 0),
+        feeAmount: Number(allocation.fee_amount || 0),
+        customerChargedAmount: Number(allocation.customer_charged_amount || 0),
+        providerReferenceNumber: allocation.provider_reference_number,
+        terminalAuthorizationCode: allocation.terminal_authorization_code,
+      })),
+      remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - Number(record.total_invoice_amount_settled || 0)),
+      plannedVisits: plan?.planned_visits ?? null,
+      completedVisits: plan?.clinic_patient_file_id ? 1 : 0,
+      notes: plan?.notes || null,
+    });
+    printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
+  }
+
+  async function downloadTreatmentPlanPaymentInvoice(record: TreatmentPlanPaymentRecord, plan: TreatmentPlan | null, allocations: TreatmentPlanPaymentAllocation[]) {
+    const patient = patients.find((p) => p.id === record.patient_id);
+    const receptionist = allReceptionists.find((r) => r.id === record.receptionist_id);
+    const html = generateTreatmentPlanPaymentInvoiceHtml({
+      clinic,
+      receiptNumber: `TPP-${String(record.id).slice(0, 8).toUpperCase()}`,
+      issuedAt: new Date(record.created_at || Date.now()),
+      cashierName: receptionist?.name || "Reception",
+      patient: {
+        name: patient?.name || "-",
+        phone: null,
+        fileNumber: patient?.clinic_file_no || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
+      },
+      doctorName: null,
+      planTitle: plan?.title || "Treatment plan payment",
+      planTotalAmount: Number(plan?.total_amount || record.total_invoice_amount_settled || 0),
+      amountSettledToday: Number(record.total_invoice_amount_settled || 0),
+      paymentFeeAmount: Number(record.total_payment_fee_amount || 0),
+      paymentAllocations: allocations.map((allocation) => ({
+        methodLabel: allocation.method_variant ? allocation.method_variant.replace(/_/g, " ").toUpperCase() : "Payment",
+        invoiceAllocationAmount: Number(allocation.invoice_allocation_amount || 0),
+        feeAmount: Number(allocation.fee_amount || 0),
+        customerChargedAmount: Number(allocation.customer_charged_amount || 0),
+        providerReferenceNumber: allocation.provider_reference_number,
+        terminalAuthorizationCode: allocation.terminal_authorization_code,
+      })),
+      remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - Number(record.total_invoice_amount_settled || 0)),
+      plannedVisits: plan?.planned_visits ?? null,
+      completedVisits: plan?.clinic_patient_file_id ? 1 : 0,
+      notes: plan?.notes || null,
+    });
+
+    const clinicSlug = (clinic?.name || "Clinic").replace(/\s+/g, "_").replace(/[^\w-]/g, "");
+    const filename = `${clinicSlug}_Invoice_TPP-${String(record.id).slice(0, 8).toUpperCase()}_${new Date(record.created_at || Date.now()).toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" })}.pdf`;
+
+    setDownloadingTreatmentPlanInvoiceId(record.id);
+    try {
+      const res = await fetch("/api/generate-invoice-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ html, filename }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Could not generate invoice PDF: ${err.error || res.statusText}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (error: any) {
+      alert(`Invoice download failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setDownloadingTreatmentPlanInvoiceId(null);
+    }
   }
 
   // Refunds can't exceed money actually collected: partial-payment receipts
@@ -2526,8 +2829,81 @@ export function ReceiptHistoryModal({
     printHtmlWhenImagesReady(html, "Please allow popups to print.");
   }
 
+  async function downloadRegularReceiptInvoice(receipt: Receipt) {
+    const receptionist = allReceptionists.find((r) => r.id === receipt.receptionist_id);
+    const clinicForReceipt = clinic || null;
+    const patient = patients.find((p) => p.id === receipt.patient_id);
+    const doctorName = doctors.find((d) => d.id === receipt.doctor_id)?.name || null;
+    const receiptItems = receiptItemsMap[receipt.id] || [];
+    const items = receiptItems.length > 0
+      ? receiptItems
+      : (await supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total").eq("receipt_id", receipt.id)).data || [];
+
+    const subtotal = Number(receipt.subtotal || 0);
+    const vatAmount = Number(receipt.vat || 0);
+    const total = Number(receipt.total || 0);
+    const discountAmount = Number(receipt.discount_amount || 0);
+    const paidAtSale = receipt.amount_paid != null ? Number(receipt.amount_paid) : total;
+    const creditAtSale = Number(receipt.credit_applied || 0);
+    const outstandingBalance = Math.max(0, total - paidAtSale - creditAtSale);
+
+    const html = generateInvoiceHtml({
+      clinic: clinicForReceipt,
+      receiptNumber: receipt.receipt_number ? `#${String(receipt.receipt_number).padStart(5, "0")}` : `#${receipt.id.slice(0, 8)}`,
+      invoiceStatus: outstandingBalance > 0.005 ? "PARTIALLY PAID" : "PAID",
+      issuedAt: receipt.created_at ? new Date(receipt.created_at) : new Date(),
+      posReceiptNumber: receipt.receipt_number ? `#${String(receipt.receipt_number).padStart(5, "0")}` : undefined,
+      cashierName: receptionist?.name || "Reception",
+      patient: {
+        name: patient?.name || "-",
+        phone: patient?.phone || null,
+        fileNumber: patient?.clinic_file_no || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
+      },
+      doctorName,
+      items: (items || []).map((item: any) => ({
+        description: services.find((s) => s.id === item.service_id)?.name || "Service",
+        quantity: Number(item.quantity || 1),
+        unitPrice: Number(item.price || 0),
+      })),
+      totalDiscount: discountAmount,
+      vatAmount,
+      paymentFeeAmount: Number(receipt.gateway_fee || 0),
+      grandTotal: total,
+      amountPaid: paidAtSale,
+      outstandingBalance,
+      notes: receipt.notes || null,
+    });
+
+    const clinicSlug = (clinicForReceipt?.name || "Clinic").replace(/\s+/g, "_").replace(/[^\w-]/g, "");
+    const invoiceNum = receipt.receipt_number ? String(receipt.receipt_number).padStart(5, "0") : receipt.id.slice(0, 8).toUpperCase();
+    const dateStr = new Date(receipt.created_at || Date.now()).toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" });
+    const filename = `${clinicSlug}_Invoice_${invoiceNum}_${dateStr}.pdf`;
+
+    const res = await fetch("/api/generate-invoice-pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html, filename }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Could not generate invoice PDF: ${err.error || res.statusText}`);
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
   function formatReceiptNo(receipt: Receipt) {
     return receipt.receipt_number ? `#${String(receipt.receipt_number).padStart(5, "0")}` : `#${receipt.id.slice(0, 8)}`;
+  }
+
+  function formatTreatmentPlanPaymentNo(record: TreatmentPlanPaymentRecord) {
+    return `TPP-${String(record.id).slice(0, 8).toUpperCase()}`;
   }
 
   if (!isOpen) return null;
@@ -2559,97 +2935,197 @@ export function ReceiptHistoryModal({
 
           {/* ── LIST VIEW ── */}
           {view === "list" && (
-            <div className="space-y-3">
+            <div className="space-y-4">
               {!clinicId ? (
                 <p className="text-center text-sm text-slate-500">Open the register to view receipt history.</p>
-              ) : receipts.length === 0 ? (
+              ) : receipts.length === 0 && treatmentPlanPaymentEntries.length === 0 ? (
                 <p className="text-center text-sm text-slate-500">No receipts found</p>
-              ) : receipts.map((receipt) => {
-                const isExpanded = expandedReceiptId === receipt.id;
-                const patient = patients.find((p) => p.id === receipt.patient_id);
-                const items = receiptItemsMap[receipt.id];
-                const refundsList = refundsMap[receipt.id];
-                const isLoading = loadingItemsFor === receipt.id;
-                const hasRefund = refundsList && refundsList.length > 0;
-
-                return (
-                  <div key={receipt.id} className={`overflow-hidden rounded-2xl border bg-white transition ${isExpanded ? "border-teal-200 shadow-sm" : "border-slate-200"}`}>
-                    <button onClick={() => toggleExpand(receipt.id)} className="w-full p-4 text-left hover:bg-slate-50">
-                      <div className="flex items-center justify-between">
+              ) : (
+                <>
+                  {treatmentPlanPaymentEntries.length > 0 && (
+                    <details className="rounded-2xl border border-cyan-100 bg-cyan-50/60 p-4">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-slate-900">{formatReceiptNo(receipt)}</span>
-                          {hasRefund && (
-                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">Refunded</span>
-                          )}
-                          {receipt.amount_paid != null &&
-                            Number(receipt.total || 0) - Number(receipt.amount_paid) - Number(receipt.credit_applied || 0) > 0.0049 && (
-                            <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700">Partial</span>
-                          )}
+                          <p className="text-sm font-bold text-cyan-900">Treatment Plan Payments</p>
+                          <span className="rounded-full bg-cyan-100 px-2 py-0.5 text-xs font-semibold text-cyan-700">
+                            {treatmentPlanPaymentEntries.length}
+                          </span>
                         </div>
-                        <div className="flex items-center gap-3">
-                          <span className="text-sm font-bold text-teal-700">AED {Number(receipt.total || 0).toFixed(2)}</span>
-                          <span className="text-xs text-slate-400">{isExpanded ? "▲" : "▼"}</span>
-                        </div>
-                      </div>
-                      <div className="mt-1 flex flex-wrap gap-x-2 text-xs text-slate-500">
-                        <span>{patient?.name || "Unknown patient"}</span>
-                        <span>·</span>
-                        <span>{receipt.created_at ? new Date(receipt.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "N/A"}</span>
-                        <span>·</span>
-                        <span>{(receipt.payment_method || "–").toUpperCase()}</span>
-                      </div>
-                    </button>
-
-                    {isExpanded && (
-                      <div className="border-t border-slate-100 bg-slate-50 px-4 pb-4">
-                        {isLoading ? (
-                          <p className="py-4 text-center text-xs text-slate-400">Loading items…</p>
-                        ) : items ? (
-                          <>
-                            <div className="py-3 space-y-1.5">
-                              {items.length === 0 ? (
-                                <p className="text-xs text-slate-400">No items recorded</p>
-                              ) : items.map((item: any) => (
-                                <div key={item.id} className="flex justify-between text-sm">
-                                  <span className="text-slate-700">{services.find((s) => s.id === item.service_id)?.name || "Service"}</span>
-                                  <span className="font-medium text-slate-900">AED {Number(item.total || item.price || 0).toFixed(2)}</span>
+                        <span className="text-xs font-semibold text-cyan-700">Show / Hide</span>
+                      </summary>
+                      <div className="mt-3 space-y-3">
+                        {treatmentPlanPaymentEntries.map(({ record, plan, allocations }) => {
+                          const patient = patients.find((p) => p.id === record.patient_id);
+                          return (
+                            <div key={record.id} className="rounded-2xl border border-cyan-100 bg-white p-4 shadow-sm">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-semibold text-slate-900">{formatTreatmentPlanPaymentNo(record)}</p>
+                                  <p className="mt-1 text-sm text-slate-600">{patient?.name || "Unknown patient"}</p>
+                                  <p className="mt-1 text-xs text-slate-500">{plan?.title || "Treatment plan payment"}</p>
                                 </div>
-                              ))}
+                                <div className="text-right">
+                                  <p className="text-sm font-semibold text-cyan-700">AED {Number(record.total_customer_charged_amount || 0).toFixed(2)}</p>
+                                  <p className="mt-1 text-xs text-slate-500">
+                                    {record.created_at ? new Date(record.created_at).toLocaleString() : "No date"}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
+                                <div className="rounded-xl bg-slate-50 px-3 py-2">
+                                  <p className="font-semibold text-slate-500">Invoice settled</p>
+                                  <p className="font-bold text-slate-800">AED {Number(record.total_invoice_amount_settled || 0).toFixed(2)}</p>
+                                </div>
+                                <div className="rounded-xl bg-slate-50 px-3 py-2">
+                                  <p className="font-semibold text-slate-500">Payment fee</p>
+                                  <p className="font-bold text-slate-800">AED {Number(record.total_payment_fee_amount || 0).toFixed(2)}</p>
+                                </div>
+                                <div className="rounded-xl bg-slate-50 px-3 py-2 sm:col-span-2">
+                                  <p className="font-semibold text-slate-500">Payment method</p>
+                                  <p className="font-bold text-slate-800">{record.payment_method_summary || "-"}</p>
+                                </div>
+                              </div>
+                              {allocations.length > 0 && (
+                                <div className="mt-3 space-y-1 rounded-xl border border-cyan-100 bg-cyan-50 px-3 py-2 text-xs text-cyan-900">
+                                  {allocations.map((allocation) => (
+                                    <div key={allocation.id} className="flex items-center justify-between gap-3">
+                                      <span>{allocation.method_variant ? allocation.method_variant.replace(/_/g, " ").toUpperCase() : "Payment"}</span>
+                                      <span className="font-semibold">AED {Number(allocation.customer_charged_amount || 0).toFixed(2)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              <div className="mt-3 flex gap-2">
+                                <button
+                                  onClick={() => printTreatmentPlanPaymentRecord(record, plan, allocations)}
+                                  className="flex-1 rounded-xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600"
+                                >
+                                  Print Receipt
+                                </button>
+                                <button
+                                  onClick={() => printTreatmentPlanPaymentInvoice(record, plan, allocations)}
+                                  className="flex-1 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 transition hover:bg-amber-100"
+                                >
+                                  Print A4 Invoice
+                                </button>
+                                <button
+                                  onClick={() => downloadTreatmentPlanPaymentInvoice(record, plan, allocations)}
+                                  disabled={downloadingTreatmentPlanInvoiceId === record.id}
+                                  className="flex-1 rounded-xl bg-amber-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
+                                >
+                                  {downloadingTreatmentPlanInvoiceId === record.id ? "Generating…" : "⬇ PDF"}
+                                </button>
+                              </div>
                             </div>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  )}
 
-                            {refundsList && refundsList.length > 0 && (
-                              <div className="mb-3 space-y-1">
-                                {refundsList.map((r: any) => (
-                                  <div key={r.id} className="flex items-center justify-between rounded-xl bg-amber-50 px-3 py-2 text-xs">
-                                    <span className="font-semibold text-amber-700">Refund: {r.reason || "–"}</span>
-                                    <span className="font-bold text-amber-800">AED {Number(r.total_amount || 0).toFixed(2)}</span>
-                                  </div>
-                                ))}
+                  {receipts.length > 0 && (
+                    <div className="space-y-3">
+                      {receipts.map((receipt) => {
+                        const isExpanded = expandedReceiptId === receipt.id;
+                        const patient = patients.find((p) => p.id === receipt.patient_id);
+                        const items = receiptItemsMap[receipt.id];
+                        const refundsList = refundsMap[receipt.id];
+                        const isLoading = loadingItemsFor === receipt.id;
+                        const hasRefund = refundsList && refundsList.length > 0;
+
+                        return (
+                          <div key={receipt.id} className={`overflow-hidden rounded-2xl border bg-white transition ${isExpanded ? "border-teal-200 shadow-sm" : "border-slate-200"}`}>
+                            <button onClick={() => toggleExpand(receipt.id)} className="w-full p-4 text-left hover:bg-slate-50">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-semibold text-slate-900">{formatReceiptNo(receipt)}</span>
+                                  {hasRefund && (
+                                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">Refunded</span>
+                                  )}
+                                  {receipt.amount_paid != null &&
+                                    Number(receipt.total || 0) - Number(receipt.amount_paid) - Number(receipt.credit_applied || 0) > 0.0049 && (
+                                    <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700">Partial</span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  <span className="text-sm font-bold text-teal-700">AED {Number(receipt.total || 0).toFixed(2)}</span>
+                                  <span className="text-xs text-slate-400">{isExpanded ? "▲" : "▼"}</span>
+                                </div>
+                              </div>
+                              <div className="mt-1 flex flex-wrap gap-x-2 text-xs text-slate-500">
+                                <span>{patient?.name || "Unknown patient"}</span>
+                                <span>·</span>
+                                <span>{receipt.created_at ? new Date(receipt.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "N/A"}</span>
+                                <span>·</span>
+                                <span>{(receipt.payment_method || "–").toUpperCase()}</span>
+                              </div>
+                            </button>
+
+                            {isExpanded && (
+                              <div className="border-t border-slate-100 bg-slate-50 px-4 pb-4">
+                                {isLoading ? (
+                                  <p className="py-4 text-center text-xs text-slate-400">Loading items…</p>
+                                ) : items ? (
+                                  <>
+                                    <div className="py-3 space-y-1.5">
+                                      {items.length === 0 ? (
+                                        <p className="text-xs text-slate-400">No items recorded</p>
+                                      ) : items.map((item: any) => (
+                                        <div key={item.id} className="flex justify-between text-sm">
+                                          <span className="text-slate-700">{services.find((s) => s.id === item.service_id)?.name || "Service"}</span>
+                                          <span className="font-medium text-slate-900">AED {Number(item.total || item.price || 0).toFixed(2)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+
+                                    {refundsList && refundsList.length > 0 && (
+                                      <div className="mb-3 space-y-1">
+                                        {refundsList.map((r: any) => (
+                                          <div key={r.id} className="flex items-center justify-between rounded-xl bg-amber-50 px-3 py-2 text-xs">
+                                            <span className="font-semibold text-amber-700">Refund: {r.reason || "–"}</span>
+                                            <span className="font-bold text-amber-800">AED {Number(r.total_amount || 0).toFixed(2)}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    <div className="flex gap-2 pt-1">
+                                      <button
+                                        onClick={() => reprintReceipt(receipt)}
+                                        className="flex-1 rounded-xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600"
+                                      >
+                                        Reprint
+                                      </button>
+                                      <button
+                                        onClick={() => {
+                                          setDownloadingRegularReceiptId(receipt.id);
+                                          downloadRegularReceiptInvoice(receipt)
+                                            .finally(() => setDownloadingRegularReceiptId(null));
+                                        }}
+                                        disabled={downloadingRegularReceiptId === receipt.id}
+                                        className="flex-1 rounded-xl bg-amber-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
+                                      >
+                                        {downloadingRegularReceiptId === receipt.id ? "Generating…" : "⬇ PDF"}
+                                      </button>
+                                      <button
+                                        onClick={() => startRefund(receipt)}
+                                        disabled={hasRefund}
+                                        className="flex-1 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40"
+                                      >
+                                        Refund
+                                      </button>
+                                    </div>
+                                  </>
+                                ) : null}
                               </div>
                             )}
-
-                            <div className="flex gap-2 pt-1">
-                              <button
-                                onClick={() => reprintReceipt(receipt)}
-                                className="flex-1 rounded-xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600"
-                              >
-                                Reprint
-                              </button>
-                              <button
-                                onClick={() => startRefund(receipt)}
-                                disabled={hasRefund}
-                                className="flex-1 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40"
-                              >
-                                Refund
-                              </button>
-                            </div>
-                          </>
-                        ) : null}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 

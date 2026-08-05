@@ -4,8 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
-import { generateInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
+import { generateInvoiceHtml, generateTreatmentPlanPaymentInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { useClinicAccess } from "../../lib/clinic-access";
+import type { TreatmentPlan, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, TreatmentPlanVisit } from "../../lib/types";
+import { printTreatmentPlanPaymentReceipt } from "../../lib/print-treatment-plan-payment-receipt";
 
 type Receipt = {
   id: string;
@@ -55,12 +57,47 @@ type Clinic = {
   logo?: string | null;
 };
 
+type ClinicPatientFile = {
+  id: string;
+  clinic_id: string;
+  patient_id: string;
+  file_no: string;
+};
+
 type ReceiptItem = {
   receipt_id: string;
   service_id: string;
   quantity: number;
   price: number;
   total: number;
+};
+
+type HistoryEntry = {
+  id: string;
+  kind: "receipt" | "treatment-plan";
+  title: string;
+  subtitle: string;
+  patient_id: string;
+  receptionist_id: string;
+  created_at?: string | null;
+  total: number;
+  subtotal?: number;
+  vat?: number;
+  payment_method?: string | null;
+  notes?: string | null;
+  receipt_number?: number | null;
+  doctor_id?: string | null;
+  gateway_fee?: number | null;
+  gateway_fee_provider?: string | null;
+  amount_paid?: number | null;
+  credit_applied?: number | null;
+  treatment_plan_title?: string | null;
+  payment_fee_amount?: number | null;
+  total_invoice_amount_settled?: number | null;
+  total_vat_amount?: number | null;
+  total_customer_charged_amount?: number | null;
+  payment_method_summary?: string | null;
+  treatment_plan_payment_allocations?: TreatmentPlanPaymentAllocation[];
 };
 
 export default function ReceiptHistoryPage() {
@@ -72,6 +109,12 @@ export default function ReceiptHistoryPage() {
   const [services, setServices] = useState<LookupItem[]>([]);
   const [receiptItems, setReceiptItems] = useState<ReceiptItem[]>([]);
   const [clinics, setClinics] = useState<Clinic[]>([]);
+  const [clinicPatientFiles, setClinicPatientFiles] = useState<ClinicPatientFile[]>([]);
+  const [treatmentPlanPaymentRecords, setTreatmentPlanPaymentRecords] = useState<TreatmentPlanPaymentRecord[]>([]);
+  const [treatmentPlanPaymentAllocations, setTreatmentPlanPaymentAllocations] = useState<TreatmentPlanPaymentAllocation[]>([]);
+  const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
+  const [treatmentPlanVisits, setTreatmentPlanVisits] = useState<TreatmentPlanVisit[]>([]);
+  const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [selectedReceiptId, setSelectedReceiptId] = useState<string>("");
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
 
@@ -98,7 +141,7 @@ export default function ReceiptHistoryPage() {
   }, [isLoaded]);
 
   async function loadHistory() {
-    const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult, clinicResult] = await Promise.all([
+    const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult, clinicResult, clinicPatientFileResult, treatmentPlanResult, treatmentPlanVisitResult, treatmentPlanPaymentResult, treatmentPlanAllocationResult] = await Promise.all([
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
       fetchAllRows("patients", "id, name, phone, patient_number"),
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
@@ -106,44 +149,124 @@ export default function ReceiptHistoryPage() {
       supabase.from("services").select("id, name").order("name", { ascending: true }),
       supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total"),
       supabase.from("clinics").select("*"),
+      fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no"),
+      supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_visits").select("id, treatment_plan_id, visit_number, created_at").order("visit_number", { ascending: true }),
+      supabase.from("treatment_plan_payment_records").select("*").order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payment_allocations").select("*").order("created_at", { ascending: false }),
     ]);
 
-    setReceipts((receiptResult.data as Receipt[]) || []);
+    const receiptsRows = (receiptResult.data as Receipt[]) || [];
+    const treatmentPlanRows = (treatmentPlanResult.data as TreatmentPlan[]) || [];
+    const treatmentPlanVisitRows = (treatmentPlanVisitResult.data as TreatmentPlanVisit[]) || [];
+    const treatmentPlanPaymentRows = (treatmentPlanPaymentResult.data as TreatmentPlanPaymentRecord[]) || [];
+    const treatmentPlanAllocationRows = (treatmentPlanAllocationResult.data as TreatmentPlanPaymentAllocation[]) || [];
+
+    const regularEntries: HistoryEntry[] = receiptsRows.map((receipt) => ({
+      id: receipt.id,
+      kind: "receipt" as const,
+      title: `Receipt ${receipt.receipt_number ? `#${String(receipt.receipt_number).padStart(5, "0")}` : `#${receipt.id.slice(0, 8).toUpperCase()}`}`,
+      subtitle: "Regular receipt",
+      patient_id: receipt.patient_id,
+      receptionist_id: receipt.receptionist_id,
+      created_at: receipt.created_at,
+      total: Number(receipt.total || 0),
+      subtotal: Number(receipt.subtotal || 0),
+      vat: Number(receipt.vat || 0),
+      payment_method: receipt.payment_method || null,
+      notes: receipt.notes || null,
+      receipt_number: receipt.receipt_number ?? null,
+      doctor_id: receipt.doctor_id ?? null,
+      gateway_fee: receipt.gateway_fee ?? null,
+      gateway_fee_provider: receipt.gateway_fee_provider ?? null,
+      amount_paid: (receipt as any).amount_paid ?? null,
+      credit_applied: (receipt as any).credit_applied ?? null,
+    }));
+
+    const planEntries: HistoryEntry[] = treatmentPlanPaymentRows.map((record) => {
+      const plan = treatmentPlanRows.find((entry) => entry.id === record.treatment_plan_id) || null;
+      return {
+        id: record.id,
+        kind: "treatment-plan" as const,
+        title: `Treatment Plan Payment ${record.id.slice(0, 8).toUpperCase()}`,
+        subtitle: plan?.title || "Treatment plan payment",
+        patient_id: record.patient_id,
+        receptionist_id: record.receptionist_id,
+        created_at: record.created_at,
+        total: Number(record.total_customer_charged_amount || 0),
+        subtotal: Number(record.total_invoice_amount_settled || 0),
+        vat: Number(record.total_vat_amount || 0),
+        payment_method: record.payment_method_summary || null,
+        notes: `Treatment plan payment`,
+        treatment_plan_title: plan?.title || null,
+        payment_fee_amount: Number(record.total_payment_fee_amount || 0),
+        total_invoice_amount_settled: Number(record.total_invoice_amount_settled || 0),
+        total_vat_amount: Number(record.total_vat_amount || 0),
+        total_customer_charged_amount: Number(record.total_customer_charged_amount || 0),
+        payment_method_summary: record.payment_method_summary || null,
+        treatment_plan_payment_allocations: treatmentPlanAllocationRows.filter((allocation) => allocation.payment_id === record.id),
+      };
+    });
+
+    const combinedEntries = [...regularEntries, ...planEntries].sort((a, b) => {
+      const left = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const right = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return right - left;
+    });
+
+    setReceipts(receiptsRows);
     setPatients((patientResult as Patient[]) || []);
     setDoctors((doctorResult.data as LookupItem[]) || []);
     setReceptionists((receptionistResult.data as LookupItem[]) || []);
     setServices((serviceResult.data as LookupItem[]) || []);
     setReceiptItems((itemResult.data as ReceiptItem[]) || []);
     setClinics((clinicResult.data as Clinic[]) || []);
+    setClinicPatientFiles((clinicPatientFileResult as ClinicPatientFile[]) || []);
+    setTreatmentPlanPaymentRecords(treatmentPlanPaymentRows);
+    setTreatmentPlanPaymentAllocations(treatmentPlanAllocationRows);
+    setTreatmentPlans(treatmentPlanRows);
+    setTreatmentPlanVisits(treatmentPlanVisitRows);
+    setHistoryEntries(combinedEntries);
 
-    if (!selectedReceiptId && receiptResult.data?.length) {
-      setSelectedReceiptId(receiptResult.data[0].id);
+    if (!selectedReceiptId && combinedEntries.length) {
+      setSelectedReceiptId(combinedEntries[0].id);
     }
   }
 
   const visibleReceipts = useMemo(() => {
-    if (!allowedClinicId) return receipts;
+    if (!allowedClinicId) return historyEntries;
     const clinicReceptionistIds = new Set(
       receptionists.filter((receptionist) => receptionist.clinic_id === allowedClinicId).map((receptionist) => receptionist.id)
     );
-    return receipts.filter((receipt) => clinicReceptionistIds.has(receipt.receptionist_id));
-  }, [allowedClinicId, receipts, receptionists]);
+    return historyEntries.filter((entry) => clinicReceptionistIds.has(entry.receptionist_id));
+  }, [allowedClinicId, historyEntries, receptionists]);
 
   useEffect(() => {
     if (!selectedReceiptId && visibleReceipts.length > 0) {
       setSelectedReceiptId(visibleReceipts[0].id);
       return;
     }
-    if (selectedReceiptId && !visibleReceipts.some((receipt) => receipt.id === selectedReceiptId)) {
+    if (selectedReceiptId && !visibleReceipts.some((entry) => entry.id === selectedReceiptId)) {
       setSelectedReceiptId(visibleReceipts[0]?.id || "");
     }
   }, [selectedReceiptId, visibleReceipts]);
 
-  const selectedReceipt = visibleReceipts.find((receipt) => receipt.id === selectedReceiptId);
+  const selectedReceipt = visibleReceipts.find((entry) => entry.id === selectedReceiptId);
 
   const selectedReceiptLineItems = useMemo(() => {
     if (!selectedReceipt) {
       return [];
+    }
+
+    if (selectedReceipt.kind === "treatment-plan") {
+      return [
+        {
+          id: selectedReceipt.id,
+          name: selectedReceipt.treatment_plan_title || "Treatment plan payment",
+          quantity: 1,
+          total: Number(selectedReceipt.total || 0),
+        },
+      ];
     }
 
     return receiptItems
@@ -171,6 +294,45 @@ export default function ReceiptHistoryPage() {
     const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
     const doctor = doctors.find((d) => d.id === selectedReceipt.doctor_id);
     const issuedAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
+    const patientClinicFile = clinicPatientFiles.find((file) => file.clinic_id === clinic?.id && file.patient_id === selectedReceipt.patient_id) || null;
+
+    if (selectedReceipt.kind === "treatment-plan") {
+      const paymentRecord = treatmentPlanPaymentRecords.find((entry) => entry.id === selectedReceipt.id) || null;
+      const plan = treatmentPlans.find((entry) => entry.id === paymentRecord?.treatment_plan_id) || null;
+      const visitsCompleted = treatmentPlanVisits.filter((visit) => visit.treatment_plan_id === plan?.id).length;
+      const completedVisits = Math.max(visitsCompleted, plan?.clinic_patient_file_id ? 1 : 0);
+      return generateTreatmentPlanPaymentInvoiceHtml({
+        clinic: clinic as any,
+        receiptNumber: selectedReceipt.title,
+        issuedAt,
+        cashierName: receptionist?.name ?? null,
+        patient: {
+          name: patient?.name || "-",
+          phone: patient?.phone ?? null,
+          fileNumber: patientClinicFile?.file_no
+            || (plan?.clinic_patient_file_id ? clinicPatientFiles.find((file) => file.id === plan.clinic_patient_file_id)?.file_no : undefined)
+            || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
+        },
+        doctorName: doctor?.name ?? null,
+        planTitle: selectedReceipt.treatment_plan_title || selectedReceipt.title,
+        planTotalAmount: Number(plan?.total_amount || selectedReceipt.total_invoice_amount_settled || 0),
+        amountSettledToday: Number(selectedReceipt.total_invoice_amount_settled ?? selectedReceipt.total ?? 0),
+        paymentFeeAmount: Number(selectedReceipt.payment_fee_amount ?? 0),
+        paymentAllocations: (selectedReceipt.treatment_plan_payment_allocations || []).map((allocation) => ({
+          methodLabel: allocation.method_variant ? allocation.method_variant.replace(/_/g, " ").toUpperCase() : "Payment",
+          invoiceAllocationAmount: Number(allocation.invoice_allocation_amount || 0),
+          feeAmount: Number(allocation.fee_amount || 0),
+          customerChargedAmount: Number(allocation.customer_charged_amount || 0),
+          providerReferenceNumber: allocation.provider_reference_number,
+          terminalAuthorizationCode: allocation.terminal_authorization_code,
+        })),
+        remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - Number(selectedReceipt.total_invoice_amount_settled || 0)),
+        plannedVisits: plan?.planned_visits ?? null,
+        completedVisits,
+        notes: selectedReceipt.notes || null,
+      });
+    }
+
     const invoiceNum = selectedReceipt.receipt_number
       ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
       : selectedReceipt.id.slice(0, 8).toUpperCase();
@@ -194,7 +356,7 @@ export default function ReceiptHistoryPage() {
       patient: {
         name: patient?.name || "-",
         phone: patient?.phone ?? null,
-        patientNumber: patient?.patient_number ?? null,
+        fileNumber: patientClinicFile?.file_no || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
       },
       doctorName: doctor?.name ?? null,
       items: selectedReceiptLineItems.map((item) => ({
@@ -217,7 +379,7 @@ export default function ReceiptHistoryPage() {
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
     const clinicSlug = (clinic?.name || "Clinic").replace(/\s+/g, "_").replace(/[^\w-]/g, "");
-    const invoiceNum = selectedReceipt.receipt_number
+    const invoiceNum = selectedReceipt.kind === "receipt" && selectedReceipt.receipt_number
       ? String(selectedReceipt.receipt_number).padStart(5, "0")
       : selectedReceipt.id.slice(0, 8).toUpperCase();
     const dateStr = new Date(selectedReceipt.created_at || Date.now()).toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" });
@@ -252,6 +414,46 @@ export default function ReceiptHistoryPage() {
 
   function printSelectedReceipt() {
     if (!selectedReceipt) return;
+
+    if (selectedReceipt.kind === "treatment-plan") {
+      const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
+      const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
+      const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
+      const planTitle = selectedReceipt.treatment_plan_title || selectedReceipt.title || "Treatment Plan";
+      const allocationRows = (selectedReceipt.treatment_plan_payment_allocations || []).map((allocation) => ({
+        methodLabel: allocation.method_variant ? allocation.method_variant.replace(/_/g, " ").toUpperCase() : "Payment",
+        invoiceAllocationAmount: Number(allocation.invoice_allocation_amount || 0),
+        feeAmount: Number(allocation.fee_amount || 0),
+        customerChargedAmount: Number(allocation.customer_charged_amount || 0),
+      }));
+
+      printTreatmentPlanPaymentReceipt({
+        clinic: clinic as any,
+        patientName: patient?.name || "-",
+        patientFileNo: patient?.patient_number ? String(patient.patient_number) : undefined,
+        planTitle,
+        paymentArrangement: selectedReceipt.notes?.startsWith("Payment arrangement:")
+          ? selectedReceipt.notes.replace("Payment arrangement:", "").trim()
+          : "Treatment plan payment",
+        agreedTotal: Number(selectedReceipt.total || 0),
+        amountSettledToday: Number(selectedReceipt.total_invoice_amount_settled ?? selectedReceipt.total ?? 0),
+        remainingAfterToday: 0,
+        totalFeeAmount: Number(selectedReceipt.payment_fee_amount ?? 0),
+        totalCustomerPaid: Number(selectedReceipt.total_customer_charged_amount ?? selectedReceipt.total ?? 0),
+        cashierName: receptionist?.name || "Reception",
+        services: [
+          {
+            name: planTitle,
+            price: Number(selectedReceipt.total_invoice_amount_settled ?? selectedReceipt.total ?? 0),
+            quantity: 1,
+          },
+        ],
+        allocations: allocationRows,
+        createdAt: selectedReceipt.created_at || undefined,
+        referenceNo: selectedReceipt.title,
+      });
+      return;
+    }
 
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
@@ -406,7 +608,7 @@ export default function ReceiptHistoryPage() {
   const doctorName = doctors.find((doctor) => doctor.id === selectedReceipt?.doctor_id)?.name || "Unknown doctor";
   const receptionistName = receptionists.find((person) => person.id === selectedReceipt?.receptionist_id)?.name || "Unknown receptionist";
 
-  function formatReceiptNo(receipt: Receipt) {
+  function formatReceiptNo(receipt: { id: string; receipt_number?: number | null }) {
     return receipt.receipt_number
       ? `#${String(receipt.receipt_number).padStart(5, "0")}`
       : `#${receipt.id.slice(0, 8)}`;

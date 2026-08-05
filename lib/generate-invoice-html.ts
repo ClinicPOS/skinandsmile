@@ -55,10 +55,34 @@ export interface GenerateInvoiceHtmlOptions {
   paymentAllocations?: InvoiceAllocationRow[];
   /** Treatment-plan title/reference, if this invoice settles a plan instalment */
   treatmentPlanReference?: string | null;
+  /** Treatment-plan summary for the A4 breakdown section */
+  treatmentPlanTotalAmount?: number | null;
+  treatmentPlanPaidToday?: number | null;
+  treatmentPlanBalanceAfterToday?: number | null;
+  treatmentPlanPlannedVisits?: number | null;
+  treatmentPlanCompletedVisits?: number | null;
   /** Additional free-text notes to show in the notes section (NOT clinical) */
   notes?: string | null;
   /** Whether to include Arabic bilingual labels */
   bilingual?: boolean;
+}
+
+export interface TreatmentPlanInvoiceContext {
+  clinic: GenerateInvoiceHtmlOptions["clinic"];
+  receiptNumber: string;
+  issuedAt: Date;
+  cashierName?: string | null;
+  patient: GenerateInvoiceHtmlOptions["patient"];
+  doctorName?: string | null;
+  planTitle: string;
+  planTotalAmount: number;
+  amountSettledToday: number;
+  paymentFeeAmount?: number;
+  paymentAllocations?: InvoiceAllocationRow[];
+  remainingAfterToday?: number;
+  plannedVisits?: number | null;
+  completedVisits?: number | null;
+  notes?: string | null;
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -96,9 +120,59 @@ function statusBadgeStyle(status: InvoiceStatus) {
 
 // ── main export ────────────────────────────────────────────────────────────
 
+export function generateTreatmentPlanPaymentInvoiceHtml(ctx: TreatmentPlanInvoiceContext): string {
+  const paymentFeeAmount = Number(ctx.paymentFeeAmount ?? 0);
+  const settlementAmount = Number(ctx.amountSettledToday ?? 0);
+  const allocationTotal = (ctx.paymentAllocations ?? []).reduce((sum, allocation) => sum + Number(allocation.customerChargedAmount || 0), 0);
+  const grandTotal = allocationTotal > 0.0049 ? allocationTotal : settlementAmount + paymentFeeAmount;
+  const notes = [
+    ctx.notes,
+    `Treatment plan: ${ctx.planTitle}`,
+    ctx.remainingAfterToday != null ? `Remaining balance after today: AED ${Number(ctx.remainingAfterToday).toFixed(2)}` : null,
+  ].filter(Boolean) as string[];
+
+  return generateInvoiceHtml({
+    clinic: ctx.clinic,
+    receiptNumber: ctx.receiptNumber,
+    invoiceStatus: "PAID",
+    issuedAt: ctx.issuedAt,
+    cashierName: ctx.cashierName,
+    patient: ctx.patient,
+    doctorName: ctx.doctorName,
+    items: [
+      {
+        description: `Treatment Plan Payment — ${ctx.planTitle}`,
+        quantity: 1,
+        unitPrice: settlementAmount,
+      },
+    ],
+    paymentFeeAmount,
+    grandTotal,
+    amountPaid: grandTotal,
+    outstandingBalance: 0,
+    paymentAllocations: ctx.paymentAllocations,
+    treatmentPlanReference: ctx.planTitle,
+    treatmentPlanTotalAmount: ctx.planTotalAmount,
+    treatmentPlanPaidToday: ctx.amountSettledToday,
+    treatmentPlanBalanceAfterToday: ctx.remainingAfterToday,
+    treatmentPlanPlannedVisits: ctx.plannedVisits ?? null,
+    treatmentPlanCompletedVisits: ctx.completedVisits ?? null,
+    notes: notes.join("\n"),
+  });
+}
+
 export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
   const theme = getInvoiceTheme(opts.clinic?.logo);
-  const logoPath = getReceiptLogoPath(opts.clinic);
+  const logoPath = (() => {
+    const resolvedPath = getReceiptLogoPath(opts.clinic);
+    if (!resolvedPath || /^https?:\/\//i.test(resolvedPath) || resolvedPath.startsWith("data:")) {
+      return resolvedPath;
+    }
+    if (typeof window !== "undefined" && window.location?.origin) {
+      return `${window.location.origin}${resolvedPath.startsWith("/") ? resolvedPath : `/${resolvedPath}`}`;
+    }
+    return resolvedPath;
+  })();
 
   const clinicName = opts.clinic?.receipt_print_name || opts.clinic?.name || "Clinic";
   const branchLabel = theme.branchLabel || "";
@@ -162,6 +236,15 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
         <td style="text-align:right;font-weight:600;">${fmt(lineTotal)}</td>
       </tr>`;
   }).join("");
+
+  const treatmentPlanPlanTotal = opts.treatmentPlanTotalAmount != null ? Number(opts.treatmentPlanTotalAmount || 0) : null;
+  const treatmentPlanPaidToday = opts.treatmentPlanPaidToday != null ? Number(opts.treatmentPlanPaidToday || 0) : null;
+  const treatmentPlanBalanceAfterToday = opts.treatmentPlanBalanceAfterToday != null ? Number(opts.treatmentPlanBalanceAfterToday || 0) : null;
+  const treatmentPlanPlannedVisits = opts.treatmentPlanPlannedVisits != null ? Number(opts.treatmentPlanPlannedVisits || 0) : null;
+  const treatmentPlanCompletedVisits = opts.treatmentPlanCompletedVisits != null ? Number(opts.treatmentPlanCompletedVisits || 0) : null;
+  const treatmentPlanAllocationSummary = (opts.paymentAllocations ?? [])
+    .map((alloc) => `${fmt(alloc.customerChargedAmount)} (${alloc.methodLabel})`)
+    .join(" + ");
 
   // ── payment allocation rows ────────────────────────────────────────────────
   const allocRows = (opts.paymentAllocations ?? []).map((alloc) => {
@@ -249,20 +332,31 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
       gap: 16px;
     }
 
-    .header-left { display: flex; align-items: flex-start; gap: 12px; flex: 1; }
+    .header-left { display: flex; align-items: flex-start; gap: 10px; flex: 1; }
+
+    .logo-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      min-width: 0;
+      margin-right: 2mm;
+      flex-shrink: 0;
+    }
 
     .logo-wrap img {
-      width: 38mm;
-      max-height: 22mm;
-      object-fit: contain;
       display: block;
+      max-width: 32mm;
+      max-height: 20mm;
+      width: auto;
+      height: auto;
+      object-fit: contain;
     }
 
     .clinic-info { line-height: 1.45; }
     .clinic-name { font-size: 13pt; font-weight: 700; color: var(--secondary); }
     .clinic-detail { font-size: 8pt; color: #555; margin-top: 5px; line-height: 1.5; }
 
-    .header-right { text-align: right; flex-shrink: 0; }
+    .header-right { text-align: right; flex-shrink: 0; margin-left: 6px; }
     .invoice-title-text {
       font-size: 22pt;
       font-weight: 700;
@@ -336,6 +430,14 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
     .totals-table td { padding: 4px 6px; border-bottom: 1px solid var(--divider); }
     .totals-table .label { color: #555; }
     .totals-table .value { text-align: right; font-weight: 500; }
+    .treatment-plan-summary .value { vertical-align: top; }
+    .treatment-plan-sub {
+      margin-top: 2px;
+      font-size: 7pt;
+      line-height: 1.35;
+      color: #666;
+      font-weight: 400;
+    }
     .totals-table .grand-row td {
       background: var(--primary);
       color: #fff;
@@ -376,7 +478,27 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
     .footer-col { flex: 1; }
     .footer-col-center { flex: 1; text-align: center; }
     .footer-col-right { flex: 0 0 auto; text-align: right; }
-    .footer-qr-label { font-size: 7pt; color: #888; margin-top: 3px; }
+    .footer-qr-block {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .footer-qr-copy {
+      text-align: left;
+      max-width: 46mm;
+    }
+    .footer-qr-title {
+      font-size: 8pt;
+      font-weight: 700;
+      color: var(--primary);
+      margin-bottom: 2px;
+    }
+    .footer-qr-subtitle {
+      font-size: 7pt;
+      line-height: 1.35;
+      color: #666;
+    }
 
     @media print {
       body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -518,6 +640,22 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
 
   </div>
 
+  ${treatmentPlanPlanTotal != null ? `
+  <div class="section-heading">Plan Breakdown / تفاصيل الخطة</div>
+  <table class="totals-table treatment-plan-summary">
+    <tr><td class="label">Total Plan Cost / التكلفة الإجمالية للخطة</td><td class="value">${fmt(treatmentPlanPlanTotal)}</td></tr>
+    <tr>
+      <td class="label">Paid Today / المدفوع اليوم</td>
+      <td class="value">
+        ${fmt(treatmentPlanPaidToday ?? amountPaid)}
+        ${treatmentPlanAllocationSummary ? `<div class="treatment-plan-sub">${escHtml(treatmentPlanAllocationSummary)}</div>` : ""}
+      </td>
+    </tr>
+    ${paymentFee > 0.005 ? `<tr><td class="label">Payment Fee / رسوم الدفع</td><td class="value">${fmt(paymentFee)}</td></tr>` : ""}
+    ${treatmentPlanBalanceAfterToday != null ? `<tr><td class="label">Balance / الرصيد المتبقي</td><td class="value">${fmt(treatmentPlanBalanceAfterToday)}</td></tr>` : ""}
+    ${treatmentPlanPlannedVisits != null ? `<tr><td class="label">Visits / الزيارات</td><td class="value">${Math.max(0, treatmentPlanCompletedVisits ?? 0)}/${Math.max(0, treatmentPlanPlannedVisits)}</td></tr>` : ""}
+  </table>` : ""}
+
   <!-- ── NOTES ── -->
   <div class="notes-block">
     <ul>
@@ -539,8 +677,13 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
       ${clinicTiktok ? `<div>TikTok: ${escHtml(clinicTiktok)}</div>` : ""}
     </div>
     <div class="footer-col-right">
-      ${qrSvg}
-      <div class="footer-qr-label">Scan to view or verify this invoice</div>
+     <div class="footer-qr-block">
+       <div class="footer-qr-copy">
+         <div class="footer-qr-title">Your Feedback Matters</div>
+         <div class="footer-qr-subtitle">Please scan the QR code to review your visit.</div>
+       </div>
+       ${qrSvg}
+     </div>
     </div>
   </div>
 

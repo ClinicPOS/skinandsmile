@@ -5570,7 +5570,6 @@ export default function ReceiptsPage() {
           isOpen={showPlanCheckoutModal}
           onClose={() => setShowPlanCheckoutModal(false)}
           onSaved={(plan, payments) => {
-            setShowPlanCheckoutModal(false);
             const totalCollected = (payments || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
             alert(
               `Treatment plan "${plan.title}" created successfully!${payments.length > 0 ? ` Payment of AED ${totalCollected.toFixed(2)} recorded.` : ""}`

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic, OutstandingBalance, BalancePayment, TreatmentPlan, TreatmentPlanPayment } from "../../lib/types";
+import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic, OutstandingBalance, BalancePayment, TreatmentPlan, TreatmentPlanPayment, TreatmentPlanVisit } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
@@ -57,6 +57,7 @@ export default function BackendPage() {
   const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
   const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [treatmentPlanPayments, setTreatmentPlanPayments] = useState<TreatmentPlanPayment[]>([]);
+  const [treatmentPlanVisits, setTreatmentPlanVisits] = useState<TreatmentPlanVisit[]>([]);
   const [patientNamesById, setPatientNamesById] = useState<Record<string, string>>({});
   const [addBalancePatient, setAddBalancePatient] = useState<Patient | null>(null);
 
@@ -209,6 +210,16 @@ export default function BackendPage() {
     return map;
   }, [treatmentPlanPayments]);
 
+  const treatmentPlanVisitsByPlanId = useMemo(() => {
+    const map = new Map<string, TreatmentPlanVisit[]>();
+    for (const visit of treatmentPlanVisits) {
+      const list = map.get(visit.treatment_plan_id) || [];
+      list.push(visit);
+      map.set(visit.treatment_plan_id, list);
+    }
+    return map;
+  }, [treatmentPlanVisits]);
+
   const visibleClinicOutstandingBalanceGroups = useMemo(() => {
     const groups = new Map<string, {
       clinicId: string;
@@ -222,6 +233,7 @@ export default function BackendPage() {
         patientName: string;
         originalDate?: string;
         balance?: OutstandingBalance;
+        detailLines?: string[];
       }>;
     }>();
 
@@ -232,6 +244,11 @@ export default function BackendPage() {
       const payments = paymentsByBalance.get(balance.id) || [];
       const roll = rollupBalance(balance, payments);
       if (roll.remaining <= 0.0049) continue;
+      const paymentLines = payments
+        .slice()
+        .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+        .slice(0, 3)
+        .map((payment) => `Collected AED ${Number(payment.amount || 0).toFixed(2)} on ${new Date(payment.created_at).toLocaleDateString("en-GB")} via ${payment.payment_method || "unknown"}`);
       const group = groups.get(clinicId) || {
         clinicId,
         clinicName,
@@ -246,6 +263,7 @@ export default function BackendPage() {
         patientName: patientNameById.get(balance.patient_id) || "Unknown patient",
         originalDate: balance.original_date,
         balance,
+        detailLines: paymentLines.length > 0 ? [`Paid ${payments.length} time${payments.length === 1 ? "" : "s"}`].concat(paymentLines) : undefined,
       });
       groups.set(clinicId, group);
     }
@@ -258,6 +276,10 @@ export default function BackendPage() {
       const paid = (treatmentPlanPaymentsByPlanId.get(plan.id) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
       const remaining = Math.max(0, Number(plan.total_amount || 0) - paid);
       if (remaining <= 0.0049) continue;
+      const completedVisits = (treatmentPlanVisitsByPlanId.get(plan.id) || []).length;
+      const shownVisits = Math.max(completedVisits, plan.clinic_patient_file_id ? 1 : 0);
+      const totalVisits = Math.max(1, Number(plan.planned_visits || 0));
+      const visitSummary = `${Math.min(shownVisits, totalVisits)}/${totalVisits} visits`;
       const group = groups.get(clinicId) || {
         clinicId,
         clinicName,
@@ -271,12 +293,13 @@ export default function BackendPage() {
         status: "Unpaid",
         patientName: patientNameById.get(plan.patient_id) || "Unknown patient",
         originalDate: plan.created_at,
+        detailLines: [visitSummary, `Paid AED ${paid.toFixed(2)} of AED ${Number(plan.total_amount || 0).toFixed(2)}`],
       });
       groups.set(clinicId, group);
     }
 
     return [...groups.values()].sort((a, b) => a.clinicName.localeCompare(b.clinicName));
-  }, [outstandingBalances, paymentsByBalance, treatmentPlans, treatmentPlanPaymentsByPlanId, clinicNameById, patientNameById, selectedClinicId]);
+  }, [outstandingBalances, paymentsByBalance, treatmentPlans, treatmentPlanPaymentsByPlanId, treatmentPlanVisitsByPlanId, clinicNameById, patientNameById, selectedClinicId]);
 
   const selectedClinic = useMemo(
     () => clinics.find((c) => c.id === selectedClinicId) || null,
@@ -590,6 +613,7 @@ export default function BackendPage() {
       balancePaymentsResult,
       treatmentPlansResult,
       treatmentPlanPaymentsResult,
+      treatmentPlanVisitsResult,
     ] = await Promise.allSettled([
       supabase.from("patients").select("*"),
       supabase
@@ -603,6 +627,7 @@ export default function BackendPage() {
       supabase.from("balance_payments").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payments").select("*").order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_visits").select("*").order("visit_number", { ascending: true }),
     ]);
 
     if (patientsResult.status === "fulfilled") {
@@ -656,6 +681,17 @@ export default function BackendPage() {
         setTreatmentPlanPayments([]);
       } else {
         setTreatmentPlanPayments((treatmentPlanPaymentsResult.value.data || []) as TreatmentPlanPayment[]);
+      }
+    }
+
+    if (treatmentPlanVisitsResult.status === "fulfilled") {
+      if (treatmentPlanVisitsResult.value.error) {
+        if (treatmentPlanVisitsResult.value.error.code !== "42P01") {
+          console.warn("Failed loading treatment plan visits", treatmentPlanVisitsResult.value.error);
+        }
+        setTreatmentPlanVisits([]);
+      } else {
+        setTreatmentPlanVisits((treatmentPlanVisitsResult.value.data || []) as TreatmentPlanVisit[]);
       }
     }
 
@@ -1479,6 +1515,13 @@ export default function BackendPage() {
                               ? `${formatBalanceReference(item.balance)} · ${new Date(item.balance.original_date).toLocaleDateString("en-GB")}`
                               : `${item.label} · ${item.originalDate ? new Date(item.originalDate).toLocaleDateString("en-GB") : "No date"}`}
                           </p>
+                          {item.detailLines && item.detailLines.length > 0 && (
+                            <div className="mt-1 space-y-0.5 text-[11px] text-slate-500">
+                              {item.detailLines.map((line, index) => (
+                                <p key={`${item.id}-detail-${index}`} className="leading-snug">{line}</p>
+                              ))}
+                            </div>
+                          )}
                         </div>
                         <div className="flex items-center gap-2">
                           <span className={`text-sm font-semibold ${item.status === "Paid" ? "text-emerald-700" : item.status === "Partial" ? "text-amber-700" : "text-rose-700"}`}>

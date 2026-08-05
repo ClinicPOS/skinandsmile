@@ -13,7 +13,9 @@ import {
   validatePaymentAllocations,
 } from "../lib/payment-allocation";
 import { toMinorUnits } from "../lib/money";
+import { generateTreatmentPlanPaymentInvoiceHtml } from "../lib/generate-invoice-html";
 import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-payment-receipt";
+import { printHtmlWhenImagesReady } from "../lib/receipt-branding";
 import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 
 const PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"] as const;
@@ -32,6 +34,36 @@ const ALLOCATION_METHOD_OPTIONS: Array<{ value: PaymentMethodVariant; label: str
   { value: "tabby_card", label: "Tabby Card" },
   { value: "tamara", label: "Tamara" },
 ];
+
+type PostSaveActionAllocation = {
+  methodLabel: string;
+  invoiceAllocationAmount: number;
+  feeAmount: number;
+  customerChargedAmount: number;
+  providerReferenceNumber?: string | null;
+  terminalAuthorizationCode?: string | null;
+};
+
+type PostSaveActionContext = {
+  clinic: Clinic | null;
+  patientName: string;
+  patientFileNo: string;
+  planTitle: string;
+  planTotalAmount: number;
+  paymentArrangement: string;
+  agreedTotal: number;
+  amountSettledToday: number;
+  remainingAfterToday: number;
+  totalFeeAmount: number;
+  totalCustomerPaid: number;
+  cashierName: string;
+  services: Array<{ id: string; name: string; price: number; quantity?: number; teeth?: string[] }>;
+  allocations: PostSaveActionAllocation[];
+  plannedVisits: number;
+  completedVisits: number;
+  createdAt?: string;
+  referenceNo?: string;
+};
 
 function newAllocationDraft(methodVariant: PaymentMethodVariant | "" = "", amount = ""): PaymentAllocationDraft {
   return {
@@ -103,6 +135,8 @@ export function PosPlanCheckoutModal({
   const [planNotes, setPlanNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [step, setStep] = useState<"config" | "payment">("config");
+  const [postSaveActionContext, setPostSaveActionContext] = useState<PostSaveActionContext | null>(null);
+  const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
 
   const agreedTotalNum = parseFloat(agreedTotal) || 0;
   const amountTodayNum = parseFloat(amountToday) || 0;
@@ -118,6 +152,148 @@ export function PosPlanCheckoutModal({
   const allocationBalanced = amountTodayMinor === allocationInvoiceMinor;
   const paymentFeeTotal = previewAllocations.reduce((sum, allocation) => sum + allocation.feeAmount, 0);
   const customerChargeTotal = previewAllocations.reduce((sum, allocation) => sum + allocation.customerChargedAmount, 0);
+
+  function buildPostSaveActionContext(
+    allocations: PostSaveActionAllocation[],
+    createdAt?: string,
+    referenceNo?: string,
+  ): PostSaveActionContext {
+    return {
+      clinic,
+      patientName,
+      patientFileNo,
+      planTitle: planTitle.trim(),
+      planTotalAmount: agreedTotalNum,
+      paymentArrangement,
+      agreedTotal: agreedTotalNum,
+      amountSettledToday: amountTodayNum,
+      remainingAfterToday,
+      totalFeeAmount: paymentFeeTotal,
+      totalCustomerPaid: customerChargeTotal,
+      cashierName: receptionistName || "Reception",
+      services,
+      allocations,
+      plannedVisits: parseInt(plannedVisits, 10) || 1,
+      completedVisits: 1,
+      createdAt,
+      referenceNo,
+    };
+  }
+
+  async function handleDownloadInvoicePdf() {
+    if (!postSaveActionContext) return;
+    setIsDownloadingInvoice(true);
+    try {
+      const html = generateTreatmentPlanPaymentInvoiceHtml({
+        clinic: postSaveActionContext.clinic,
+        receiptNumber: postSaveActionContext.referenceNo || `TPP-${String(postSaveActionContext.createdAt || Date.now()).slice(0, 8)}`,
+        issuedAt: new Date(postSaveActionContext.createdAt || Date.now()),
+        cashierName: postSaveActionContext.cashierName,
+        patient: {
+          name: postSaveActionContext.patientName,
+          phone: null,
+          fileNumber: postSaveActionContext.patientFileNo || undefined,
+        },
+        doctorName: undefined,
+        planTitle: postSaveActionContext.planTitle,
+        planTotalAmount: postSaveActionContext.planTotalAmount,
+        amountSettledToday: postSaveActionContext.amountSettledToday,
+        paymentFeeAmount: postSaveActionContext.totalFeeAmount,
+        paymentAllocations: postSaveActionContext.allocations.map((allocation) => ({
+          methodLabel: allocation.methodLabel,
+          invoiceAllocationAmount: allocation.invoiceAllocationAmount,
+          feeAmount: allocation.feeAmount,
+          customerChargedAmount: allocation.customerChargedAmount,
+          providerReferenceNumber: allocation.providerReferenceNumber,
+          terminalAuthorizationCode: allocation.terminalAuthorizationCode,
+        })),
+        remainingAfterToday: postSaveActionContext.remainingAfterToday,
+        plannedVisits: postSaveActionContext.plannedVisits,
+        completedVisits: postSaveActionContext.completedVisits,
+        notes: `Payment arrangement: ${postSaveActionContext.paymentArrangement}`,
+      });
+      const res = await fetch("/api/generate-invoice-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ html, filename: `${postSaveActionContext.planTitle.replace(/\s+/g, "_").slice(0, 40)}_Invoice.pdf` }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Could not generate invoice PDF: ${err.error || res.statusText}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${postSaveActionContext.planTitle.replace(/\s+/g, "_").slice(0, 40)}_Invoice.pdf`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (error: any) {
+      alert(`Invoice download failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setIsDownloadingInvoice(false);
+    }
+  }
+
+  function handlePrintA4Invoice() {
+    if (!postSaveActionContext) return;
+    const html = generateTreatmentPlanPaymentInvoiceHtml({
+      clinic: postSaveActionContext.clinic,
+      receiptNumber: postSaveActionContext.referenceNo || `TPP-${String(postSaveActionContext.createdAt || Date.now()).slice(0, 8)}`,
+      issuedAt: new Date(postSaveActionContext.createdAt || Date.now()),
+      cashierName: postSaveActionContext.cashierName,
+      patient: {
+        name: postSaveActionContext.patientName,
+        phone: null,
+        fileNumber: postSaveActionContext.patientFileNo || undefined,
+      },
+      doctorName: undefined,
+      planTitle: postSaveActionContext.planTitle,
+      planTotalAmount: postSaveActionContext.planTotalAmount,
+      amountSettledToday: postSaveActionContext.amountSettledToday,
+      paymentFeeAmount: postSaveActionContext.totalFeeAmount,
+      paymentAllocations: postSaveActionContext.allocations.map((allocation) => ({
+        methodLabel: allocation.methodLabel,
+        invoiceAllocationAmount: allocation.invoiceAllocationAmount,
+        feeAmount: allocation.feeAmount,
+        customerChargedAmount: allocation.customerChargedAmount,
+        providerReferenceNumber: allocation.providerReferenceNumber,
+        terminalAuthorizationCode: allocation.terminalAuthorizationCode,
+      })),
+      remainingAfterToday: postSaveActionContext.remainingAfterToday,
+      plannedVisits: postSaveActionContext.plannedVisits,
+      completedVisits: postSaveActionContext.completedVisits,
+      notes: `Payment arrangement: ${postSaveActionContext.paymentArrangement}`,
+    });
+    printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
+  }
+
+  function handlePrintReceipt() {
+    if (!postSaveActionContext) return;
+    printTreatmentPlanPaymentReceipt({
+      clinic: postSaveActionContext.clinic,
+      patientName: postSaveActionContext.patientName,
+      patientFileNo: postSaveActionContext.patientFileNo,
+      planTitle: postSaveActionContext.planTitle,
+      paymentArrangement: postSaveActionContext.paymentArrangement,
+      agreedTotal: postSaveActionContext.agreedTotal,
+      amountSettledToday: postSaveActionContext.amountSettledToday,
+      remainingAfterToday: postSaveActionContext.remainingAfterToday,
+      totalFeeAmount: postSaveActionContext.totalFeeAmount,
+      totalCustomerPaid: postSaveActionContext.totalCustomerPaid,
+      cashierName: postSaveActionContext.cashierName,
+      services: postSaveActionContext.services,
+      allocations: postSaveActionContext.allocations.map((allocation) => ({
+        methodLabel: allocation.methodLabel,
+        invoiceAllocationAmount: allocation.invoiceAllocationAmount,
+        feeAmount: allocation.feeAmount,
+        customerChargedAmount: allocation.customerChargedAmount,
+      })),
+      createdAt: postSaveActionContext.createdAt,
+      referenceNo: postSaveActionContext.referenceNo,
+    });
+  }
 
   if (!isOpen) return null;
 
@@ -241,29 +417,22 @@ export function PosPlanCheckoutModal({
           }
           const totalCustomerPaid = allocations.reduce((sum, allocation) => sum + allocation.customerChargedAmount, 0);
           const totalFee = allocations.reduce((sum, allocation) => sum + allocation.feeAmount, 0);
+          const referenceNo = structuredPaymentRecord?.payment_record_id
+            ? `TPP-${String(structuredPaymentRecord.payment_record_id).slice(0, 8).toUpperCase()}`
+            : undefined;
 
-          printTreatmentPlanPaymentReceipt({
-            clinic,
-            patientName,
-            patientFileNo,
-            planTitle: planTitle.trim(),
-            paymentArrangement,
-            agreedTotal: agreedTotalNum,
-            amountSettledToday: amountTodayNum,
-            remainingAfterToday,
-            totalFeeAmount: totalFee,
-            totalCustomerPaid,
-            cashierName: receptionistName || "Reception",
-            services,
-            allocations: allocations.map((allocation) => ({
+          setPostSaveActionContext(buildPostSaveActionContext(
+            allocations.map((allocation) => ({
               methodLabel: paymentVariantLabel(allocation.methodVariant),
               invoiceAllocationAmount: allocation.invoiceAllocationAmount,
               feeAmount: allocation.feeAmount,
               customerChargedAmount: allocation.customerChargedAmount,
+              providerReferenceNumber: allocation.providerReferenceNumber,
+              terminalAuthorizationCode: allocation.terminalAuthorizationCode,
             })),
-            createdAt: structuredPaymentRecord?.created_at,
-            referenceNo: structuredPaymentRecord?.payment_record_id ? `TPP-${String(structuredPaymentRecord.payment_record_id).slice(0, 8).toUpperCase()}` : undefined,
-          });
+            structuredPaymentRecord?.created_at,
+            referenceNo,
+          ));
         }
       }
 
@@ -680,6 +849,44 @@ export function PosPlanCheckoutModal({
                   Allocations must match AED {amountTodayNum.toFixed(2)} before you can continue.
                 </p>
               )}
+            </div>
+          )}
+
+          {postSaveActionContext && (
+            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/55 backdrop-blur-sm">
+              <div className="mx-4 w-full max-w-md rounded-3xl border border-cyan-100 bg-white p-6 shadow-2xl">
+                <p className="text-xs font-bold uppercase tracking-[0.3em] text-cyan-700">Plan Payment Saved</p>
+                <h3 className="mt-2 text-xl font-semibold text-slate-900">What would you like to do next?</h3>
+                <p className="mt-2 text-sm text-slate-600">Print, download, or keep going without sharing the invoice.</p>
+
+                <div className="mt-5 grid gap-3">
+                  <button
+                    onClick={handlePrintReceipt}
+                    className="rounded-2xl bg-slate-900 px-3 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+                  >
+                    Print Receipt
+                  </button>
+                  <button
+                    onClick={handleDownloadInvoicePdf}
+                    disabled={isDownloadingInvoice}
+                    className="rounded-2xl bg-amber-600 px-3 py-3 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:opacity-60"
+                  >
+                    {isDownloadingInvoice ? "Generating…" : "⬇ Download PDF"}
+                  </button>
+                  <button
+                    onClick={handlePrintA4Invoice}
+                    className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-3 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+                  >
+                    🖨 Print A4 Invoice
+                  </button>
+                  <button
+                    onClick={() => setPostSaveActionContext(null)}
+                    className="rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
