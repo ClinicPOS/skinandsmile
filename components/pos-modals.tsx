@@ -2696,6 +2696,26 @@ export function ReceiptHistoryModal({
       };
     });
 
+    // Recalculate subtotal and discount from items to ensure correct values for reprints
+    // This is needed because old receipts may have incorrect summary values saved
+    let recalculatedSubtotal = 0;
+    let recalculatedDiscount = 0;
+    
+    receiptItems.forEach((item) => {
+      const quantity = Number(item.quantity ?? 1);
+      const finalUnitPrice = Number(item.price ?? 0);
+      const originalUnitPrice = Number(
+        item.original_price ?? item.price ?? 0
+      );
+      
+      const originalLineTotal = originalUnitPrice * quantity;
+      const finalLineTotal = finalUnitPrice * quantity;
+      const lineDiscount = Math.max(0, originalLineTotal - finalLineTotal);
+      
+      recalculatedSubtotal += originalLineTotal;
+      recalculatedDiscount += lineDiscount;
+    });
+
     const options: BuildThermalReceiptHtmlOptions = {
       title: "REPRINT",
       clinic,
@@ -2711,8 +2731,8 @@ export function ReceiptHistoryModal({
       patientFileNumber: patientFileNo,
       doctorField: doctors.find((d) => d.id === receipt.doctor_id)?.name || "-",
       items: thermalItems,
-      subtotal: Number(receipt.subtotal || 0),
-      discountAmount: Number(receipt.discount_amount || 0),
+      subtotal: recalculatedSubtotal,
+      discountAmount: recalculatedDiscount,
       vat: Number(receipt.vat || 0),
       total: Number(receipt.total || 0),
       allocations: [],
@@ -2740,13 +2760,30 @@ export function ReceiptHistoryModal({
       receiptItems = data || [];
     }
 
-    const subtotal = Number(receipt.subtotal || 0);
     const vatAmount = Number(receipt.vat || 0);
     const total = Number(receipt.total || 0);
-    const discountAmount = Number(receipt.discount_amount || 0);
     const paidAtSale = receipt.amount_paid != null ? Number(receipt.amount_paid) : total;
     const creditAtSale = Number(receipt.credit_applied || 0);
     const outstandingBalance = Math.max(0, total - paidAtSale - creditAtSale);
+
+    // Recalculate subtotal and discount from items to ensure correct values for reprints
+    let recalculatedSubtotal = 0;
+    let recalculatedDiscount = 0;
+    
+    receiptItems.forEach((item: any) => {
+      const quantity = Number(item.quantity ?? 1);
+      const finalUnitPrice = Number(item.price ?? 0);
+      const originalUnitPrice = Number(
+        item.original_price ?? item.price ?? 0
+      );
+      
+      const originalLineTotal = originalUnitPrice * quantity;
+      const finalLineTotal = finalUnitPrice * quantity;
+      const lineDiscount = Math.max(0, originalLineTotal - finalLineTotal);
+      
+      recalculatedSubtotal += originalLineTotal;
+      recalculatedDiscount += lineDiscount;
+    });
 
     const html = generateInvoiceHtml({
       clinic: clinicForReceipt,
@@ -2776,7 +2813,7 @@ export function ReceiptHistoryModal({
           taxableAmount: finalUnitPrice,
         };
       }),
-      totalDiscount: discountAmount,
+      totalDiscount: recalculatedDiscount,
       vatAmount,
       paymentFeeAmount: Number(receipt.gateway_fee || 0),
       grandTotal: total,

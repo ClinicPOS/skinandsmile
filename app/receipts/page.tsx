@@ -5083,38 +5083,6 @@ export default function ReceiptsPage() {
                     >
                       {isSavingReceipt ? "Saving..." : "Proceed without Printing"}
                     </button>
-                    <div className="my-1 border-t border-slate-100" />
-                    <button
-                      onClick={async () => {
-                        const saved = await confirmPaymentAndSave();
-                        if (!saved) return;
-                        setShowPrintModal(false);
-                        setIsDownloadingInvoice(true);
-                        try {
-                          await downloadInvoicePdf(saved);
-                        } finally {
-                          setIsDownloadingInvoice(false);
-                        }
-                        clearPosForm();
-                      }}
-                      className="inline-flex items-center justify-center gap-2 rounded-2xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-500"
-                      disabled={isSavingReceipt || isDownloadingInvoice}
-                    >
-                      {isDownloadingInvoice ? "Generating PDF…" : "⬇ Download Invoice PDF"}
-                    </button>
-                    <button
-                      onClick={async () => {
-                        const saved = await confirmPaymentAndSave();
-                        if (!saved) return;
-                        setShowPrintModal(false);
-                        printInvoiceA4(saved);
-                        clearPosForm();
-                      }}
-                      className="inline-flex items-center justify-center gap-2 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
-                      disabled={isSavingReceipt}
-                    >
-                      🖨 Print A4 Invoice
-                    </button>
                     <button
                       onClick={() => {
                         setShowPrintModal(false);
