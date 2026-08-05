@@ -2211,7 +2211,7 @@ export default function ReceiptsPage() {
       const discountAmount = Number(receipt.discount_amount || 0);
       const netTotal = Number(receipt.total || 0);
       const vatAmount = Number(receipt.vat || 0);
-      const grossTotal = Number(receipt.subtotal || 0) + discountAmount;
+      const grossTotal = Number(receipt.subtotal || 0);
       const refundAmount = Number(refundMap.get(receiptId) || 0);
       // NULL amount_paid = paid in full; the breakdown reflects money actually received.
       const paidToday = Number(receipt.amount_paid ?? receipt.total ?? 0);
