@@ -9,8 +9,10 @@ import { calculateAge } from "../../lib/utils";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
 import { effectiveServiceCategory } from "../../lib/service-categories";
+import { createClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
 
 const BACKEND_SELECTED_CLINIC_KEY = "backendSelectedClinicId";
+const BACKEND_PATIENTS_PAGE_SIZE = 20;
 
 export const dynamic = "force-dynamic";
 
@@ -57,7 +59,50 @@ function BackendPageContent() {
   const activeSection = resolveBackendSection(pathname);
   const requestedClinicId = searchParams.get("clinicId") || "";
 
-  const [patients, setPatients] = useState<Patient[]>([]);
+  type BackendPatient = Patient & {
+    clinic_file_no: string;
+    clinic_patient_file_id: string;
+  };
+
+  type ClinicPatientFileRow = {
+    id: string;
+    file_no: string;
+    patient_id: string;
+    patients:
+      | {
+          id: string;
+          patient_number: number | null;
+          name: string | null;
+          phone: string | null;
+          email: string | null;
+          notes: string | null;
+          date_of_birth: string | null;
+          sex: string | null;
+          nationality: string | null;
+          emirates_id: string | null;
+          passport_number: string | null;
+          mrn: string | null;
+          address: string | null;
+        }
+      | Array<{
+          id: string;
+          patient_number: number | null;
+          name: string | null;
+          phone: string | null;
+          email: string | null;
+          notes: string | null;
+          date_of_birth: string | null;
+          sex: string | null;
+          nationality: string | null;
+          emirates_id: string | null;
+          passport_number: string | null;
+          mrn: string | null;
+          address: string | null;
+        }>
+      | null;
+  };
+
+  const [patients, setPatients] = useState<BackendPatient[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [services, setServices] = useState<Service[]>([]);
   const [receptionists, setReceptionists] = useState<Receptionist[]>([]);
@@ -195,14 +240,18 @@ function BackendPageContent() {
     if (!keyword) return patients;
     return patients.filter((patient) =>
       String(patient.name || "").toLowerCase().includes(keyword)
+      || String(patient.phone || "").toLowerCase().includes(keyword)
+      || String(patient.clinic_file_no || "").toLowerCase().includes(keyword)
+      || String(patient.patient_number || "").toLowerCase().includes(keyword)
     );
   }, [patients, patientSearch]);
 
-  const patientTotalPages = Math.max(1, Math.ceil(filteredPatients.length / 5));
+  const patientTotalPages = Math.max(1, Math.ceil(filteredPatients.length / BACKEND_PATIENTS_PAGE_SIZE));
+  const currentPatientPage = Math.min(patientPage, patientTotalPages);
   const pagedPatients = useMemo(() => {
-    const start = (patientPage - 1) * 5;
-    return filteredPatients.slice(start, start + 5);
-  }, [filteredPatients, patientPage]);
+    const start = (currentPatientPage - 1) * BACKEND_PATIENTS_PAGE_SIZE;
+    return filteredPatients.slice(start, start + BACKEND_PATIENTS_PAGE_SIZE);
+  }, [filteredPatients, currentPatientPage]);
 
   const balancesByPatient = useMemo(() => {
     const map = new Map<string, OutstandingBalance[]>();
@@ -703,21 +752,19 @@ function BackendPageContent() {
 
     const clinicRows = (clinicsResult.data || []) as Clinic[];
     setClinics(clinicRows);
-    setSelectedClinicId((prev) => {
-      if (prev && prev !== "all" && clinicRows.some((c) => c.id === prev)) return prev;
+    const resolvedClinicId = (() => {
+      const saved = typeof window !== "undefined" ? window.localStorage.getItem(BACKEND_SELECTED_CLINIC_KEY) : "";
       if (requestedClinicId && clinicRows.some((c) => c.id === requestedClinicId)) return requestedClinicId;
-      if (typeof window !== "undefined") {
-        const saved = window.localStorage.getItem(BACKEND_SELECTED_CLINIC_KEY);
-        if (saved && clinicRows.some((c) => c.id === saved)) return saved;
-      }
+      if (saved && clinicRows.some((c) => c.id === saved)) return saved;
       return clinicRows[0]?.id ?? "";
-    });
+    })();
+    setSelectedClinicId(resolvedClinicId);
     setServices((servicesResult.data || []) as Service[]);
     setDoctors((doctorsResult.data || []) as Doctor[]);
     setReceptionists((receptionistsResult.data || []) as Receptionist[]);
 
     const [
-      patientsResult,
+      clinicPatientsResult,
       cashSessionsResult,
       sessionsResult,
       logsResult,
@@ -727,7 +774,13 @@ function BackendPageContent() {
       treatmentPlanPaymentsResult,
       treatmentPlanVisitsResult,
     ] = await Promise.allSettled([
-      supabase.from("patients").select("*"),
+      resolvedClinicId
+        ? supabase
+            .from("clinic_patient_files")
+            .select("id, file_no, patient_id, patients(id, patient_number, name, phone, email, notes, date_of_birth, sex, nationality, emirates_id, passport_number, mrn, address)")
+            .eq("clinic_id", resolvedClinicId)
+            .order("file_no", { ascending: true })
+        : Promise.resolve({ data: [], error: null }),
       supabase
         .from("cash_register_sessions")
         .select("*")
@@ -742,8 +795,36 @@ function BackendPageContent() {
       supabase.from("treatment_plan_visits").select("*").order("visit_number", { ascending: true }),
     ]);
 
-    if (patientsResult.status === "fulfilled") {
-      setPatients((patientsResult.value.data || []) as Patient[]);
+    if (clinicPatientsResult.status === "fulfilled") {
+      if (clinicPatientsResult.value.error) {
+        console.warn("Failed loading clinic patients", clinicPatientsResult.value.error);
+        setPatients([]);
+      } else {
+        const mappedPatients = ((clinicPatientsResult.value.data || []) as ClinicPatientFileRow[])
+          .map((row) => {
+            const patient = Array.isArray(row.patients) ? row.patients[0] : row.patients;
+            if (!patient?.id) return null;
+            return {
+              id: patient.id,
+              patient_number: patient.patient_number,
+              name: patient.name || "Unknown patient",
+              phone: patient.phone || null,
+              email: patient.email || null,
+              notes: patient.notes || null,
+              date_of_birth: patient.date_of_birth || null,
+              sex: patient.sex || null,
+              nationality: patient.nationality || null,
+              emirates_id: patient.emirates_id || null,
+              passport_number: patient.passport_number || null,
+              mrn: patient.mrn || null,
+              address: patient.address || null,
+              clinic_file_no: String(row.file_no || ""),
+              clinic_patient_file_id: row.id,
+            };
+          })
+          .filter((patient): patient is BackendPatient => patient !== null);
+        setPatients(mappedPatients);
+      }
     }
     if (sessionsResult.status === "fulfilled") {
       setActiveSessions((sessionsResult.value.data || []) as typeof activeSessions);
@@ -841,6 +922,11 @@ function BackendPageContent() {
   }
 
   async function exportData() {
+    const { data: allPatientsData } = await supabase
+      .from("patients")
+      .select("id, patient_number, name, phone, email, date_of_birth, sex, nationality, emirates_id, passport_number, mrn, notes");
+
+    const allPatients = (allPatientsData || []) as Patient[];
     const { data: receipts } = await supabase
       .from("receipts")
       .select("id, receipt_number, created_at, patient_id, receptionist_id, payment_method, subtotal, discount_amount, total");
@@ -874,9 +960,9 @@ function BackendPageContent() {
 
     // Patients CSV — always all patients
     const patientRows: string[][] = [
-      ["Name", "Phone", "Email", "Date of Birth", "Sex", "Nationality", "Emirates ID", "Passport No.", "MRN", "Notes", "Clinics Visited", "Last Visit", "Days Since Last Visit"],
+      ["Patient #", "Name", "Phone", "Email", "Date of Birth", "Sex", "Nationality", "Emirates ID", "Passport No.", "MRN", "Notes", "Clinics Visited", "Last Visit", "Days Since Last Visit"],
     ];
-    for (const p of patients) {
+    for (const p of allPatients) {
       const clinicsVisited = [...(patientClinicMap[p.id] || [])].join(", ");
       const lastVisitRaw = patientLastVisit[p.id];
       const lastVisitStr = lastVisitRaw ? new Date(lastVisitRaw).toLocaleDateString("en-GB") : "Never";
@@ -884,6 +970,7 @@ function BackendPageContent() {
         ? Math.floor((today.getTime() - new Date(lastVisitRaw).setHours(0, 0, 0, 0)) / 86400000)
         : "";
       patientRows.push([
+        String(p.patient_number || ""),
         p.name || "",
         p.phone || "",
         p.email || "",
@@ -905,7 +992,7 @@ function BackendPageContent() {
       ["Receipt #", "Date", "Time", "Patient", "Clinic", "Receptionist", "Payment Method", "Subtotal (AED)", "Discount (AED)", "Total (AED)"],
     ];
     for (const r of filteredReceipts) {
-      const patient = patients.find((p) => p.id === r.patient_id);
+      const patient = allPatients.find((p) => p.id === r.patient_id);
       const rec = receptionists.find((p) => p.id === r.receptionist_id);
       const clinic = clinics.find((c) => c.id === rec?.clinic_id);
       const date = new Date(r.created_at);
@@ -934,24 +1021,55 @@ function BackendPageContent() {
       alert("Patient name is required.");
       return;
     }
+    if (!selectedClinicId) {
+      alert("Please select a clinic before adding a patient.");
+      return;
+    }
 
-    const { error } = await supabase.from("patients").insert([
-      {
-        name: patientName,
-        phone: patientPhone,
-        email: patientEmail,
-        notes: patientNotes,
-        date_of_birth: patientDateOfBirth || null,
-        sex: patientSex || null,
-        nationality: patientNationality || null,
-        emirates_id: patientEmiratesId || null,
-        passport_number: patientPassportNumber || null,
-        mrn: patientMrn || null,
-      },
-    ]);
+    const { data: patientData, error } = await supabase
+      .from("patients")
+      .insert([
+        {
+          name: patientName,
+          phone: patientPhone,
+          email: patientEmail,
+          notes: patientNotes,
+          date_of_birth: patientDateOfBirth || null,
+          sex: patientSex || null,
+          nationality: patientNationality || null,
+          emirates_id: patientEmiratesId || null,
+          passport_number: patientPassportNumber || null,
+          mrn: patientMrn || null,
+        },
+      ])
+      .select("*")
+      .single();
 
-    if (error) {
+    if (error || !patientData) {
       alert("Error saving patient");
+      return;
+    }
+
+    try {
+      const fileNo = await nextClinicFileNumber(selectedClinicId);
+      const clinicFile = await createClinicPatientFile({
+        clinicId: selectedClinicId,
+        patientId: String(patientData.id),
+        fileNo,
+        mrn: patientMrn || null,
+        clinicalNotes: patientNotes || null,
+      });
+      setPatients((prev) => [
+        {
+          ...(patientData as Patient),
+          clinic_file_no: clinicFile.file_no,
+          clinic_patient_file_id: clinicFile.id,
+        },
+        ...prev,
+      ]);
+    } catch (clinicFileError) {
+      await supabase.from("patients").delete().eq("id", patientData.id);
+      alert(clinicFileError instanceof Error ? clinicFileError.message : "Failed to create clinic patient file");
       return;
     }
 
@@ -965,7 +1083,6 @@ function BackendPageContent() {
     setPatientEmiratesId("");
     setPatientPassportNumber("");
     setPatientMrn("");
-    loadAll();
   }
 
   async function updatePatient(id: string) {
@@ -1006,7 +1123,25 @@ function BackendPageContent() {
     setEditingPatientEmiratesId("");
     setEditingPatientPassportNumber("");
     setEditingPatientMrn("");
-    loadAll();
+    setPatients((prev) =>
+      prev.map((patient) =>
+        patient.id === id
+          ? {
+              ...patient,
+              name: editingPatientName,
+              phone: editingPatientPhone,
+              email: editingPatientEmail,
+              notes: editingPatientNotes,
+              date_of_birth: editingPatientDob || null,
+              sex: editingPatientSex || null,
+              nationality: editingPatientNationality || null,
+              emirates_id: editingPatientEmiratesId || null,
+              passport_number: editingPatientPassportNumber || null,
+              mrn: editingPatientMrn || null,
+            }
+          : patient
+      )
+    );
   }
 
   async function deletePatient(id: string) {
@@ -1033,7 +1168,7 @@ function BackendPageContent() {
       setEditingPatientEmiratesId("");
       setEditingPatientPassportNumber("");
     }
-    loadAll();
+    setPatients((prev) => prev.filter((patient) => patient.id !== id));
   }
 
   async function addDoctor() {
@@ -1767,13 +1902,16 @@ function BackendPageContent() {
       {activeSection === "patients" && (
         <div className="rounded-[28px] border border-slate-200 bg-white/92 p-5 shadow-[0_20px_80px_-35px_rgba(14,116,144,0.18)]">
           <h2 className="text-lg font-semibold text-slate-900">Patients</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Showing only patients linked to the selected clinic. Large clinics are paginated for easier browsing.
+          </p>
           <input
             value={patientSearch}
             onChange={(e) => {
               setPatientSearch(e.target.value);
               setPatientPage(1);
             }}
-            placeholder="Search patient by name"
+            placeholder="Search name, phone, file no, or patient number"
             className="mt-4 w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
           />
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -1948,7 +2086,11 @@ function BackendPageContent() {
                     >
                       <div>
                         <p className="text-sm font-semibold text-slate-900">{patient.name}</p>
-                        <p className="text-xs text-slate-500">{patient.phone || "-"}</p>
+                        <p className="text-xs text-slate-500">
+                          {patient.phone || "-"}
+                          {" "}· File No: {patient.clinic_file_no || "—"}
+                          {patient.patient_number ? ` · Patient #${patient.patient_number}` : ""}
+                        </p>
                       </div>
                       <span className="text-slate-400 text-xs">{expandedPatientId === patient.id ? "▲" : "▼"}</span>
                     </button>
@@ -2068,7 +2210,7 @@ function BackendPageContent() {
               >
                 ← Prev
               </button>
-              <span className="text-xs text-slate-500">Page {patientPage} of {patientTotalPages}</span>
+              <span className="text-xs text-slate-500">Page {currentPatientPage} of {patientTotalPages}</span>
               <button
                 onClick={() => setPatientPage((p) => Math.min(patientTotalPages, p + 1))}
                 disabled={patientPage >= patientTotalPages}
