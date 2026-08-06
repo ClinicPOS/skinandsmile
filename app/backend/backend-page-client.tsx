@@ -1074,7 +1074,19 @@ function BackendPageContent() {
       });
       setPatients((prev) => [
         {
-          ...(patientData as Patient),
+          id: String(patientData.id),
+          patient_number: patientData.patient_number ?? null,
+          name: String(patientData.name || ""),
+          phone: patientData.phone ?? null,
+          email: patientData.email ?? null,
+          notes: patientData.notes ?? null,
+          date_of_birth: patientData.date_of_birth ?? null,
+          sex: patientData.sex ?? null,
+          nationality: patientData.nationality ?? null,
+          emirates_id: patientData.emirates_id ?? null,
+          passport_number: patientData.passport_number ?? null,
+          mrn: patientData.mrn ?? null,
+          address: patientData.address ?? null,
           clinic_file_no: clinicFile.file_no,
           clinic_patient_file_id: clinicFile.id,
         },
