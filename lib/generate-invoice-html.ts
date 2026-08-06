@@ -323,21 +323,8 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
   const logoOffsetStyle = logoSettings.offsetXMm !== 0 || logoSettings.offsetYMm !== 0
     ? `transform: translate(${logoSettings.offsetXMm}mm, ${logoSettings.offsetYMm}mm);`
     : "";
-  const logoInlineReserveMm = hasLogo
-    ? Math.max(
-        0,
-        logoSettings.widthMm + 4 + (
-          logoSettings.alignment === "left"
-            ? Math.max(0, logoSettings.offsetXMm)
-            : logoSettings.alignment === "right"
-              ? Math.max(0, -logoSettings.offsetXMm)
-              : 0
-        )
-      )
-    : 0;
-  const logoBlockReserveMm = hasLogo
-    ? Math.max(0, logoSettings.heightMm + 4 + Math.max(0, logoSettings.offsetYMm))
-    : 0;
+  const logoStageWidthMm = hasLogo ? 42 : 0;
+  const logoStageHeightMm = hasLogo ? 24 : 0;
   const previewPageClass = opts.previewPaperMode ? "page-shell preview-paper" : "page-shell";
 
   const clinicNameSafe = escHtml(clinicName);
@@ -408,18 +395,18 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
       position: relative;
       flex: 1;
       min-width: 0;
-      min-height: ${logoBlockReserveMm > 0 ? `${logoBlockReserveMm}mm` : "0"};
+      min-height: ${logoStageHeightMm > 0 ? `${logoStageHeightMm}mm` : "0"};
       padding-right: 4mm;
     }
     .header-left.logo-align-center .clinic-info {
       text-align: center;
-      padding-top: ${logoBlockReserveMm > 0 ? `${logoBlockReserveMm}mm` : "0"};
+      padding-top: ${logoStageHeightMm > 0 ? `${logoStageHeightMm}mm` : "0"};
     }
     .header-left.logo-align-left .clinic-info {
-      padding-left: ${logoInlineReserveMm > 0 ? `${logoInlineReserveMm}mm` : "0"};
+      padding-left: ${logoStageWidthMm > 0 ? `${logoStageWidthMm}mm` : "0"};
     }
     .header-left.logo-align-right .clinic-info {
-      padding-right: ${logoInlineReserveMm > 0 ? `${logoInlineReserveMm}mm` : "0"};
+      padding-right: ${logoStageWidthMm > 0 ? `${logoStageWidthMm}mm` : "0"};
     }
 
     .logo-wrap {
@@ -429,10 +416,16 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
       display: flex;
       align-items: flex-start;
       justify-content: flex-start;
-      min-width: 0;
+      width: ${logoStageWidthMm > 0 ? `${logoStageWidthMm}mm` : "0"};
+      min-width: ${logoStageWidthMm > 0 ? `${logoStageWidthMm}mm` : "0"};
+      height: ${logoStageHeightMm > 0 ? `${logoStageHeightMm}mm` : "0"};
+      min-height: ${logoStageHeightMm > 0 ? `${logoStageHeightMm}mm` : "0"};
+      overflow: visible;
       pointer-events: none;
       ${logoOffsetStyle}
     }
+    .header-left.logo-align-center .logo-wrap { justify-content: center; }
+    .header-left.logo-align-right .logo-wrap { justify-content: flex-end; }
     .header-left.logo-align-left .logo-wrap { left: 0; }
     .header-left.logo-align-center .logo-wrap { left: 50%; transform: translate(calc(-50% + ${logoSettings.offsetXMm}mm), ${logoSettings.offsetYMm}mm); }
     .header-left.logo-align-right .logo-wrap { right: 0; }
