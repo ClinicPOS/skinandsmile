@@ -1,7 +1,6 @@
 import qrcode from "qrcode-generator";
-import { getInvoiceTheme } from "./invoice-themes";
-import { getReceiptLogoPath } from "./receipt-branding";
-import type { Clinic, Patient, Doctor } from "./types";
+import { getA4InvoiceLogoPath, getA4InvoiceLogoSettings, getA4InvoiceTheme } from "./a4-invoice-branding";
+import type { Clinic, Patient } from "./types";
 import { truncateCurrency } from "./money";
 
 export type InvoiceStatus = "PAID" | "PARTIALLY PAID" | "UNPAID" | "REFUNDED";
@@ -29,7 +28,33 @@ export interface InvoiceItem {
 }
 
 export interface GenerateInvoiceHtmlOptions {
-  clinic: (Pick<Clinic, "name" | "logo" | "phone" | "whatsapp" | "instagram" | "tiktok" | "facebook" | "address" | "trn" | "receipt_qr_url" | "receipt_print_name" | "receipt_title"> & { email?: string | null; website?: string | null }) | null | undefined;
+  clinic: (Pick<
+    Clinic,
+    | "name"
+    | "logo"
+    | "phone"
+    | "whatsapp"
+    | "instagram"
+    | "tiktok"
+    | "facebook"
+    | "address"
+    | "trn"
+    | "receipt_qr_url"
+    | "receipt_print_name"
+    | "receipt_title"
+    | "a4_invoice_logo_url"
+    | "a4_invoice_logo_width_mm"
+    | "a4_invoice_logo_height_mm"
+    | "a4_invoice_logo_alignment"
+    | "a4_invoice_logo_offset_x_mm"
+    | "a4_invoice_logo_offset_y_mm"
+    | "a4_invoice_primary_color"
+    | "a4_invoice_secondary_color"
+    | "a4_invoice_accent_color"
+    | "a4_invoice_text_color"
+    | "a4_invoice_divider_color"
+    | "a4_invoice_slogan"
+  > & { email?: string | null; website?: string | null }) | null | undefined;
   receiptNumber: string;
   invoiceStatus: InvoiceStatus;
   issuedAt: Date;
@@ -67,6 +92,8 @@ export interface GenerateInvoiceHtmlOptions {
   notes?: string | null;
   /** Whether to include Arabic bilingual labels */
   bilingual?: boolean;
+  /** When true, render inside an A4 paper preview shell for on-screen previews */
+  previewPaperMode?: boolean;
 }
 
 export interface TreatmentPlanInvoiceContext {
@@ -164,9 +191,9 @@ export function generateTreatmentPlanPaymentInvoiceHtml(ctx: TreatmentPlanInvoic
 }
 
 export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
-  const theme = getInvoiceTheme(opts.clinic?.logo);
+  const theme = getA4InvoiceTheme(opts.clinic);
   const logoPath = (() => {
-    const resolvedPath = getReceiptLogoPath(opts.clinic);
+    const resolvedPath = getA4InvoiceLogoPath(opts.clinic);
     if (!resolvedPath || /^https?:\/\//i.test(resolvedPath) || resolvedPath.startsWith("data:")) {
       return resolvedPath;
     }
@@ -187,6 +214,8 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
   const clinicTiktok = opts.clinic?.tiktok || "";
   const clinicTrn = opts.clinic?.trn || "";
   const tagline = theme.tagline;
+  const logoSettings = getA4InvoiceLogoSettings(opts.clinic);
+  const hasLogo = !!logoPath;
 
   const qrUrl = (opts.clinic?.receipt_qr_url || "").trim();
   const waDigits = clinicWhatsapp.replace(/\D/g, "");
@@ -286,6 +315,30 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
   const s  = theme.secondaryColor; // table header bg
   const t  = theme.textColor;
   const d  = theme.dividerColor;
+  const logoAlignmentClass = logoSettings.alignment === "center"
+    ? "logo-align-center"
+    : logoSettings.alignment === "right"
+      ? "logo-align-right"
+      : "logo-align-left";
+  const logoOffsetStyle = logoSettings.offsetXMm !== 0 || logoSettings.offsetYMm !== 0
+    ? `transform: translate(${logoSettings.offsetXMm}mm, ${logoSettings.offsetYMm}mm);`
+    : "";
+  const logoInlineReserveMm = hasLogo
+    ? Math.max(
+        0,
+        logoSettings.widthMm + 4 + (
+          logoSettings.alignment === "left"
+            ? Math.max(0, logoSettings.offsetXMm)
+            : logoSettings.alignment === "right"
+              ? Math.max(0, -logoSettings.offsetXMm)
+              : 0
+        )
+      )
+    : 0;
+  const logoBlockReserveMm = hasLogo
+    ? Math.max(0, logoSettings.heightMm + 4 + Math.max(0, logoSettings.offsetYMm))
+    : 0;
+  const previewPageClass = opts.previewPaperMode ? "page-shell preview-paper" : "page-shell";
 
   const clinicNameSafe = escHtml(clinicName);
   const branchSafe = branchLabel ? `<div style="font-size:11px;color:${p};font-weight:600;margin-top:2px;">${escHtml(branchLabel)}</div>` : "";
@@ -323,13 +376,22 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
     @page { size: A4; margin: 12mm 14mm; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
+    html { background: ${opts.previewPaperMode ? "#e2e8f0" : "#fff"}; }
     body {
       font-family: "Inter", Arial, "Aptos", sans-serif;
       font-size: 9pt;
       color: var(--text);
-      background: #fff;
+      background: ${opts.previewPaperMode ? "#e2e8f0" : "#fff"};
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
+    }
+    .page-shell { background: #fff; }
+    .page-shell.preview-paper {
+      width: 210mm;
+      min-height: 297mm;
+      margin: 0 auto;
+      padding: 12mm 14mm;
+      box-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
     }
 
     /* ── HEADER ── */
@@ -342,27 +404,49 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
       gap: 16px;
     }
 
-    .header-left { display: flex; align-items: flex-start; gap: 10px; flex: 1; }
+    .header-left {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+      min-height: ${logoBlockReserveMm > 0 ? `${logoBlockReserveMm}mm` : "0"};
+      padding-right: 4mm;
+    }
+    .header-left.logo-align-center .clinic-info {
+      text-align: center;
+      padding-top: ${logoBlockReserveMm > 0 ? `${logoBlockReserveMm}mm` : "0"};
+    }
+    .header-left.logo-align-left .clinic-info {
+      padding-left: ${logoInlineReserveMm > 0 ? `${logoInlineReserveMm}mm` : "0"};
+    }
+    .header-left.logo-align-right .clinic-info {
+      padding-right: ${logoInlineReserveMm > 0 ? `${logoInlineReserveMm}mm` : "0"};
+    }
 
     .logo-wrap {
+      position: absolute;
+      top: 0;
+      z-index: 0;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: flex-start;
       min-width: 0;
-      margin-right: 2mm;
-      flex-shrink: 0;
+      pointer-events: none;
+      ${logoOffsetStyle}
     }
+    .header-left.logo-align-left .logo-wrap { left: 0; }
+    .header-left.logo-align-center .logo-wrap { left: 50%; transform: translate(calc(-50% + ${logoSettings.offsetXMm}mm), ${logoSettings.offsetYMm}mm); }
+    .header-left.logo-align-right .logo-wrap { right: 0; }
 
     .logo-wrap img {
       display: block;
-      max-width: 32mm;
-      max-height: 20mm;
+      max-width: ${logoSettings.widthMm}mm;
+      max-height: ${logoSettings.heightMm}mm;
       width: auto;
       height: auto;
       object-fit: contain;
     }
 
-    .clinic-info { line-height: 1.45; }
+    .clinic-info { position: relative; z-index: 1; line-height: 1.45; min-width: 0; }
     .clinic-name { font-size: 13pt; font-weight: 700; color: var(--secondary); }
     .clinic-detail { font-size: 8pt; color: #555; margin-top: 5px; line-height: 1.5; }
 
@@ -511,17 +595,27 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
     }
 
     @media print {
+      html, body { background: #fff; }
       body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .page-shell,
+      .page-shell.preview-paper {
+        width: auto;
+        min-height: 0;
+        margin: 0;
+        padding: 0;
+        box-shadow: none;
+      }
       .header { break-inside: avoid; }
       thead { display: table-header-group; }
     }
   </style>
 </head>
 <body>
+  <div class="${previewPageClass}">
 
   <!-- ── HEADER ── -->
   <div class="header">
-    <div class="header-left">
+    <div class="header-left ${logoAlignmentClass}">
       <div class="logo-wrap">
         <img src="${logoPath}" alt="${clinicNameSafe} logo" onerror="this.style.display='none'">
       </div>
@@ -700,7 +794,7 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
      </div>
     </div>
   </div>
-
+  </div>
 </body>
 </html>`;
 }

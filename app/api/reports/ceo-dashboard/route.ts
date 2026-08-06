@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { buildComparisonRange, buildDashboardRange, DashboardPeriod, percentageChange, statusFromTarget } from "../../../../lib/ceo-dashboard";
+import { extractLegacyCashAmount } from "../../../../lib/cash-deductions";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +49,8 @@ type RefundItemRow = {
 type PaymentRecordRow = {
   id: string;
   clinic_id: string;
+  receipt_id?: string | null;
+  receptionist_id?: string | null;
   total_payment_fee_amount: number | null;
   total_customer_charged_amount: number | null;
   status: string | null;
@@ -63,6 +66,7 @@ type PaymentAllocationRow = {
   fee_amount: number | null;
   refunded_treatment_amount: number | null;
   refunded_fee_amount: number | null;
+  customer_charged_amount?: number | null;
 };
 
 type PaymentAllocationRefundRow = {
@@ -98,7 +102,41 @@ type TreatmentPlanPaymentRow = {
   treatment_plan_id: string;
   clinic_id: string;
   amount: number | null;
+  payment_method?: string | null;
+  receptionist_id?: string | null;
   created_at?: string | null;
+};
+
+type CashSupplementRow = {
+  amount: number | null;
+  receptionist_id: string | null;
+  payment_method?: string | null;
+  created_at?: string | null;
+};
+
+type CashDeductionRow = {
+  id: string;
+  clinic_id: string;
+  register_session_id: string;
+  business_date: string;
+  type: "expense" | "commission";
+  paid_to_name: string;
+  description: string;
+  reference_number: string | null;
+  amount: number | null;
+  status: "active" | "voided";
+  created_at: string;
+  created_by: string | null;
+  voided_at: string | null;
+  voided_by: string | null;
+  void_reason: string | null;
+};
+
+type CashRegisterSessionRow = {
+  id: string;
+  receptionist_id: string;
+  opened_at: string;
+  closed_at: string | null;
 };
 
 type DoctorRow = {
@@ -288,6 +326,10 @@ export async function POST(request: Request) {
     startIso: new Date(new Date(currentRange.endUtcIso).getTime() - 365 * 24 * 60 * 60 * 1000).toISOString(),
     endIso: currentRange.endUtcIso,
   };
+  const currentRangeStartDubai = dubaiDateOnly(new Date(currentRange.startUtcIso));
+  const currentRangeEndDubai = addDays(dubaiDateOnly(new Date(currentRange.endUtcIso)), -1);
+  const compareRangeStartDubai = dubaiDateOnly(new Date(compareRange.startUtcIso));
+  const compareRangeEndDubai = addDays(dubaiDateOnly(new Date(compareRange.endUtcIso)), -1);
 
   const cookieStore = await cookies();
   const sessionToken = cookieStore.get("app-auth")?.value || "";
@@ -338,6 +380,14 @@ export async function POST(request: Request) {
       doctorPerformance: [],
       trends: { monthly: [], patientDemand: { historyDays: 0, message: "Not enough history.", dayOfWeek: [], dayOfMonthBuckets: [] } },
       payments: { methods: [], missingAllocationCoverage: true },
+      cashManagement: {
+        cashCollected: 0,
+        commissionsPaid: 0,
+        expensesPaid: 0,
+        totalCashDeductions: 0,
+        cashAfterDeductions: 0,
+        details: [],
+      },
       attentionItems: ["No reception staff assigned to the selected clinic."],
     });
   }
@@ -419,10 +469,10 @@ export async function POST(request: Request) {
   const sumReceiptCollectionAmount = (rows: ReceiptRow[]) => rows.reduce((sum, row) => sum + (row.amount_paid == null ? asNumber(row.total) : asNumber(row.amount_paid)), 0);
   const sumAmountRows = (rows: Array<{ amount: number | null }>) => rows.reduce((sum, row) => sum + asNumber(row.amount), 0);
   const fetchCollectionSupplementRows = async (tableName: string, startIso: string, endIso: string) => {
-    if (selectedReceptionistIds.size === 0) return [] as Array<{ amount: number | null; receptionist_id: string | null; created_at?: string | null }>;
+    if (selectedReceptionistIds.size === 0) return [] as CashSupplementRow[];
     const { data, error } = await supabase
       .from(tableName)
-      .select("amount, receptionist_id")
+      .select("amount, receptionist_id, payment_method, created_at")
       .in("receptionist_id", [...selectedReceptionistIds])
       .gte("created_at", startIso)
       .lt("created_at", endIso);
@@ -430,7 +480,7 @@ export async function POST(request: Request) {
       if (isTableMissing(error)) return [];
       throw error;
     }
-    return (data || []) as Array<{ amount: number | null; receptionist_id: string | null; created_at?: string | null }>;
+    return (data || []) as CashSupplementRow[];
   };
 
   const [currentBalancePayments, currentDeposits, currentTreatmentPlanPayments, compareBalancePayments, compareDeposits, compareTreatmentPlanPayments, yearlyBalancePayments, yearlyDeposits, yearlyTreatmentPlanPayments, previousYearBalancePaymentRows, previousYearDepositRows, previousYearTreatmentPlanPaymentRows] = await Promise.all([
@@ -826,7 +876,7 @@ export async function POST(request: Request) {
   try {
     let paymentRecordsQuery = supabase
       .from("payment_records")
-      .select("id, clinic_id, total_payment_fee_amount, total_customer_charged_amount, status, created_at")
+      .select("id, clinic_id, receipt_id, receptionist_id, total_payment_fee_amount, total_customer_charged_amount, status, created_at")
       .gte("created_at", currentRange.startUtcIso)
       .lt("created_at", currentRange.endUtcIso);
     if (clinicId) paymentRecordsQuery = paymentRecordsQuery.eq("clinic_id", clinicId);
@@ -838,7 +888,7 @@ export async function POST(request: Request) {
       const [allocRes, refundRes] = await Promise.all([
         supabase
           .from("payment_allocations")
-          .select("id, payment_id, method_group, method_variant, treatment_net_amount, fee_amount, refunded_treatment_amount, refunded_fee_amount")
+          .select("id, payment_id, method_group, method_variant, treatment_net_amount, fee_amount, refunded_treatment_amount, refunded_fee_amount, customer_charged_amount")
           .in("payment_id", paymentIds),
         supabase
           .from("payment_allocation_refunds")
@@ -865,6 +915,109 @@ export async function POST(request: Request) {
     const paymentFeesCollected = allocationRows.reduce((sum, row) => sum + Math.max(0, asNumber(row.fee_amount) - asNumber(row.refunded_fee_amount)), 0);
     const customerCollections = paymentRows.reduce((sum, row) => sum + asNumber(row.total_customer_charged_amount), 0);
     const customerRefunds = allocationRefundRows.reduce((sum, row) => sum + asNumber(row.total_returned_amount), 0);
+    let currentCashDeductionRows: CashDeductionRow[] = [];
+    let compareCashDeductionRows: CashDeductionRow[] = [];
+    try {
+      const [currentDeductionsRes, compareDeductionsRes] = await Promise.all([
+        supabase
+          .from("cash_deductions")
+          .select("id, clinic_id, register_session_id, business_date, type, paid_to_name, description, reference_number, amount, status, created_at, created_by, voided_at, voided_by, void_reason")
+          .in("clinic_id", clinicIds)
+          .gte("business_date", currentRangeStartDubai)
+          .lte("business_date", currentRangeEndDubai)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("cash_deductions")
+          .select("id, clinic_id, register_session_id, business_date, type, paid_to_name, description, reference_number, amount, status, created_at, created_by, voided_at, voided_by, void_reason")
+          .in("clinic_id", clinicIds)
+          .gte("business_date", compareRangeStartDubai)
+          .lte("business_date", compareRangeEndDubai)
+          .order("created_at", { ascending: false }),
+      ]);
+      if (!currentDeductionsRes.error) currentCashDeductionRows = (currentDeductionsRes.data || []) as CashDeductionRow[];
+      if (!compareDeductionsRes.error) compareCashDeductionRows = (compareDeductionsRes.data || []) as CashDeductionRow[];
+    } catch (error) {
+      if (!isTableMissing(error)) throw error;
+    }
+
+    const currentActiveCashDeductions = currentCashDeductionRows.filter((row) => row.status === "active");
+    const compareActiveCashDeductions = compareCashDeductionRows.filter((row) => row.status === "active");
+    const commissionsPaid = currentActiveCashDeductions
+      .filter((row) => row.type === "commission")
+      .reduce((sum, row) => sum + asNumber(row.amount), 0);
+    const expensesPaid = currentActiveCashDeductions
+      .filter((row) => row.type === "expense")
+      .reduce((sum, row) => sum + asNumber(row.amount), 0);
+    const totalCashDeductions = commissionsPaid + expensesPaid;
+    const compareTotalCashDeductions = compareActiveCashDeductions.reduce((sum, row) => sum + asNumber(row.amount), 0);
+
+    const receiptIdsWithStructuredPayments = new Set(
+      paymentRows.map((row) => String(row.receipt_id || "")).filter(Boolean)
+    );
+    const structuredCashCollections = allocationRows.reduce((sum, row) => {
+      if (normalizeMethodGroup(row.method_group) !== "cash") return sum;
+      return sum + asNumber(row.customer_charged_amount);
+    }, 0);
+    const fallbackReceiptCashCollections = currentReceipts.reduce((sum, receipt) => {
+      if (receiptIdsWithStructuredPayments.has(receipt.id)) return sum;
+      return sum + extractLegacyCashAmount(String(receipt.payment_method || ""), asNumber(receipt.amount_paid == null ? receipt.total : receipt.amount_paid));
+    }, 0);
+    const balanceCashCollections = currentBalancePayments.reduce((sum, row) => {
+      return sum + extractLegacyCashAmount(String(row.payment_method || ""), asNumber(row.amount));
+    }, 0);
+    const depositCashCollections = currentDeposits.reduce((sum, row) => {
+      return sum + extractLegacyCashAmount(String(row.payment_method || ""), asNumber(row.amount));
+    }, 0);
+    const treatmentPlanCashCollections = currentTreatmentPlanPayments.reduce((sum, row) => {
+      return sum + extractLegacyCashAmount(String(row.payment_method || ""), asNumber(row.amount));
+    }, 0);
+    const cashCollected = structuredCashCollections + fallbackReceiptCashCollections + balanceCashCollections + depositCashCollections + treatmentPlanCashCollections;
+    const cashAfterDeductions = cashCollected - totalCashDeductions;
+
+    const detailReceptionistIds = new Set<string>(
+      currentCashDeductionRows
+        .flatMap((row) => [String(row.created_by || ""), String(row.voided_by || "")])
+        .filter(Boolean)
+    );
+    const detailRegisterSessionIds = new Set<string>(currentCashDeductionRows.map((row) => String(row.register_session_id || "")).filter(Boolean));
+    const [detailReceptionistsRes, detailRegisterSessionsRes] = await Promise.all([
+      detailReceptionistIds.size > 0
+        ? supabase.from("receptionist").select("id, name").in("id", [...detailReceptionistIds])
+        : Promise.resolve({ data: [], error: null }),
+      detailRegisterSessionIds.size > 0
+        ? supabase.from("cash_register_sessions").select("id, receptionist_id, opened_at, closed_at").in("id", [...detailRegisterSessionIds])
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    const detailReceptionistMap = new Map<string, string>();
+    if (!detailReceptionistsRes.error) {
+      ((detailReceptionistsRes.data || []) as Array<{ id: string; name: string | null }>).forEach((row) => {
+        detailReceptionistMap.set(String(row.id), String(row.name || ""));
+      });
+    }
+    const registerSessionMap = new Map<string, CashRegisterSessionRow>();
+    if (!detailRegisterSessionsRes.error) {
+      ((detailRegisterSessionsRes.data || []) as CashRegisterSessionRow[]).forEach((row) => {
+        registerSessionMap.set(String(row.id), row);
+      });
+    }
+
+    const cashDeductionDetails = currentCashDeductionRows.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      clinicId: row.clinic_id,
+      clinicName: clinics.find((clinic) => clinic.id === row.clinic_id)?.name || "Unknown Clinic",
+      registerSessionId: row.register_session_id,
+      receptionistName: detailReceptionistMap.get(String(row.created_by || "")) || detailReceptionistMap.get(String(registerSessionMap.get(String(row.register_session_id || ""))?.receptionist_id || "")) || "Reception",
+      paidToName: row.paid_to_name,
+      description: row.description,
+      referenceNumber: row.reference_number,
+      amount: asNumber(row.amount),
+      type: row.type,
+      status: row.status,
+      voidedAt: row.voided_at,
+      voidReason: row.void_reason,
+      voidedByName: detailReceptionistMap.get(String(row.voided_by || "")) || null,
+    }));
     const providerDeductionsAvailable = false;
     const providerDeductions = null;
 
@@ -917,6 +1070,8 @@ export async function POST(request: Request) {
       overview: {
         netSales: currentNetSales,
         netSalesCompare: compareNetSales,
+        netCollectionsAfterDeductions: currentCollections - totalCashDeductions,
+        netCollectionsAfterDeductionsCompare: compareCollections - compareTotalCashDeductions,
         targetProgress: overviewTargetAttainment,
         customerCollections: currentCollections,
         customerCollectionsCompare: compareCollections,
@@ -971,6 +1126,14 @@ export async function POST(request: Request) {
         providerDeductions,
         netSettlement: null,
         missingAllocationCoverage,
+      },
+      cashManagement: {
+        cashCollected,
+        commissionsPaid,
+        expensesPaid,
+        totalCashDeductions,
+        cashAfterDeductions,
+        details: cashDeductionDetails,
       },
       attentionItems,
     });

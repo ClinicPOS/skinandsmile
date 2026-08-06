@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx-js-style";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
-import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service, PaymentAllocation, PaymentAllocationRefund, PaymentRecord, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord } from "../../lib/types";
+import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service, PaymentAllocation, PaymentAllocationRefund, PaymentRecord, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, CashDeduction, CashDeductionType } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal } from "../../components/pos-modals";
 import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
@@ -33,6 +33,7 @@ import { generateInvoiceHtml as buildInvoiceHtml, type InvoiceAllocationRow, typ
 import { buildThermalReceiptHtml as buildThermalReceiptHtmlShared, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
 import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
 import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
+import { extractLegacyCashAmount, getCashDeductionTypeLabel, getDubaiBusinessDate } from "../../lib/cash-deductions";
 
 type PosPricingService = {
   originalPrice?: number | null;
@@ -435,6 +436,40 @@ export default function ReceiptsPage() {
   const [cashSalesTotal, setCashSalesTotal] = useState(0);
   const [expectedCashAmount, setExpectedCashAmount] = useState(0);
   const [isLoadingCashSummary, setIsLoadingCashSummary] = useState(false);
+  const [cashDeductions, setCashDeductions] = useState<CashDeduction[]>([]);
+  const [isLoadingCashDeductions, setIsLoadingCashDeductions] = useState(false);
+  const [isCashDeductionPanelExpanded, setIsCashDeductionPanelExpanded] = useState(false);
+  const [showCashDeductionModal, setShowCashDeductionModal] = useState(false);
+  const [cashDeductionModalMode, setCashDeductionModalMode] = useState<"create" | "edit">("create");
+  const [editingCashDeductionId, setEditingCashDeductionId] = useState("");
+  const [cashDeductionType, setCashDeductionType] = useState<CashDeductionType>("expense");
+  const [cashDeductionStaffId, setCashDeductionStaffId] = useState("");
+  const [cashDeductionPaidTo, setCashDeductionPaidTo] = useState("");
+  const [cashDeductionAmountInput, setCashDeductionAmountInput] = useState("");
+  const [cashDeductionDescription, setCashDeductionDescription] = useState("");
+  const [cashDeductionReferenceInput, setCashDeductionReferenceInput] = useState("");
+  const [isSavingCashDeduction, setIsSavingCashDeduction] = useState(false);
+  const [showVoidCashDeductionModal, setShowVoidCashDeductionModal] = useState(false);
+  const [voidCashDeductionId, setVoidCashDeductionId] = useState("");
+  const [voidCashDeductionReason, setVoidCashDeductionReason] = useState("");
+  const [isVoidingCashDeduction, setIsVoidingCashDeduction] = useState(false);
+  const [cashDeductionSummary, setCashDeductionSummary] = useState<{
+    businessDate: string;
+    registerStatus: "open" | "closed";
+    cashCollected: number;
+    activeDeductionsTotal: number;
+    availableCash: number;
+    totalCommissions: number;
+    totalExpenses: number;
+  }>({
+    businessDate: "",
+    registerStatus: "open",
+    cashCollected: 0,
+    activeDeductionsTotal: 0,
+    availableCash: 0,
+    totalCommissions: 0,
+    totalExpenses: 0,
+  });
   const [currentReceipt, setCurrentReceipt] = useState<any | null>(null);
   const [showSearchPatientModal, setShowSearchPatientModal] = useState(false);
   const [showReceiptHistoryModal, setShowReceiptHistoryModal] = useState(false);
@@ -471,6 +506,121 @@ export default function ReceiptsPage() {
     if (!allowedClinicId) return receptionists;
     return receptionists.filter((person) => person.clinic_id === allowedClinicId);
   }, [receptionists, allowedClinicId]);
+
+  const clinicCommissionStaff = useMemo(() => {
+    if (!activeClinic?.id) return [] as any[];
+    return doctors.filter((doctor) => doctor.clinic_id === activeClinic.id);
+  }, [doctors, activeClinic?.id]);
+
+  const expenseFeatureEnabled = !!activeClinic?.enable_expenses;
+  const commissionFeatureEnabled = !!activeClinic?.enable_commissions;
+  const deductionFeatureEnabled = expenseFeatureEnabled || commissionFeatureEnabled;
+  const showCashDeductionPanel = deductionFeatureEnabled || cashDeductions.length > 0;
+
+  function resetCashDeductionForm(nextType?: CashDeductionType) {
+    const resolvedType = nextType
+      || (commissionFeatureEnabled && !expenseFeatureEnabled ? "commission" : "expense");
+    setCashDeductionModalMode("create");
+    setEditingCashDeductionId("");
+    setCashDeductionType(resolvedType);
+    setCashDeductionStaffId("");
+    setCashDeductionPaidTo("");
+    setCashDeductionAmountInput("");
+    setCashDeductionDescription("");
+    setCashDeductionReferenceInput("");
+  }
+
+  async function fetchCashDeductionState() {
+    if (!registerSessionId) {
+      return {
+        entries: [] as CashDeduction[],
+        summary: {
+          businessDate: "",
+          registerStatus: "open" as const,
+          cashCollected: 0,
+          activeDeductionsTotal: 0,
+          availableCash: 0,
+          totalCommissions: 0,
+          totalExpenses: 0,
+        },
+      };
+    }
+
+    const response = await fetch(`/api/cash-deductions?registerSessionId=${encodeURIComponent(registerSessionId)}`, {
+      cache: "no-store",
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.error || "Failed loading cash deductions.");
+    }
+    return payload as {
+      entries: CashDeduction[];
+      summary: {
+        businessDate: string;
+        registerStatus: "open" | "closed";
+        cashCollected: number;
+        activeDeductionsTotal: number;
+        availableCash: number;
+        totalCommissions: number;
+        totalExpenses: number;
+      };
+    };
+  }
+
+  async function loadCashDeductions() {
+    if (!isPosUnlocked || !registerSessionId) {
+      setCashDeductions([]);
+      setCashDeductionSummary({
+        businessDate: "",
+        registerStatus: "open",
+        cashCollected: 0,
+        activeDeductionsTotal: 0,
+        availableCash: 0,
+        totalCommissions: 0,
+        totalExpenses: 0,
+      });
+      return;
+    }
+
+    setIsLoadingCashDeductions(true);
+    try {
+      const payload = await fetchCashDeductionState();
+      setCashDeductions(payload.entries || []);
+      setCashDeductionSummary(payload.summary);
+    } catch (error) {
+      console.error("Failed loading cash deductions", error);
+      alert(error instanceof Error ? error.message : "Failed loading cash deductions.");
+    } finally {
+      setIsLoadingCashDeductions(false);
+    }
+  }
+
+  function openCashDeductionEntry(entry?: CashDeduction) {
+    setIsCashDeductionPanelExpanded(true);
+    if (entry) {
+      setCashDeductionModalMode("edit");
+      setEditingCashDeductionId(entry.id);
+      setCashDeductionType(entry.type);
+      setCashDeductionStaffId(entry.staff_id || "");
+      setCashDeductionPaidTo(entry.paid_to_name || "");
+      setCashDeductionAmountInput(Number(entry.amount || 0).toFixed(2));
+      setCashDeductionDescription(entry.description || "");
+      setCashDeductionReferenceInput(entry.reference_number || "");
+      setShowCashDeductionModal(true);
+      return;
+    }
+
+    if (!deductionFeatureEnabled) return;
+
+    if (expenseFeatureEnabled && !commissionFeatureEnabled) {
+      resetCashDeductionForm("expense");
+    } else if (commissionFeatureEnabled && !expenseFeatureEnabled) {
+      resetCashDeductionForm("commission");
+    } else {
+      resetCashDeductionForm(cashDeductionType);
+    }
+    setShowCashDeductionModal(true);
+  }
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -521,6 +671,14 @@ export default function ReceiptsPage() {
     if (!activeClinic?.id) return;
     loadHoldCount();
   }, [activeClinic?.id]);
+
+  useEffect(() => {
+    if (!isPosUnlocked || !registerSessionId || !activeClinic?.id) {
+      setCashDeductions([]);
+      return;
+    }
+    void loadCashDeductions();
+  }, [isPosUnlocked, registerSessionId, activeClinic?.id]);
 
   useEffect(() => {
     if (!activeClinic?.id) {
@@ -1579,7 +1737,7 @@ export default function ReceiptsPage() {
     }
 
     alert(
-      `Register closed. Opening cash: AED ${Number(openingCash || 0).toFixed(2)} | Cash sales: AED ${latestCashSales.toFixed(2)} | Expected cash: AED ${latestExpectedCash.toFixed(2)} | Actual closing cash: AED ${parsedClosingCash.toFixed(2)} | Difference: AED ${variance.toFixed(2)}`
+      `Register closed. Opening cash: AED ${Number(openingCash || 0).toFixed(2)} | Cash collected: AED ${latestCashSales.toFixed(2)} | Cash deductions: AED ${Number(cashDeductionSummary.activeDeductionsTotal || 0).toFixed(2)} | Expected cash: AED ${latestExpectedCash.toFixed(2)} | Actual closing cash: AED ${parsedClosingCash.toFixed(2)} | Difference: AED ${variance.toFixed(2)}`
     );
 
     localStorage.removeItem(POS_REGISTER_SESSION_KEY);
@@ -1594,6 +1752,19 @@ export default function ReceiptsPage() {
     setLoginReceptionistId("");
     setCashSalesTotal(0);
     setExpectedCashAmount(0);
+    setCashDeductions([]);
+    setCashDeductionSummary({
+      businessDate: "",
+      registerStatus: "open",
+      cashCollected: 0,
+      activeDeductionsTotal: 0,
+      availableCash: 0,
+      totalCommissions: 0,
+      totalExpenses: 0,
+    });
+    setShowCashDeductionModal(false);
+    setShowVoidCashDeductionModal(false);
+    resetCashDeductionForm();
 
     // Reset in-progress receipt on register close.
     setPatientId("");
@@ -1681,11 +1852,131 @@ export default function ReceiptsPage() {
     setShowCloseRegisterModal(true);
     setClosingCashInput("");
     setIsLoadingCashSummary(true);
-    const shiftCashSales = await getShiftCashSalesTotal();
-    const expected = Number(openingCash || 0) + shiftCashSales;
-    setCashSalesTotal(shiftCashSales);
-    setExpectedCashAmount(expected);
-    setIsLoadingCashSummary(false);
+    try {
+      const payload = await fetchCashDeductionState();
+      setCashDeductions(payload.entries || []);
+      setCashDeductionSummary(payload.summary);
+      setCashSalesTotal(Number(payload.summary.cashCollected || 0));
+      setExpectedCashAmount(
+        Number(openingCash || 0) + Number(payload.summary.cashCollected || 0) - Number(payload.summary.activeDeductionsTotal || 0)
+      );
+    } catch (error) {
+      console.error("Failed loading close-register summary", error);
+      const shiftCashSales = await getShiftCashSalesTotal();
+      const expected = Number(openingCash || 0) + shiftCashSales;
+      setCashSalesTotal(shiftCashSales);
+      setExpectedCashAmount(expected);
+    } finally {
+      setIsLoadingCashSummary(false);
+    }
+  }
+
+  async function saveCashDeduction() {
+    if (!activeClinic?.id || !registerSessionId) {
+      alert("Open the register first.");
+      return;
+    }
+    if (isSavingCashDeduction) return;
+
+    const parsedAmount = parseMoneyInput(cashDeductionAmountInput);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      alert("Enter a valid deduction amount greater than zero.");
+      return;
+    }
+    if (!cashDeductionDescription.trim()) {
+      alert("Description / reason is required.");
+      return;
+    }
+    if (cashDeductionType === "commission" && !cashDeductionStaffId) {
+      alert("Select the staff member receiving this commission.");
+      return;
+    }
+    if (cashDeductionType === "expense" && !cashDeductionPaidTo.trim()) {
+      alert("Enter who was paid.");
+      return;
+    }
+
+    setIsSavingCashDeduction(true);
+    try {
+      const url = cashDeductionModalMode === "edit" && editingCashDeductionId
+        ? `/api/cash-deductions/${editingCashDeductionId}`
+        : "/api/cash-deductions";
+      const method = cashDeductionModalMode === "edit" ? "PATCH" : "POST";
+      const response = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          registerSessionId,
+          type: cashDeductionType,
+          staffId: cashDeductionType === "commission" ? cashDeductionStaffId : null,
+          paidToName: cashDeductionType === "commission"
+            ? clinicCommissionStaff.find((doctor) => doctor.id === cashDeductionStaffId)?.name || ""
+            : cashDeductionPaidTo.trim(),
+          amount: parsedAmount,
+          description: cashDeductionDescription.trim(),
+          referenceNumber: cashDeductionReferenceInput.trim(),
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed saving cash deduction.");
+      }
+
+      setCashDeductions((payload?.entries || []) as CashDeduction[]);
+      if (payload?.summary) {
+        setCashDeductionSummary(payload.summary);
+        setCashSalesTotal(Number(payload.summary.cashCollected || 0));
+      }
+      setShowCashDeductionModal(false);
+      resetCashDeductionForm();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed saving cash deduction.");
+    } finally {
+      setIsSavingCashDeduction(false);
+    }
+  }
+
+  async function voidCashDeduction() {
+    if (!voidCashDeductionId) {
+      return;
+    }
+    if (!voidCashDeductionReason.trim()) {
+      alert("Enter a reason for voiding this entry.");
+      return;
+    }
+    if (isVoidingCashDeduction) return;
+
+    setIsVoidingCashDeduction(true);
+    try {
+      const response = await fetch(`/api/cash-deductions/${voidCashDeductionId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          operation: "void",
+          voidReason: voidCashDeductionReason.trim(),
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed voiding cash deduction.");
+      }
+      setCashDeductions((payload?.entries || []) as CashDeduction[]);
+      if (payload?.summary) {
+        setCashDeductionSummary(payload.summary);
+        setCashSalesTotal(Number(payload.summary.cashCollected || 0));
+      }
+      setShowVoidCashDeductionModal(false);
+      setVoidCashDeductionId("");
+      setVoidCashDeductionReason("");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed voiding cash deduction.");
+    } finally {
+      setIsVoidingCashDeduction(false);
+    }
   }
 
   async function downloadDailyIncomeReport() {
@@ -1902,9 +2193,10 @@ export default function ReceiptsPage() {
     // Payments collected today against old outstanding balances — reported
     // separately from treatment revenue.
     let balanceCollectionsTotal = 0;
+    let cashBalanceCollectionsTotal = 0;
     const { data: balancePaymentsData, error: balancePaymentsError } = await supabase
       .from("balance_payments")
-      .select("amount")
+      .select("amount, payment_method")
       .in("receptionist_id", receptionistIds)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso);
@@ -1912,14 +2204,19 @@ export default function ReceiptsPage() {
       console.warn("Failed loading balance payments for report", balancePaymentsError);
     } else {
       balanceCollectionsTotal = (balancePaymentsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
+      cashBalanceCollectionsTotal = (balancePaymentsData || []).reduce(
+        (sum, payment) => sum + extractLegacyCashAmount(String(payment.payment_method || ""), Number(payment.amount || 0)),
+        0
+      );
     }
 
     // Deposits (advance payments) received today — also separate from
     // treatment revenue; they are money held on patients' accounts.
     let depositsReceivedTotal = 0;
+    let cashDepositsReceivedTotal = 0;
     const { data: depositsData, error: depositsError } = await supabase
       .from("patient_credits")
-      .select("amount")
+      .select("amount, payment_method")
       .in("receptionist_id", receptionistIds)
       .gt("amount", 0)
       .gte("created_at", startUtcIso)
@@ -1928,6 +2225,25 @@ export default function ReceiptsPage() {
       console.warn("Failed loading patient deposits for report", depositsError);
     } else {
       depositsReceivedTotal = (depositsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
+      cashDepositsReceivedTotal = (depositsData || []).reduce(
+        (sum, deposit) => sum + extractLegacyCashAmount(String(deposit.payment_method || ""), Number(deposit.amount || 0)),
+        0
+      );
+    }
+
+    let activeCashDeductions: CashDeduction[] = [];
+    const reportBusinessDate = getDubaiBusinessDate(now);
+    const { data: cashDeductionData, error: cashDeductionError } = await supabase
+      .from("cash_deductions")
+      .select("*")
+      .eq("clinic_id", activeClinic.id)
+      .eq("business_date", reportBusinessDate)
+      .eq("status", "active")
+      .order("created_at", { ascending: true });
+    if (cashDeductionError && cashDeductionError.code !== "42P01") {
+      console.warn("Failed loading cash deductions for report", cashDeductionError);
+    } else {
+      activeCashDeductions = (cashDeductionData || []) as CashDeduction[];
     }
 
     const treatmentPlanRows: Array<(string | number)[]> = [];
@@ -2091,6 +2407,7 @@ export default function ReceiptsPage() {
     }
 
     const treatmentPlanPaymentRows: Array<(string | number)[]> = [];
+    let cashTreatmentPlanCollectionsTotal = 0;
     treatmentPlanPaymentRecordsForDay.forEach((payment) => {
       const plan = Array.isArray(payment.treatment_plans) ? payment.treatment_plans[0] : payment.treatment_plans;
       const patient = Array.isArray(payment.patients) ? payment.patients[0] : payment.patients;
@@ -2108,6 +2425,15 @@ export default function ReceiptsPage() {
           return `${label}: Invoice AED ${Number(allocation.invoice_allocation_amount || 0).toFixed(2)}${fee > 0 ? ` | Fee AED ${fee.toFixed(2)}` : ""} | Charged AED ${charged.toFixed(2)}`;
         })
         .join(" || ");
+
+      const structuredCashCollection = paymentAllocations.reduce((sum, allocation) => {
+        if (allocation.method_variant !== "cash") return sum;
+        return sum + Number(allocation.customer_charged_amount || 0);
+      }, 0);
+      const fallbackCashCollection = paymentAllocations.length === 0
+        ? extractLegacyCashAmount(String(payment.payment_method_summary || ""), Number(payment.total_customer_charged_amount || 0))
+        : 0;
+      cashTreatmentPlanCollectionsTotal += structuredCashCollection + fallbackCashCollection;
 
       paymentAllocations.forEach((allocation) => {
         const feeAmount = Number(allocation.fee_amount || 0);
@@ -2306,6 +2632,17 @@ export default function ReceiptsPage() {
 
     const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tabbyFeeTotal + tamaraTotal + tamaraFeeTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal + depositsReceivedTotal + treatmentPlanPaymentsTotal;
     const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
+    const totalCommissions = activeCashDeductions
+      .filter((entry) => entry.type === "commission")
+      .reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+    const totalExpenses = activeCashDeductions
+      .filter((entry) => entry.type === "expense")
+      .reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+    const totalCashDeductions = totalCommissions + totalExpenses;
+    const cashCollectedForDeductions = cashTotal + cashBalanceCollectionsTotal + cashDepositsReceivedTotal + cashTreatmentPlanCollectionsTotal;
+    const cashAfterDeductions = cashCollectedForDeductions - totalCashDeductions;
+    const netCollectionsAfterDeductions = totalCollected - totalCashDeductions;
+    const showCashDeductionSection = activeCashDeductions.length > 0 || !!activeClinic.enable_expenses || !!activeClinic.enable_commissions;
 
     const workbook = XLSX.utils.book_new();
     const normalizeReportCellValue = (value: string | number) => (
@@ -2340,52 +2677,92 @@ export default function ReceiptsPage() {
     }).format(now);
 
     const summaryRows: (string | number)[][] = [
-      ["End-of-Day Reconciliation Report", ""],
-      ["", ""],
-      ["Report Information", ""],
-      ["Clinic Name", activeClinic.name],
-      ["Report Date", reportDateText],
-      ["Day of Week", weekdayText],
-      ["Generated Date & Time", generatedAtText],
-      ["", ""],
-      ["Daily Summary", "Value"],
-      ["Total Transactions", receipts.length],
-      ["Unique Patients", uniquePatients],
-      ["Gross Revenue", grossRevenue],
-      ["Total Discounts (Promo)", totalDiscounts],
-      ["Net Revenue", netRevenue],
-      ["Total VAT (Included)", totalVat],
-      ["Total Refunds", totalRefunds],
-      ["Collected Today (Treatments)", collectedTodayTotal],
-      ["Outstanding Created Today", outstandingCreatedTotal],
-      ["Balance Collections (Old Balances)", balanceCollectionsTotal],
-      ["Deposits Received (Advance Payments)", depositsReceivedTotal],
-      ["Treatment Plan Payments", treatmentPlanPaymentsTotal],
-      ["Patient Credit Used", creditUsedTotal],
-      ["", ""],
-      ["Payment Summary", "Amount (AED)"],
-      ["Cash", cashTotal],
-      ["Card", cardTotal],
-      ["Tabby", tabbyTotal],
-      ["Tabby Card", tabbyCardTotal],
-      ["Tabby Fee", tabbyFeeTotal],
-      ["Tamara", tamaraTotal],
-      ["Tamara Fee", tamaraFeeTotal],
-      ["Insurance", insuranceTotal],
-      ["Bank Transfer", bankTransferTotal],
-      ["Balance Collections", balanceCollectionsTotal],
-      ["Deposits Received", depositsReceivedTotal],
-      ["Treatment Plan Payments", treatmentPlanPaymentsTotal],
-      ["Total Collected", totalCollected],
+      ["End-of-Day Reconciliation Report", "", "", "", ""],
+      ["", "", "", "", ""],
+      ["Report Information", "", "", "", ""],
+      ["Clinic Name", activeClinic.name, "", "", ""],
+      ["Report Date", reportDateText, "", "", ""],
+      ["Day of Week", weekdayText, "", "", ""],
+      ["Generated Date & Time", generatedAtText, "", "", ""],
+      ["", "", "", "", ""],
+      ["Daily Summary", "", "", "", ""],
+      ["Total Transactions", receipts.length, "", "", ""],
+      ["Unique Patients", uniquePatients, "", "", ""],
+      ["Gross Revenue", grossRevenue, "", "", ""],
+      ["Total Discounts (Promo)", totalDiscounts, "", "", ""],
+      ["Net Revenue", netRevenue, "", "", ""],
+      ["Total VAT (Included)", totalVat, "", "", ""],
+      ["Total Refunds", totalRefunds, "", "", ""],
+      ["Collected Today (Treatments)", collectedTodayTotal, "", "", ""],
+      ["Outstanding Created Today", outstandingCreatedTotal, "", "", ""],
+      ["Balance Collections (Old Balances)", balanceCollectionsTotal, "", "", ""],
+      ["Deposits Received (Advance Payments)", depositsReceivedTotal, "", "", ""],
+      ["Treatment Plan Payments", treatmentPlanPaymentsTotal, "", "", ""],
+      ["Patient Credit Used", creditUsedTotal, "", "", ""],
+      ["", "", "", "", ""],
+      ["Payment Summary", "", "", "", ""],
+      ["Cash", cashTotal, "", "", ""],
+      ["Card", cardTotal, "", "", ""],
+      ["Tabby", tabbyTotal, "", "", ""],
+      ["Tabby Card", tabbyCardTotal, "", "", ""],
+      ["Tabby Fee", tabbyFeeTotal, "", "", ""],
+      ["Tamara", tamaraTotal, "", "", ""],
+      ["Tamara Fee", tamaraFeeTotal, "", "", ""],
+      ["Insurance", insuranceTotal, "", "", ""],
+      ["Bank Transfer", bankTransferTotal, "", "", ""],
+      ["Balance Collections", balanceCollectionsTotal, "", "", ""],
+      ["Deposits Received", depositsReceivedTotal, "", "", ""],
+      ["Treatment Plan Payments", treatmentPlanPaymentsTotal, "", "", ""],
+      ["Total Collected", totalCollected, "", "", ""],
     ];
 
+    const reportInfoHeaderRow = 3;
+    const dailySummaryHeaderRow = 9;
+    const paymentSummaryHeaderRow = 24;
+
+    let cashDeductionHeaderRow: number | null = null;
+    let cashDeductionColumnHeaderRow: number | null = null;
+    let cashDeductionTotalsStartRow: number | null = null;
+
+    if (showCashDeductionSection) {
+      summaryRows.push(["", "", "", "", ""]);
+      cashDeductionHeaderRow = summaryRows.length + 1;
+      summaryRows.push(["Cash Deductions", "", "", "", ""]);
+      cashDeductionColumnHeaderRow = summaryRows.length + 1;
+      summaryRows.push(["Type", "Paid To", "Description", "Reference", "Amount (AED)"]);
+
+      if (activeCashDeductions.length > 0) {
+        activeCashDeductions.forEach((entry) => {
+          summaryRows.push([
+            getCashDeductionTypeLabel(entry.type),
+            entry.paid_to_name || "",
+            entry.description || "",
+            entry.reference_number || "",
+            Number(entry.amount || 0),
+          ]);
+        });
+      } else {
+        summaryRows.push(["—", "No cash deductions recorded", "", "", 0]);
+      }
+
+      cashDeductionTotalsStartRow = summaryRows.length + 1;
+      summaryRows.push(["Total Commissions", "", "", "", totalCommissions]);
+      summaryRows.push(["Total Expenses", "", "", "", totalExpenses]);
+      summaryRows.push(["Total Cash Deductions", "", "", "", totalCashDeductions]);
+      summaryRows.push(["Cash Collected", "", "", "", cashCollectedForDeductions]);
+      summaryRows.push(["Cash After Deductions", "", "", "", cashAfterDeductions]);
+      summaryRows.push(["Total Patient Collections", "", "", "", totalCollected]);
+      summaryRows.push(["Net Collections After Deductions", "", "", "", netCollectionsAfterDeductions]);
+    }
+
     const summarySheet = XLSX.utils.aoa_to_sheet(normalizeReportRows(summaryRows));
-    summarySheet["!cols"] = [{ wch: 36 }, { wch: 24 }];
+    summarySheet["!cols"] = [{ wch: 36 }, { wch: 28 }, { wch: 32 }, { wch: 24 }, { wch: 18 }];
     summarySheet["!merges"] = [
-      { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
-      { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } },
-      { s: { r: 8, c: 0 }, e: { r: 8, c: 1 } },
-      { s: { r: 23, c: 0 }, e: { r: 23, c: 1 } },
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 4 } },
+      { s: { r: reportInfoHeaderRow - 1, c: 0 }, e: { r: reportInfoHeaderRow - 1, c: 4 } },
+      { s: { r: dailySummaryHeaderRow - 1, c: 0 }, e: { r: dailySummaryHeaderRow - 1, c: 4 } },
+      { s: { r: paymentSummaryHeaderRow - 1, c: 0 }, e: { r: paymentSummaryHeaderRow - 1, c: 4 } },
+      ...(cashDeductionHeaderRow == null ? [] : [{ s: { r: cashDeductionHeaderRow - 1, c: 0 }, e: { r: cashDeductionHeaderRow - 1, c: 4 } }]),
     ];
 
     const styleSummaryCell = (row: number, col: number, style: Record<string, unknown>) => {
@@ -2396,25 +2773,29 @@ export default function ReceiptsPage() {
     };
 
     for (let row = 1; row <= summaryRows.length; row++) {
-      for (let col = 1; col <= 2; col++) {
+      for (let col = 1; col <= 5; col++) {
         styleSummaryCell(row, col, {
           border: thinBorder,
           font: { name: "Calibri", sz: 11, color: { rgb: "1F2937" } },
-          alignment: { vertical: "center", horizontal: col === 1 ? "left" : "right" },
+          alignment: {
+            vertical: "center",
+            horizontal: col === 5 || (col === 2 && row < (cashDeductionColumnHeaderRow || Number.MAX_SAFE_INTEGER))
+              ? "right"
+              : "left",
+            wrapText: col >= 2 && row >= (cashDeductionColumnHeaderRow || Number.MAX_SAFE_INTEGER),
+          },
         });
       }
     }
 
-    [3, 9, 24].forEach((row) => {
-      styleSummaryCell(row, 1, {
-        fill: { fgColor: { rgb: "1F4E78" } },
-        font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
-        alignment: { horizontal: "left", vertical: "center" },
-      });
-      styleSummaryCell(row, 2, {
-        fill: { fgColor: { rgb: "1F4E78" } },
-        font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
-      });
+    [reportInfoHeaderRow, dailySummaryHeaderRow, paymentSummaryHeaderRow, cashDeductionHeaderRow].filter(Boolean).forEach((row) => {
+      for (let col = 1; col <= 5; col++) {
+        styleSummaryCell(Number(row), col, {
+          fill: { fgColor: { rgb: "1F4E78" } },
+          font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
+          alignment: { horizontal: "left", vertical: "center" },
+        });
+      }
     });
 
     styleSummaryCell(1, 1, {
@@ -2422,34 +2803,46 @@ export default function ReceiptsPage() {
       font: { name: "Calibri", sz: 16, bold: true, color: { rgb: "FFFFFF" } },
       alignment: { horizontal: "center", vertical: "center" },
     });
-    styleSummaryCell(1, 2, {
-      fill: { fgColor: { rgb: "0B132B" } },
-    });
-
-    for (let row = 12; row <= 22; row++) {
-      styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
-    }
-    for (let row = 25; row <= 38; row++) {
-      styleSummaryCell(row, 2, { numFmt: "#,##0.00", alignment: { horizontal: "right", vertical: "center" } });
+    for (let col = 2; col <= 5; col++) {
+      styleSummaryCell(1, col, {
+        fill: { fgColor: { rgb: "0B132B" } },
+      });
     }
 
-    styleSummaryCell(38, 1, {
-      fill: { fgColor: { rgb: "FFF2CC" } },
-      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
-    });
-    styleSummaryCell(38, 2, {
-      fill: { fgColor: { rgb: "FFF2CC" } },
-      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
+    for (let row = 1; row <= summaryRows.length; row++) {
+      for (let col = 1; col <= 5; col++) {
+        const value = summaryRows[row - 1]?.[col - 1];
+        if (typeof value === "number") {
+          styleSummaryCell(row, col, {
+            numFmt: "#,##0.00",
+            alignment: { horizontal: "right", vertical: "center" },
+          });
+        }
+      }
+    }
+
+    const highlightRows = [37];
+    if (cashDeductionTotalsStartRow != null) {
+      highlightRows.push(cashDeductionTotalsStartRow + 2, cashDeductionTotalsStartRow + 4, cashDeductionTotalsStartRow + 6);
+    }
+    highlightRows.forEach((row) => {
+      for (let col = 1; col <= 5; col++) {
+        styleSummaryCell(row, col, {
+          fill: { fgColor: { rgb: "FFF2CC" } },
+          font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
+        });
+      }
     });
 
-    // Formula for Total Collected (Cash..Deposits Received) with a cached
-    // value so viewers that don't recalculate formulas still show the number.
-    (summarySheet as any)["B38"] = {
-      t: "n",
-      f: "SUM(B25:B37)",
-      v: truncateCurrency(totalCollected),
-      s: (summarySheet as any)["B38"]?.s,
-    };
+    if (cashDeductionColumnHeaderRow != null) {
+      for (let col = 1; col <= 5; col++) {
+        styleSummaryCell(cashDeductionColumnHeaderRow, col, {
+          fill: { fgColor: { rgb: "EDE9FE" } },
+          font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "4C1D95" } },
+          alignment: { horizontal: col === 5 ? "right" : "left", vertical: "center" },
+        });
+      }
+    }
 
     const blankDetailRow = new Array(detailHeaders.length).fill("") as string[];
     const visibleDetailRows = detailRows.length > 0 ? detailRows : [blankDetailRow];
@@ -3962,6 +4355,14 @@ export default function ReceiptsPage() {
                   >
                     Print Report
                   </button>
+                  {deductionFeatureEnabled && (
+                    <button
+                      onClick={() => openCashDeductionEntry()}
+                      className="inline-flex items-center justify-center rounded-2xl bg-violet-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600"
+                    >
+                      Expense / Commission
+                    </button>
+                  )}
                   <button
                     onClick={openCloseRegisterModal}
                     className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
@@ -3999,6 +4400,123 @@ export default function ReceiptsPage() {
                 )}
               </button>
             </div>
+
+            {showCashDeductionPanel && (
+              <div className="mt-4 rounded-3xl border border-violet-200 bg-violet-50/80 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setIsCashDeductionPanelExpanded((current) => !current)}
+                    aria-expanded={isCashDeductionPanelExpanded}
+                    className="flex flex-1 items-start justify-between gap-3 rounded-2xl text-left transition hover:bg-violet-100/60 focus:outline-none focus:ring-2 focus:ring-violet-300"
+                  >
+                    <div className="min-w-0 px-1 py-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-violet-700">Cash Deductions</p>
+                        <span className="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-violet-700">
+                          {cashDeductions.length} {cashDeductions.length === 1 ? "entry" : "entries"}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-sm text-slate-700">
+                        Available cash for deductions: <span className="font-semibold text-violet-900">AED {Number(cashDeductionSummary.availableCash || 0).toFixed(2)}</span>
+                      </p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Cash collected AED {Number(cashDeductionSummary.cashCollected || 0).toFixed(2)} • Deductions AED {Number(cashDeductionSummary.activeDeductionsTotal || 0).toFixed(2)} • {isCashDeductionPanelExpanded ? "Collapse" : "Expand"}
+                      </p>
+                    </div>
+                    <span className="shrink-0 rounded-full border border-violet-200 bg-white px-3 py-1 text-xs font-semibold text-violet-700">
+                      {isCashDeductionPanelExpanded ? "Hide" : "Show"}
+                    </span>
+                  </button>
+                  {deductionFeatureEnabled && (
+                    <button
+                      onClick={() => openCashDeductionEntry()}
+                      className="inline-flex items-center justify-center rounded-2xl border border-violet-300 bg-white px-4 py-2 text-sm font-semibold text-violet-700 transition hover:bg-violet-100"
+                    >
+                      Add Entry
+                    </button>
+                  )}
+                </div>
+
+                {isCashDeductionPanelExpanded && (
+                  <>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      <div className="rounded-2xl border border-white/80 bg-white px-3 py-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Commissions</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-900">AED {Number(cashDeductionSummary.totalCommissions || 0).toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-2xl border border-white/80 bg-white px-3 py-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Expenses</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-900">AED {Number(cashDeductionSummary.totalExpenses || 0).toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-2xl border border-white/80 bg-white px-3 py-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Cash After Deductions</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-900">
+                          AED {Math.max(0, Number(cashDeductionSummary.cashCollected || 0) - Number(cashDeductionSummary.activeDeductionsTotal || 0)).toFixed(2)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 space-y-2">
+                      {isLoadingCashDeductions ? (
+                        <p className="text-sm text-slate-500">Loading cash deductions...</p>
+                      ) : cashDeductions.length === 0 ? (
+                        <p className="rounded-2xl border border-dashed border-violet-200 bg-white px-4 py-3 text-sm text-slate-500">
+                          No expense or commission entries recorded for this register session yet.
+                        </p>
+                      ) : (
+                        cashDeductions.map((entry) => (
+                          <div key={entry.id} className="rounded-2xl border border-white/80 bg-white px-4 py-3">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                              <div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="rounded-full bg-violet-100 px-2.5 py-1 text-[11px] font-semibold text-violet-700">
+                                    {getCashDeductionTypeLabel(entry.type)}
+                                  </span>
+                                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${entry.status === "voided" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`}>
+                                    {entry.status === "voided" ? "Voided" : "Active"}
+                                  </span>
+                                </div>
+                                <p className="mt-2 text-sm font-semibold text-slate-900">{entry.paid_to_name}</p>
+                                <p className="mt-1 text-sm text-slate-600">{entry.description}</p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                  {new Date(entry.created_at).toLocaleString()}
+                                  {entry.reference_number ? ` • Ref ${entry.reference_number}` : ""}
+                                  {entry.status === "voided" && entry.void_reason ? ` • Void reason: ${entry.void_reason}` : ""}
+                                </p>
+                              </div>
+                              <div className="flex flex-col items-start gap-2 sm:items-end">
+                                <p className="text-base font-semibold text-violet-900">(AED {Number(entry.amount || 0).toFixed(2)})</p>
+                                {entry.status === "active" && (
+                                  <div className="flex gap-2">
+                                    <button
+                                      onClick={() => openCashDeductionEntry(entry)}
+                                      className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setVoidCashDeductionId(entry.id);
+                                        setVoidCashDeductionReason("");
+                                        setShowVoidCashDeductionModal(true);
+                                      }}
+                                      className="rounded-xl border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-50"
+                                    >
+                                      Void
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
 
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-2 mt-4">
               <div className="space-y-2">
@@ -5097,6 +5615,190 @@ export default function ReceiptsPage() {
               </div>
             )}
 
+            {showCashDeductionModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                <div className="mx-4 w-full max-w-lg rounded-3xl bg-white p-6 text-slate-900 shadow-2xl">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-slate-900">
+                        {cashDeductionModalMode === "edit" ? "Edit Cash Deduction" : "Add Expense / Commission"}
+                      </h3>
+                      <p className="mt-1 text-sm text-slate-500">
+                        Available cash for deductions: AED {Number(cashDeductionSummary.availableCash || 0).toFixed(2)}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (isSavingCashDeduction) return;
+                        setShowCashDeductionModal(false);
+                        resetCashDeductionForm();
+                      }}
+                      className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-500 transition hover:bg-slate-50"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  {expenseFeatureEnabled && commissionFeatureEnabled && (
+                    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Type</p>
+                      <div className="mt-3 flex flex-wrap gap-3">
+                        {(["expense", "commission"] as CashDeductionType[]).map((type) => (
+                          <label key={type} className="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+                            <input
+                              type="radio"
+                              name="cashDeductionType"
+                              value={type}
+                              checked={cashDeductionType === type}
+                              onChange={() => {
+                                setCashDeductionType(type);
+                                setCashDeductionStaffId("");
+                                setCashDeductionPaidTo("");
+                              }}
+                              className="h-4 w-4 accent-violet-600"
+                            />
+                            {getCashDeductionTypeLabel(type)}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-4 grid gap-4">
+                    {cashDeductionType === "commission" ? (
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold text-slate-700">Paid To</label>
+                        <select
+                          value={cashDeductionStaffId}
+                          onChange={(e) => {
+                            const nextStaffId = e.target.value;
+                            setCashDeductionStaffId(nextStaffId);
+                            const selectedStaff = clinicCommissionStaff.find((doctor) => doctor.id === nextStaffId);
+                            setCashDeductionPaidTo(selectedStaff?.name || "");
+                          }}
+                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                        >
+                          <option value="">Select Aesthetician / Staff</option>
+                          {clinicCommissionStaff.map((doctor) => (
+                            <option key={doctor.id} value={doctor.id}>
+                              {doctor.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold text-slate-700">Paid To</label>
+                        <input
+                          type="text"
+                          value={cashDeductionPaidTo}
+                          onChange={(e) => setCashDeductionPaidTo(e.target.value)}
+                          placeholder="Supplier, shop, or person paid"
+                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                        />
+                      </div>
+                    )}
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold text-slate-700">Amount (AED)</label>
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={cashDeductionAmountInput}
+                          onChange={(e) => setCashDeductionAmountInput(e.target.value)}
+                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="block text-sm font-semibold text-slate-700">Receipt / Reference Number</label>
+                        <input
+                          type="text"
+                          value={cashDeductionReferenceInput}
+                          onChange={(e) => setCashDeductionReferenceInput(e.target.value)}
+                          placeholder="Optional"
+                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="block text-sm font-semibold text-slate-700">Description / Reason</label>
+                      <textarea
+                        value={cashDeductionDescription}
+                        onChange={(e) => setCashDeductionDescription(e.target.value)}
+                        rows={3}
+                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    <button
+                      onClick={saveCashDeduction}
+                      disabled={isSavingCashDeduction}
+                      className="inline-flex items-center justify-center rounded-2xl bg-violet-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600 disabled:opacity-50"
+                    >
+                      {isSavingCashDeduction ? "Saving..." : "Save"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (isSavingCashDeduction) return;
+                        setShowCashDeductionModal(false);
+                        resetCashDeductionForm();
+                      }}
+                      disabled={isSavingCashDeduction}
+                      className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {showVoidCashDeductionModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                <div className="mx-4 w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
+                  <h3 className="text-lg font-semibold text-slate-900">Void Cash Deduction</h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Enter the reason for voiding this entry. The record will remain in history for audit purposes.
+                  </p>
+                  <div className="mt-4 space-y-2">
+                    <label className="block text-sm font-semibold text-slate-700">Void reason</label>
+                    <textarea
+                      value={voidCashDeductionReason}
+                      onChange={(e) => setVoidCashDeductionReason(e.target.value)}
+                      rows={3}
+                      className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100"
+                    />
+                  </div>
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                    <button
+                      onClick={voidCashDeduction}
+                      disabled={isVoidingCashDeduction}
+                      className="inline-flex items-center justify-center rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50"
+                    >
+                      {isVoidingCashDeduction ? "Voiding..." : "Confirm Void"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (isVoidingCashDeduction) return;
+                        setShowVoidCashDeductionModal(false);
+                        setVoidCashDeductionId("");
+                        setVoidCashDeductionReason("");
+                      }}
+                      disabled={isVoidingCashDeduction}
+                      className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {showCloseRegisterModal && (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
                 <div className="mx-4 w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
@@ -5111,7 +5813,8 @@ export default function ReceiptsPage() {
                     ) : (
                       <div className="space-y-1">
                         <p>Opening Cash: AED {Number(openingCash || 0).toFixed(2)}</p>
-                        <p>Cash Payments Collected: AED {cashSalesTotal.toFixed(2)}</p>
+                        <p>Cash Collected During Shift: AED {cashSalesTotal.toFixed(2)}</p>
+                        <p>Cash Deductions: AED {Number(cashDeductionSummary.activeDeductionsTotal || 0).toFixed(2)}</p>
                         <p className="font-semibold text-teal-800">
                           Expected Cash Before Closing: AED {expectedCashAmount.toFixed(2)}
                         </p>

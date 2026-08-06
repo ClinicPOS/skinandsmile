@@ -55,6 +55,8 @@ type DashboardResponse = {
   overview: {
     netSales: number;
     netSalesCompare: number;
+    netCollectionsAfterDeductions: number;
+    netCollectionsAfterDeductionsCompare: number;
     targetProgress: number | null;
     customerCollections: number;
     customerCollectionsCompare: number;
@@ -136,6 +138,30 @@ type DashboardResponse = {
     providerDeductions: number | null;
     netSettlement: number | null;
     missingAllocationCoverage: boolean;
+  };
+  cashManagement: {
+    cashCollected: number;
+    commissionsPaid: number;
+    expensesPaid: number;
+    totalCashDeductions: number;
+    cashAfterDeductions: number;
+    details: Array<{
+      id: string;
+      createdAt: string;
+      clinicId: string;
+      clinicName: string;
+      registerSessionId: string;
+      receptionistName: string;
+      paidToName: string;
+      description: string;
+      referenceNumber: string | null;
+      amount: number;
+      type: "expense" | "commission";
+      status: "active" | "voided";
+      voidedAt: string | null;
+      voidReason: string | null;
+      voidedByName: string | null;
+    }>;
   };
   attentionItems: string[];
 };
@@ -377,7 +403,7 @@ function renderExportHtml(data: DashboardResponse, clinicLabel: string, currentR
         Generated: ${new Date(data.meta.lastUpdatedAt).toLocaleString("en-GB", { timeZone: "Asia/Dubai" })}
       </div>
       <div class="kpis">
-        <div class="kpi"><div class="label">Net Sales</div><div class="value">${formatCurrency(data.overview?.netSales)}</div></div>
+        <div class="kpi"><div class="label">Net Collections After Deductions</div><div class="value">${formatCurrency(data.overview?.netCollectionsAfterDeductions)}</div></div>
         <div class="kpi"><div class="label">Target Pace</div><div class="value">${data.overview?.targetProgress == null ? "Not available" : `${data.overview.targetProgress.toFixed(1)}%`}</div></div>
         <div class="kpi"><div class="label">Customer Collections</div><div class="value">${formatCurrency(data.overview?.customerCollections)}</div></div>
         <div class="kpi"><div class="label">Outstanding Balance</div><div class="value">${formatCurrency(data.overview?.outstandingBalance)}</div></div>
@@ -407,6 +433,7 @@ export default function ReportsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<string>("");
+  const [showCashDeductionDetails, setShowCashDeductionDetails] = useState(false);
   const inFlightRef = useRef(false);
 
   useEffect(() => {
@@ -472,6 +499,7 @@ export default function ReportsPage() {
       .on("postgres_changes", { event: "*", schema: "public", table: "payment_records" }, () => loadDashboard({ background: true }))
       .on("postgres_changes", { event: "*", schema: "public", table: "payment_allocations" }, () => loadDashboard({ background: true }))
       .on("postgres_changes", { event: "*", schema: "public", table: "balance_payments" }, () => loadDashboard({ background: true }))
+      .on("postgres_changes", { event: "*", schema: "public", table: "cash_deductions" }, () => loadDashboard({ background: true }))
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [period, loadDashboard]);
@@ -511,11 +539,17 @@ export default function ReportsPage() {
       ["Comparison", compareRangeLabel],
       ["Generated", new Date(data.meta.lastUpdatedAt).toLocaleString("en-GB", { timeZone: "Asia/Dubai" })],
       [""],
-      ["Net Sales", data.overview?.netSales ?? ""],
+      ["Net Collections After Deductions", data.overview?.netCollectionsAfterDeductions ?? ""],
       ["Customer Collections", data.overview?.customerCollections ?? ""],
       ["Outstanding Balance", data.overview?.outstandingBalance ?? ""],
       ["Unique Patients Seen", data.overview?.uniquePatientsSeen ?? ""],
       ["Completed Visits", data.overview?.completedVisits ?? ""],
+      [""],
+      ["Cash Collected", data.cashManagement.cashCollected],
+      ["Commissions Paid", data.cashManagement.commissionsPaid],
+      ["Expenses Paid", data.cashManagement.expensesPaid],
+      ["Total Cash Deductions", data.cashManagement.totalCashDeductions],
+      ["Cash After Deductions", data.cashManagement.cashAfterDeductions],
     ];
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
     summarySheet["!cols"] = [{ wch: 34 }, { wch: 24 }];
@@ -543,6 +577,25 @@ export default function ReportsPage() {
       ["Customer Collections", data.payments.customerCollections],
       ["Customer Refunds", data.payments.customerRefunds],
     ]), "Payments");
+
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ["Date & Time", "Clinic", "Register Session", "Receptionist", "Type", "Paid To", "Description", "Reference", "Amount", "Status", "Void Details"],
+      ...data.cashManagement.details.map((row) => [
+        new Date(row.createdAt).toLocaleString("en-GB", { timeZone: "Asia/Dubai" }),
+        row.clinicName,
+        row.registerSessionId,
+        row.receptionistName,
+        row.type === "commission" ? "Commission" : "Expense",
+        row.paidToName,
+        row.description,
+        row.referenceNumber || "",
+        row.amount,
+        row.status,
+        row.status === "voided"
+          ? `${row.voidedAt ? new Date(row.voidedAt).toLocaleString("en-GB", { timeZone: "Asia/Dubai" }) : ""}${row.voidedByName ? ` by ${row.voidedByName}` : ""}${row.voidReason ? ` • ${row.voidReason}` : ""}`
+          : "",
+      ]),
+    ]), "Cash Deductions");
 
     XLSX.writeFile(workbook, `CEO_Dashboard_${new Date().toLocaleDateString("en-CA")}.xlsx`);
   };
@@ -682,9 +735,9 @@ export default function ReportsPage() {
 
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <KpiCard
-                title="Net Sales"
-                value={data.overview?.netSales ?? null}
-                compare={percentageChange(data.overview?.netSales ?? null, data.overview?.netSalesCompare ?? null)}
+                title="Net Collections After Deductions"
+                value={data.overview?.netCollectionsAfterDeductions ?? null}
+                compare={percentageChange(data.overview?.netCollectionsAfterDeductions ?? null, data.overview?.netCollectionsAfterDeductionsCompare ?? null)}
                 direction="higher_better"
                 comparisonLabel={data.meta.compareRange.label}
               />
@@ -702,6 +755,7 @@ export default function ReportsPage() {
                 compare={percentageChange(data.overview?.customerCollections ?? null, data.overview?.customerCollectionsCompare ?? null)}
                 direction="higher_better"
                 comparisonLabel={data.meta.compareRange.label}
+                note="Patient payments received before commissions and expenses"
               />
               <KpiCard
                 title="Outstanding Balance"
@@ -710,6 +764,91 @@ export default function ReportsPage() {
                 direction="lower_better"
                 comparisonLabel={data.meta.compareRange.label}
               />
+            </div>
+
+            <div className="rounded-2xl border border-violet-200 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900">Cash Management</h3>
+                  <p className="mt-1 text-xs text-slate-500">Cash collected versus active commissions and expenses for the selected range.</p>
+                </div>
+                <button
+                  onClick={() => setShowCashDeductionDetails((current) => !current)}
+                  className="rounded-xl border border-violet-200 bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700 transition hover:bg-violet-100"
+                >
+                  {showCashDeductionDetails ? "Hide Details" : "Open Details"}
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                {[
+                  { label: "Cash Collected", value: formatCurrency(data.cashManagement.cashCollected) },
+                  { label: "Commissions Paid", value: formatCurrency(data.cashManagement.commissionsPaid) },
+                  { label: "Expenses Paid", value: formatCurrency(data.cashManagement.expensesPaid) },
+                  { label: "Total Cash Deductions", value: formatCurrency(data.cashManagement.totalCashDeductions) },
+                  { label: "Cash After Deductions", value: formatCurrency(data.cashManagement.cashAfterDeductions) },
+                ].map((item) => (
+                  <div key={item.label} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">{item.label}</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">{item.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {showCashDeductionDetails && (
+                <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200">
+                  <table className="min-w-full text-xs sm:text-sm">
+                    <thead>
+                      <tr className="bg-slate-50 text-left text-xs font-medium text-slate-500">
+                        <th className="px-4 py-2.5">Date &amp; Time</th>
+                        <th className="px-4 py-2.5">Clinic</th>
+                        <th className="px-4 py-2.5">Register Session</th>
+                        <th className="px-4 py-2.5">Receptionist</th>
+                        <th className="px-4 py-2.5">Type</th>
+                        <th className="px-4 py-2.5">Paid To</th>
+                        <th className="px-4 py-2.5">Description</th>
+                        <th className="px-4 py-2.5">Reference</th>
+                        <th className="px-4 py-2.5">Amount</th>
+                        <th className="px-4 py-2.5">Status</th>
+                        <th className="px-4 py-2.5">Void Info</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {data.cashManagement.details.length === 0 ? (
+                        <tr>
+                          <td colSpan={11} className="px-4 py-6 text-center text-sm text-slate-400">
+                            No commission or expense entries recorded for this range.
+                          </td>
+                        </tr>
+                      ) : (
+                        data.cashManagement.details.map((row) => (
+                          <tr key={row.id} className="align-top hover:bg-slate-50">
+                            <td className="px-4 py-3 text-slate-700">{new Date(row.createdAt).toLocaleString("en-GB", { timeZone: "Asia/Dubai" })}</td>
+                            <td className="px-4 py-3 text-slate-700">{row.clinicName}</td>
+                            <td className="px-4 py-3 text-slate-500">{row.registerSessionId}</td>
+                            <td className="px-4 py-3 text-slate-700">{row.receptionistName}</td>
+                            <td className="px-4 py-3 text-slate-700">{row.type === "commission" ? "Commission" : "Expense"}</td>
+                            <td className="px-4 py-3 font-medium text-slate-900">{row.paidToName}</td>
+                            <td className="px-4 py-3 text-slate-700">{row.description}</td>
+                            <td className="px-4 py-3 text-slate-500">{row.referenceNumber || "—"}</td>
+                            <td className="px-4 py-3 font-semibold text-slate-900">{formatCurrency(row.amount)}</td>
+                            <td className="px-4 py-3">
+                              <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold ${row.status === "voided" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`}>
+                                {row.status === "voided" ? "Voided" : "Active"}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-slate-500">
+                              {row.status === "voided"
+                                ? `${row.voidedAt ? new Date(row.voidedAt).toLocaleString("en-GB", { timeZone: "Asia/Dubai" }) : ""}${row.voidedByName ? ` by ${row.voidedByName}` : ""}${row.voidReason ? ` • ${row.voidReason}` : ""}`
+                                : "—"}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
 
             {/* Secondary metrics */}

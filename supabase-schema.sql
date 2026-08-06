@@ -34,6 +34,20 @@ create table if not exists public.clinics (
   trn text,
   room text,
   logo text,
+  a4_invoice_logo_url text,
+  a4_invoice_logo_width_mm double precision,
+  a4_invoice_logo_height_mm double precision,
+  a4_invoice_logo_alignment text,
+  a4_invoice_logo_offset_x_mm double precision,
+  a4_invoice_logo_offset_y_mm double precision,
+  a4_invoice_primary_color text,
+  a4_invoice_secondary_color text,
+  a4_invoice_accent_color text,
+  a4_invoice_text_color text,
+  a4_invoice_divider_color text,
+  a4_invoice_slogan text,
+  enable_expenses boolean not null default false,
+  enable_commissions boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -176,6 +190,52 @@ create index if not exists cash_register_sessions_opened_at_idx
 
 create index if not exists cash_register_sessions_receptionist_id_idx
   on public.cash_register_sessions (receptionist_id);
+
+create table if not exists public.cash_deductions (
+  id uuid primary key default gen_random_uuid(),
+  clinic_id uuid not null references public.clinics(id) on delete restrict,
+  register_session_id uuid not null references public.cash_register_sessions(id) on delete restrict,
+  business_date date not null,
+  type text not null check (type in ('expense', 'commission')),
+  staff_id uuid references public.doctors(id) on delete set null,
+  paid_to_name text not null,
+  description text not null,
+  reference_number text,
+  amount numeric(12,2) not null check (amount > 0),
+  status text not null default 'active' check (status in ('active', 'voided')),
+  created_by uuid references public.receptionist(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_by uuid references public.receptionist(id) on delete set null,
+  updated_at timestamptz not null default now(),
+  voided_by uuid references public.receptionist(id) on delete set null,
+  voided_at timestamptz,
+  void_reason text,
+  constraint cash_deductions_void_requires_metadata check (
+    status <> 'voided'
+    or (voided_at is not null and nullif(btrim(coalesce(void_reason, '')), '') is not null)
+  )
+);
+
+create index if not exists cash_deductions_clinic_date_idx
+  on public.cash_deductions (clinic_id, business_date, created_at desc);
+create index if not exists cash_deductions_register_session_idx
+  on public.cash_deductions (register_session_id, status, created_at desc);
+create index if not exists cash_deductions_type_status_idx
+  on public.cash_deductions (type, status, created_at desc);
+
+create table if not exists public.cash_deduction_events (
+  id uuid primary key default gen_random_uuid(),
+  deduction_id uuid not null references public.cash_deductions(id) on delete cascade,
+  action text not null check (action in ('created', 'updated', 'voided')),
+  changed_by uuid references public.receptionist(id) on delete set null,
+  changed_at timestamptz not null default now(),
+  reason text,
+  previous_data jsonb,
+  next_data jsonb
+);
+
+create index if not exists cash_deduction_events_deduction_idx
+  on public.cash_deduction_events (deduction_id, changed_at desc);
 
 create table if not exists public.patient_notes (
   id uuid primary key default gen_random_uuid(),

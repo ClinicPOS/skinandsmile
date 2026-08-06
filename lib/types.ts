@@ -16,6 +16,20 @@ export type Clinic = {
   receipt_qr_url: string | null;
   trn: string | null;
   logo: string | null;
+  a4_invoice_logo_url: string | null;
+  a4_invoice_logo_width_mm: number | null;
+  a4_invoice_logo_height_mm: number | null;
+  a4_invoice_logo_alignment: string | null;
+  a4_invoice_logo_offset_x_mm: number | null;
+  a4_invoice_logo_offset_y_mm: number | null;
+  a4_invoice_primary_color: string | null;
+  a4_invoice_secondary_color: string | null;
+  a4_invoice_accent_color: string | null;
+  a4_invoice_text_color: string | null;
+  a4_invoice_divider_color: string | null;
+  a4_invoice_slogan: string | null;
+  enable_expenses?: boolean | null;
+  enable_commissions?: boolean | null;
 };
 
 export type Patient = {
@@ -84,6 +98,45 @@ export type CashRegisterSession = {
   variance: number | null;
   opened_at: string;
   closed_at: string | null;
+};
+
+export type CashDeductionType = "expense" | "commission";
+export type CashDeductionStatus = "active" | "voided";
+
+export type CashDeduction = {
+  id: string;
+  clinic_id: string;
+  register_session_id: string;
+  business_date: string;
+  type: CashDeductionType;
+  staff_id: string | null;
+  paid_to_name: string;
+  description: string;
+  reference_number: string | null;
+  amount: number;
+  status: CashDeductionStatus;
+  created_by: string | null;
+  created_at: string;
+  updated_by: string | null;
+  updated_at: string;
+  voided_by: string | null;
+  voided_at: string | null;
+  void_reason: string | null;
+  staff_name?: string | null;
+  created_by_name?: string | null;
+  updated_by_name?: string | null;
+  voided_by_name?: string | null;
+};
+
+export type CashDeductionAuditEvent = {
+  id: string;
+  deduction_id: string;
+  action: "created" | "updated" | "voided";
+  changed_by: string | null;
+  changed_at: string;
+  reason: string | null;
+  previous_data: Record<string, unknown> | null;
+  next_data: Record<string, unknown> | null;
 };
 
 export type PatientNote = {

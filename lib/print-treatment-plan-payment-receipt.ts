@@ -71,9 +71,9 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
     const total = Number(service.price || 0) * qty;
     const teeth = service.teeth && service.teeth.length > 0 ? ` — Tooth #${service.teeth.join(", #")}` : "";
     return `
-      <div class="row">
-        <span>${escapeHtml(service.name)}${escapeHtml(teeth)}</span>
-        <span>AED ${total.toFixed(2)}</span>
+      <div class="row service-row">
+        <span class="service-description">${escapeHtml(service.name)}${escapeHtml(teeth)}</span>
+        <span class="service-amount">AED ${total.toFixed(2)}</span>
       </div>
     `;
   }).join("");
@@ -135,6 +135,7 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
     .row {
       display: flex;
       justify-content: space-between;
+      align-items: flex-start;
       gap: 6px;
       margin: 1px 0;
     }
@@ -145,6 +146,26 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
       min-width: 0;
       overflow-wrap: anywhere;
       word-break: break-word;
+    }
+    .service-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) max-content;
+      column-gap: 4px;
+      width: 100%;
+      max-width: 100%;
+      align-items: start;
+    }
+    .service-description {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: normal;
+    }
+    .service-amount {
+      justify-self: end;
+      text-align: right;
+      white-space: nowrap;
+      overflow-wrap: normal;
+      word-break: normal;
     }
     .head-row { display: flex; justify-content: space-between; font-weight: 700; }
     .footer-center { text-align: center; margin-top: 4px; }

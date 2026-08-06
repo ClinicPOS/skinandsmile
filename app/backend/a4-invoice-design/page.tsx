@@ -1,12 +1,12 @@
 import { Suspense } from "react";
-import BackendPageClient from "./backend-page-client";
+import A4InvoiceDesignPageClient from "./a4-invoice-design-client";
 
 export const dynamic = "force-dynamic";
 
-export default function BackendPage() {
+export default function A4InvoiceDesignPage() {
   return (
     <Suspense fallback={<div className="min-h-[240px]" />}>
-      <BackendPageClient />
+      <A4InvoiceDesignPageClient />
     </Suspense>
   );
 }
