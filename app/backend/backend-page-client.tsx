@@ -316,7 +316,6 @@ function BackendPageContent() {
       const clinicName = clinicNameById.get(clinicId) || "Unknown clinic";
       const paid = (treatmentPlanPaymentsByPlanId.get(plan.id) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
       const remaining = Math.max(0, Number(plan.total_amount || 0) - paid);
-      if (remaining <= 0.0049) continue;
       const completedVisits = (treatmentPlanVisitsByPlanId.get(plan.id) || []).length;
       const shownVisits = Math.max(completedVisits, plan.clinic_patient_file_id ? 1 : 0);
       const totalVisits = Math.max(1, Number(plan.planned_visits || 0));
@@ -1576,7 +1575,7 @@ function BackendPageContent() {
             </h2>
             <p className="mt-1 text-sm text-slate-500">
               {activeSection === "treatment-plans"
-                ? "Review active treatment plans that still have amounts due."
+                ? "Review every active treatment plan, including fully paid ones."
                 : "Review who still owes per clinic. Delete is available only from this backend view after unlock."}
             </p>
           </div>
@@ -1592,7 +1591,7 @@ function BackendPageContent() {
                   <div>
                     <p className="text-sm font-semibold text-slate-900">{group.clinicName}</p>
                     <p className="text-xs text-slate-500">
-                      {group.items.length} outstanding balance{group.items.length === 1 ? "" : "s"}
+                      {group.items.length} {activeSection === "treatment-plans" ? "active treatment plan" : "outstanding balance"}{group.items.length === 1 ? "" : "s"}
                     </p>
                   </div>
                   <p className="text-sm font-semibold text-amber-700">
@@ -1622,7 +1621,9 @@ function BackendPageContent() {
                         </div>
                         <div className="flex items-center gap-2">
                           <span className={`text-sm font-semibold ${item.status === "Paid" ? "text-emerald-700" : item.status === "Partial" ? "text-amber-700" : "text-rose-700"}`}>
-                            {item.kind === "balance" ? `${item.status} · AED ${item.remaining.toFixed(2)}` : `Treatment plan · AED ${item.remaining.toFixed(2)}`}
+                            {item.kind === "balance"
+                              ? `${item.status} · AED ${item.remaining.toFixed(2)}`
+                              : `${item.status === "Unpaid" ? "Active plan" : item.status} · AED ${item.remaining.toFixed(2)}`}
                           </span>
                           {balanceId ? (
                             <button
