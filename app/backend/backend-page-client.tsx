@@ -60,6 +60,7 @@ function BackendPageContent() {
   const requestedClinicId = searchParams.get("clinicId") || "";
 
   type BackendPatient = Patient & {
+    patient_number: number | null;
     clinic_file_no: string;
     clinic_patient_file_id: string;
   };
