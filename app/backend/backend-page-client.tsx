@@ -59,8 +59,20 @@ function BackendPageContent() {
   const activeSection = resolveBackendSection(pathname);
   const requestedClinicId = searchParams.get("clinicId") || "";
 
-  type BackendPatient = Patient & {
+  type BackendPatient = {
+    id: string;
     patient_number: number | null;
+    name: string;
+    phone: string | null;
+    email: string | null;
+    notes: string | null;
+    date_of_birth: string | null;
+    sex: string | null;
+    nationality: string | null;
+    emirates_id: string | null;
+    passport_number: string | null;
+    mrn: string | null;
+    address: string | null;
     clinic_file_no: string;
     clinic_patient_file_id: string;
   };
