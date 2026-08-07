@@ -34,6 +34,14 @@ create table if not exists public.clinics (
   trn text,
   room text,
   logo text,
+  thermal_logo_width_mm double precision,
+  thermal_logo_max_height_mm double precision,
+  thermal_logo_alignment text,
+  thermal_logo_offset_x_mm double precision,
+  thermal_logo_offset_y_mm double precision,
+  thermal_logo_high_contrast boolean,
+  thermal_text_weight integer,
+  thermal_font_size_px double precision,
   a4_invoice_logo_url text,
   a4_invoice_logo_width_mm double precision,
   a4_invoice_logo_height_mm double precision,
@@ -48,7 +56,14 @@ create table if not exists public.clinics (
   a4_invoice_slogan text,
   enable_expenses boolean not null default false,
   enable_commissions boolean not null default false,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  constraint clinics_thermal_logo_width_mm_check check (thermal_logo_width_mm is null or thermal_logo_width_mm between 10 and 72),
+  constraint clinics_thermal_logo_max_height_mm_check check (thermal_logo_max_height_mm is null or thermal_logo_max_height_mm between 10 and 72),
+  constraint clinics_thermal_logo_alignment_check check (thermal_logo_alignment is null or thermal_logo_alignment in ('left', 'center', 'right')),
+  constraint clinics_thermal_logo_offset_x_mm_check check (thermal_logo_offset_x_mm is null or thermal_logo_offset_x_mm between -62 and 62),
+  constraint clinics_thermal_logo_offset_y_mm_check check (thermal_logo_offset_y_mm is null or thermal_logo_offset_y_mm between -8 and 16),
+  constraint clinics_thermal_text_weight_check check (thermal_text_weight is null or thermal_text_weight in (500, 700, 800)),
+  constraint clinics_thermal_font_size_px_check check (thermal_font_size_px is null or thermal_font_size_px between 9 and 13)
 );
 
 create table if not exists public.services (

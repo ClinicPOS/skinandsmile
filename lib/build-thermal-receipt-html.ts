@@ -1,4 +1,9 @@
 import { buildReceiptQrHtml, getReceiptLogoPath } from "./receipt-branding";
+import {
+  buildThermalLogoHtml,
+  buildThermalReceiptCss,
+  getThermalReceiptSettings,
+} from "./thermal-receipt-branding";
 import type { Clinic } from "./types";
 
 export interface ThermalReceiptItem {
@@ -42,6 +47,7 @@ export interface BuildThermalReceiptHtmlOptions {
   outstandingBalance: number;
   notes: string;
   paymentMethod: string;
+  receiptHeaderLabel?: string;
 }
 
 export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions): string {
@@ -69,14 +75,17 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
     outstandingBalance,
     notes,
     paymentMethod,
+    receiptHeaderLabel,
   } = options;
 
   const logoPath = getReceiptLogoPath(clinic, undefined, "thermal");
+  const thermalSettings = getThermalReceiptSettings(clinic);
   const clinicDisplayName = (clinic?.receipt_print_name || clinic?.name || "Skin and Smile Dental Clinic")
     .replace(/\s*\([^)]*\)\s*/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
   const receiptTitle = clinic?.receipt_title || "TAX INVOICE";
+  const receiptHeading = receiptHeaderLabel || receiptTitle;
   const isAlDanaClinic = (clinic?.name || "").toLowerCase().includes("al dana");
   const clinicAddress = clinic?.address || (
     isAlDanaClinic
@@ -205,78 +214,17 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
         <meta charset="utf-8" />
         <title>${title}</title>
         <style>
-          * { box-sizing: border-box; }
-          body {
-            font-family: Arial, Helvetica, sans-serif;
-            width: 72mm;
-            margin: 0;
-            padding: 2mm;
-            font-size: 10px;
-            line-height: 1.25;
-            color: #000;
-            background: #fff;
-            overflow-x: hidden;
-            -webkit-text-size-adjust: 100%;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
-            font-weight: 500;
-          }
-          .center { text-align: center; }
-          .hr { border-top: 1px dashed #000; margin: 5px 0; }
-          .double {
-            border-top: 2px solid #000;
-            border-bottom: 2px solid #000;
-            padding: 3px 0;
-            margin: 5px 0;
-            text-align: center;
-            font-weight: 700;
-          }
-          .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-          .logo {
-            display: block;
-            width: 100%;
-            max-width: 68mm;
-            max-height: 36mm;
-            height: auto;
-            object-fit: contain;
-            image-rendering: -webkit-optimize-contrast;
-            image-rendering: crisp-edges;
-          }
-          .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
-          .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
-          .row {
-            display: flex;
-            justify-content: space-between;
-            gap: 6px;
-            margin: 1px 0;
-          }
-          .row span:first-child { min-width: 30mm; }
-          .row span:last-child {
-            text-align: right;
-            flex: 1;
-            min-width: 0;
-            overflow-wrap: anywhere;
-            word-break: break-word;
-          }
+          ${buildThermalReceiptCss(thermalSettings)}
           .head-row { display: flex; justify-content: space-between; font-weight: 700; }
           .item-row { margin: 2px 0; }
           .item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
           .amount { text-align: right; white-space: nowrap; }
-          .footer-center { text-align: center; margin-top: 4px; }
-          @media print {
-            @page { size: 80mm auto; margin: 0; }
-            body { width: 72mm; }
-            * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; }
-            .logo { width: 100%; max-width: 68mm; max-height: 36mm; height: auto; }
-          }
         </style>
       </head>
       <body>
-        <div class="logo-wrap" id="logo-wrap">
-          <img src="${logoPath}" alt="Clinic logo" class="logo" loading="eager" decoding="async" onerror="document.getElementById('logo-wrap').style.display='none'" />
-        </div>
+        ${buildThermalLogoHtml(logoPath, "Clinic logo")}
 
-        <div class="double">${receiptTitle}</div>
+        <div class="double">${receiptHeading}</div>
 
         <div class="clinic-name">${clinicDisplayName}</div>
 

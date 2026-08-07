@@ -198,6 +198,14 @@ type ClinicSummary = {
   receipt_thank_you?: string | null;
   receipt_final_message?: string | null;
   logo?: string | null;
+  thermal_logo_width_mm?: number | null;
+  thermal_logo_max_height_mm?: number | null;
+  thermal_logo_alignment?: string | null;
+  thermal_logo_offset_x_mm?: number | null;
+  thermal_logo_offset_y_mm?: number | null;
+  thermal_logo_high_contrast?: boolean | null;
+  thermal_text_weight?: number | null;
+  thermal_font_size_px?: number | null;
 };
 
 type ReceiptItem = {

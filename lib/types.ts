@@ -16,6 +16,14 @@ export type Clinic = {
   receipt_qr_url: string | null;
   trn: string | null;
   logo: string | null;
+  thermal_logo_width_mm: number | null;
+  thermal_logo_max_height_mm: number | null;
+  thermal_logo_alignment: string | null;
+  thermal_logo_offset_x_mm: number | null;
+  thermal_logo_offset_y_mm: number | null;
+  thermal_logo_high_contrast: boolean | null;
+  thermal_text_weight: number | null;
+  thermal_font_size_px: number | null;
   a4_invoice_logo_url: string | null;
   a4_invoice_logo_width_mm: number | null;
   a4_invoice_logo_height_mm: number | null;

@@ -1,5 +1,10 @@
 import type { Clinic } from "./types";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "./receipt-branding";
+import {
+  buildThermalLogoHtml,
+  buildThermalReceiptCss,
+  getThermalReceiptSettings,
+} from "./thermal-receipt-branding";
 
 type TreatmentPlanReceiptAllocation = {
   methodLabel: string;
@@ -42,6 +47,7 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
     .trim();
   const clinicTitle = ctx.clinic?.receipt_title?.trim() || "DENTAL CLINIC";
   const clinicAddress = ctx.clinic?.address || "";
+  const clinicRoom = ctx.clinic?.room ? `2nd Floor, Room ${ctx.clinic.room.replace(/^Room\s+/i, "")}` : "";
   const clinicPhone = ctx.clinic?.phone || "";
   const clinicTrn = ctx.clinic?.trn || "";
   const clinicWhatsapp = ctx.clinic?.whatsapp || "";
@@ -50,11 +56,21 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
   const clinicTiktok = ctx.clinic?.tiktok || "";
   const logoPath = getReceiptLogoPath(ctx.clinic, undefined, "thermal");
   const createdAt = new Date(ctx.createdAt || Date.now());
+  const thermalSettings = getThermalReceiptSettings(ctx.clinic);
   const dateStr = createdAt.toLocaleDateString("en-GB");
   const timeStr = createdAt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
   const referenceNo = (ctx.referenceNo || "").trim() || `TP-${String(createdAt.getTime()).slice(-6)}`;
+  const receiptVatNote = ctx.clinic?.receipt_vat_note?.trim() || "VAT Included in Above Amount / الضريبة مشمولة في المبلغ أعلاه";
   const receiptThankYou = ctx.clinic?.receipt_thank_you?.trim() || "Thank you for choosing us. / شكراً لاختيارنا.";
   const receiptFinalMessage = ctx.clinic?.receipt_final_message?.trim() || "Wishing you a healthy smile. / نتمنى لك ابتسامة صحية.";
+  const socialHtml = clinicInstagram || clinicFacebook || clinicTiktok
+    ? `
+      <div class="footer-center" style="margin-top:6px;">Follow us:</div>
+      ${clinicInstagram ? `<div class="footer-center">Instagram: ${escapeHtml(clinicInstagram)}</div>` : ""}
+      ${clinicFacebook ? `<div class="footer-center">Facebook: ${escapeHtml(clinicFacebook)}</div>` : ""}
+      ${clinicTiktok ? `<div class="footer-center">TikTok: ${escapeHtml(clinicTiktok)}</div>` : ""}
+    `
+    : "";
   const qrHtml = buildReceiptQrHtml({
     clinic: ctx.clinic,
     clinicDisplayName: clinicName,
@@ -90,63 +106,7 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
   <meta charset="utf-8" />
   <title>Treatment Plan Payment Receipt</title>
   <style>
-    * { box-sizing: border-box; }
-    @page { size: 80mm auto; margin: 0; }
-    body {
-      font-family: Arial, Helvetica, sans-serif;
-      width: 72mm;
-      margin: 0;
-      padding: 2mm;
-      font-size: 10px;
-      line-height: 1.25;
-      color: #000;
-      background: #fff;
-      overflow-x: hidden;
-      -webkit-text-size-adjust: 100%;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      font-weight: 500;
-      -webkit-print-color-adjust: exact;
-      print-color-adjust: exact;
-    }
-    .center { text-align: center; }
-    .hr { border-top: 1px dashed #000; margin: 5px 0; }
-    .double {
-      border-top: 2px solid #000;
-      border-bottom: 2px solid #000;
-      padding: 3px 0;
-      margin: 5px 0;
-      text-align: center;
-      font-weight: 700;
-    }
-    .logo-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-    .logo {
-      display: block;
-      width: 100%;
-      max-width: 68mm;
-      max-height: 36mm;
-      height: auto;
-      object-fit: contain;
-      image-rendering: -webkit-optimize-contrast;
-      image-rendering: crisp-edges;
-    }
-    .clinic-name { text-align: center; font-size: 14px; font-weight: 700; line-height: 1.1; }
-    .address { text-align: center; font-size: 9px; line-height: 1.25; margin-top: 4px; }
-    .row {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 6px;
-      margin: 1px 0;
-    }
-    .row span:first-child { min-width: 30mm; }
-    .row span:last-child {
-      text-align: right;
-      flex: 1;
-      min-width: 0;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-    }
+    ${buildThermalReceiptCss(thermalSettings)}
     .service-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) max-content;
@@ -155,6 +115,7 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
       max-width: 100%;
       align-items: start;
     }
+    .service-row span:first-child { min-width: 0; }
     .service-description {
       min-width: 0;
       overflow-wrap: anywhere;
@@ -170,18 +131,10 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
     .head-row { display: flex; justify-content: space-between; font-weight: 700; }
     .footer-center { text-align: center; margin-top: 4px; }
     .meta { font-size: 9px; line-height: 1.25; }
-    @media print {
-      @page { size: 80mm auto; margin: 0; }
-      body { width: 72mm; padding: 2mm; }
-      * { color: #000 !important; border-color: #000 !important; background-color: #fff !important; }
-      .logo { width: 100%; max-width: 68mm; max-height: 36mm; height: auto; }
-    }
   </style>
 </head>
 <body>
-  <div class="logo-wrap" id="logo-wrap">
-    <img class="logo" src="${logoPath}" alt="Clinic logo" loading="eager" decoding="async" onerror="document.getElementById('logo-wrap').style.display='none'" />
-  </div>
+  ${buildThermalLogoHtml(logoPath, "Clinic logo")}
 
   <div class="double">PAYMENT RECEIPT / إيصال الدفع</div>
 
@@ -189,6 +142,7 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
   <div class="address">
     ${clinicTitle ? `<div>${escapeHtml(clinicTitle)}</div>` : ""}
     ${clinicAddress ? clinicAddress.split(/\n|\n/).map((line: string) => `<div>${escapeHtml(line)}</div>`).join("") : ""}
+    ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${escapeHtml(clinicRoom)}</div>` : ""}
     ${clinicPhone ? `<div>${escapeHtml(`Tel / هاتف: ${clinicPhone}`)}</div>` : ""}
     ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN / الرقم الضريبي: ${escapeHtml(clinicTrn)}</div>` : ""}
   </div>
@@ -221,7 +175,15 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
   <div class="row"><span>Remaining Plan Balance / الرصيد المتبقي للخطة</span><span>AED ${Number(ctx.remainingAfterToday || 0).toFixed(2)}</span></div>
 
   <div class="hr"></div>
+  <div class="footer-center">${escapeHtml(receiptVatNote)}</div>
   <div class="footer-center">${escapeHtml(receiptThankYou)}</div>
+  ${socialHtml}
+  <div class="hr"></div>
+  <div style="text-align:center;font-size:9px;line-height:1.4;">
+    ${clinicPhone ? `<div>Phone: ${escapeHtml(clinicPhone)}</div>` : ""}
+    ${clinicWhatsapp ? `<div>WhatsApp: ${escapeHtml(clinicWhatsapp)}</div>` : ""}
+  </div>
+  <div class="hr"></div>
   <div class="footer-center">${escapeHtml(receiptFinalMessage)}</div>
   <div class="hr"></div>
   ${qrHtml}

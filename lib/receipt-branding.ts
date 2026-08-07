@@ -11,7 +11,7 @@ type ReceiptLogoOption = {
 };
 
 export const receiptLogoOptions: ReceiptLogoOption[] = [
-  { value: "skin-smile", label: "Skin and Smile default", path: "/images/logo6.jpg", thermalPath: "/images/Alsatwathermal.png" },
+  { value: "skin-smile", label: "Skin and Smile default", path: "/images/logo6.jpg", thermalPath: "/images/skin-and-smile-logo-72mm-203dpi-576px.png" },
   { value: "skin-smile-alt", label: "Skin and Smile alternate", path: "/images/dental.png", thermalPath: "/images/Alsatwathermal.png" },
   { value: "dental", label: "Skin and Smile Dental", path: "/images/dental.png", thermalPath: "/images/Alsatwathermal.png" },
   { value: "aesthetic", label: "Skin and Smile Aesthetic", path: "/images/invoiceskinandsmile-aesthetic.png", thermalPath: "/images/aesthetic.png" },

@@ -7,7 +7,7 @@ import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from
 import { generateInvoiceHtml, generateTreatmentPlanPaymentInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { buildThermalReceiptHtml as buildThermalReceiptHtmlShared, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
 import { useClinicAccess } from "../../lib/clinic-access";
-import type { TreatmentPlan, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, TreatmentPlanVisit } from "../../lib/types";
+import type { Clinic as ClinicRecord, TreatmentPlan, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, TreatmentPlanVisit } from "../../lib/types";
 import { printTreatmentPlanPaymentReceipt } from "../../lib/print-treatment-plan-payment-receipt";
 
 type Receipt = {
@@ -41,24 +41,7 @@ type Patient = {
   patient_number?: number | null;
 };
 
-type Clinic = {
-  id: string;
-  name: string;
-  address?: string | null;
-  room?: string | null;
-  trn?: string | null;
-  phone?: string | null;
-  whatsapp?: string | null;
-  instagram?: string | null;
-  facebook?: string | null;
-  tiktok?: string | null;
-  receipt_print_name?: string | null;
-  receipt_title?: string | null;
-  receipt_vat_note?: string | null;
-  receipt_thank_you?: string | null;
-  receipt_final_message?: string | null;
-  logo?: string | null;
-};
+type Clinic = ClinicRecord;
 
 type ClinicPatientFile = {
   id: string;
@@ -309,6 +292,7 @@ export default function ReceiptHistoryPage() {
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
     const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
+    const patientClinicFile = clinicPatientFiles.find((file) => file.clinic_id === clinic?.id && file.patient_id === selectedReceipt.patient_id) || null;
     const doctor = doctors.find((d) => d.id === selectedReceipt.doctor_id);
     const issuedAt = selectedReceipt.created_at ? new Date(selectedReceipt.created_at) : new Date();
 
@@ -320,11 +304,11 @@ export default function ReceiptHistoryPage() {
 
     const patientName = patient?.name || "-";
     const patientPhone = patient?.phone || "-";
-    const patientFileNumber = selectedReceipt.receipt_number
-      ? `-#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
+    const patientFileNumber = patientClinicFile?.file_no
+      ? `#${String(patientClinicFile.file_no)}`
       : patient?.patient_number
-      ? `#${String(patient.patient_number).padStart(5, "0")}`
-      : "-";
+        ? `#${String(patient.patient_number).padStart(5, "0")}`
+        : "-";
     const doctorName = doctor?.name || "-";
     const cashierName = receptionist?.name || "Reception";
 
@@ -523,6 +507,11 @@ export default function ReceiptHistoryPage() {
       const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
       const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
       const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
+      const paymentRecord = treatmentPlanPaymentRecords.find((entry) => entry.id === selectedReceipt.id) || null;
+      const plan = treatmentPlans.find((entry) => entry.id === paymentRecord?.treatment_plan_id) || null;
+      const patientClinicFile = clinicPatientFiles.find((file) => file.id === plan?.clinic_patient_file_id)
+        || clinicPatientFiles.find((file) => file.clinic_id === clinic?.id && file.patient_id === selectedReceipt.patient_id)
+        || null;
       const planTitle = selectedReceipt.treatment_plan_title || selectedReceipt.title || "Treatment Plan";
       const allocationRows = (selectedReceipt.treatment_plan_payment_allocations || []).map((allocation) => ({
         methodLabel: allocation.method_variant ? allocation.method_variant.replace(/_/g, " ").toUpperCase() : "Payment",
@@ -530,18 +519,28 @@ export default function ReceiptHistoryPage() {
         feeAmount: Number(allocation.fee_amount || 0),
         customerChargedAmount: Number(allocation.customer_charged_amount || 0),
       }));
+      const currentPaymentTime = selectedReceipt.created_at ? new Date(selectedReceipt.created_at).getTime() : Number.POSITIVE_INFINITY;
+      const settledToDate = plan
+        ? treatmentPlanPaymentRecords
+            .filter((entry) => entry.treatment_plan_id === plan.id)
+            .filter((entry) => {
+              const entryTime = entry.created_at ? new Date(entry.created_at).getTime() : 0;
+              return entryTime <= currentPaymentTime;
+            })
+            .reduce((sum, entry) => sum + Number(entry.total_invoice_amount_settled || 0), 0)
+        : Number(selectedReceipt.total_invoice_amount_settled ?? selectedReceipt.total ?? 0);
 
       printTreatmentPlanPaymentReceipt({
         clinic: clinic as any,
         patientName: patient?.name || "-",
-        patientFileNo: patient?.patient_number ? String(patient.patient_number) : undefined,
+        patientFileNo: patientClinicFile?.file_no || (patient?.patient_number ? String(patient.patient_number) : undefined),
         planTitle,
         paymentArrangement: selectedReceipt.notes?.startsWith("Payment arrangement:")
           ? selectedReceipt.notes.replace("Payment arrangement:", "").trim()
           : "Treatment plan payment",
-        agreedTotal: Number(selectedReceipt.total || 0),
+        agreedTotal: Number(plan?.total_amount || selectedReceipt.total || 0),
         amountSettledToday: Number(selectedReceipt.total_invoice_amount_settled ?? selectedReceipt.total ?? 0),
-        remainingAfterToday: 0,
+        remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - settledToDate),
         totalFeeAmount: Number(selectedReceipt.payment_fee_amount ?? 0),
         totalCustomerPaid: Number(selectedReceipt.total_customer_charged_amount ?? selectedReceipt.total ?? 0),
         cashierName: receptionist?.name || "Reception",
