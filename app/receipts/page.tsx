@@ -34,6 +34,7 @@ import { buildThermalReceiptHtml as buildThermalReceiptHtmlShared, type BuildThe
 import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
 import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 import { extractLegacyCashAmount, getCashDeductionTypeLabel, getDubaiBusinessDate } from "../../lib/cash-deductions";
+import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 
 type PosPricingService = {
   originalPrice?: number | null;
@@ -498,6 +499,7 @@ export default function ReceiptsPage() {
   // Active plans for selected patient
   const [patientActivePlans, setPatientActivePlans] = useState<any[]>([]);
   const [patientActivePlanPayments, setPatientActivePlanPayments] = useState<any[]>([]);
+  const [patientActivePlanPaymentRecords, setPatientActivePlanPaymentRecords] = useState<any[]>([]);
   const [patientActivePlanVisits, setPatientActivePlanVisits] = useState<any[]>([]);
   const [isLoadingActivePlans, setIsLoadingActivePlans] = useState(false);
   const router = useRouter();
@@ -1186,6 +1188,7 @@ export default function ReceiptsPage() {
     setActiveHoldId("");
     setPatientActivePlans([]);
     setPatientActivePlanPayments([]);
+    setPatientActivePlanPaymentRecords([]);
     setPatientActivePlanVisits([]);
   }
 
@@ -1204,15 +1207,18 @@ export default function ReceiptsPage() {
       const plans = (plansResult.data || []);
       if (plans.length > 0) {
         const planIds = plans.map((p: any) => p.id);
-        const [visR, payR] = await Promise.all([
+        const [visR, payR, payRecordsR] = await Promise.all([
           supabase.from("treatment_plan_visits").select("*").in("treatment_plan_id", planIds),
           supabase.from("treatment_plan_payments").select("*").in("treatment_plan_id", planIds),
+          supabase.from("treatment_plan_payment_records").select("*").in("treatment_plan_id", planIds),
         ]);
         setPatientActivePlanVisits((visR.data || []) as any[]);
         setPatientActivePlanPayments((payR.data || []) as any[]);
+        setPatientActivePlanPaymentRecords((payRecordsR.data || []) as any[]);
       } else {
         setPatientActivePlanVisits([]);
         setPatientActivePlanPayments([]);
+        setPatientActivePlanPaymentRecords([]);
       }
       setPatientActivePlans(plans);
     } finally {
@@ -4663,9 +4669,13 @@ export default function ReceiptsPage() {
                     <div className="space-y-2">
                       {patientActivePlans.map((plan) => {
                         const planPayments = patientActivePlanPayments.filter((p: any) => p.treatment_plan_id === plan.id);
+                        const planPaymentRecords = patientActivePlanPaymentRecords.filter((p: any) => p.treatment_plan_id === plan.id);
                         const planVisits = patientActivePlanVisits.filter((v: any) => v.treatment_plan_id === plan.id);
-                        const totalPaid = planPayments.reduce((s: number, p: any) => s + Number(p.amount || 0), 0);
-                        const remaining = Math.max(0, Number(plan.total_amount || 0) - totalPaid);
+                        const rollup = computeTreatmentPlanRollup(plan, {
+                          structuredPayments: planPaymentRecords,
+                          legacyPayments: planPayments,
+                        });
+                        const remaining = rollup.remainingBalance;
                         return (
                           <div key={plan.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-xs">
                             <div>

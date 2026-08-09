@@ -57,6 +57,7 @@ type TreatmentPlanPaymentRow = {
   id: string;
   amount: number | null;
   payment_method: string | null;
+  source_payment_record_id: string | null;
 };
 
 type SimpleAmountRow = {
@@ -186,7 +187,7 @@ export async function computeRegisterSessionCashCollected(
       .eq("register_session_id", context.id),
     supabase
       .from("treatment_plan_payments")
-      .select("id, amount, payment_method")
+      .select("id, amount, payment_method, source_payment_record_id")
       .eq("register_session_id", context.id),
   ]);
 
@@ -237,6 +238,7 @@ export async function computeRegisterSessionCashCollected(
   );
   const legacyTreatmentPlanCash = roundCurrency(
     treatmentPlanLegacyPayments.reduce((sum, payment) => {
+      if (payment.source_payment_record_id) return sum;
       if (linkedLegacyIds.has(String(payment.id || ""))) return sum;
       return sum + extractLegacyCashAmount(String(payment.payment_method || ""), Number(payment.amount || 0));
     }, 0)

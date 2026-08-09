@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { buildComparisonRange, buildDashboardRange, DashboardPeriod, percentageChange, statusFromTarget } from "../../../../lib/ceo-dashboard";
 import { extractLegacyCashAmount } from "../../../../lib/cash-deductions";
+import { computeTreatmentPlanRollup } from "../../../../lib/treatment-plan-rollup";
 
 export const dynamic = "force-dynamic";
 
@@ -95,15 +96,29 @@ type TreatmentPlanRow = {
   id: string;
   clinic_id: string;
   total_amount: number | null;
+  is_legacy?: boolean | null;
+  historical_amount_paid?: number | null;
   created_at?: string | null;
 };
 
 type TreatmentPlanPaymentRow = {
+  id: string;
   treatment_plan_id: string;
   clinic_id: string;
   amount: number | null;
+  source_payment_record_id?: string | null;
   payment_method?: string | null;
+  notes?: string | null;
   receptionist_id?: string | null;
+  created_at?: string | null;
+};
+
+type TreatmentPlanPaymentRecordRow = {
+  id: string;
+  treatment_plan_id: string;
+  total_invoice_amount_settled: number | null;
+  status: string | null;
+  legacy_treatment_plan_payment_id: string | null;
   created_at?: string | null;
 };
 
@@ -626,7 +641,7 @@ export async function POST(request: Request) {
       .lt("created_at", outstandingWindowEnd),
     supabase
       .from("treatment_plans")
-      .select("id, clinic_id, total_amount, created_at")
+      .select("id, clinic_id, total_amount, is_legacy, historical_amount_paid, created_at")
       .in("clinic_id", clinicIds)
       .lt("created_at", outstandingWindowEnd),
   ]);
@@ -663,7 +678,7 @@ export async function POST(request: Request) {
       const chunk = planIds.slice(index, index + chunkSize);
       const { data, error } = await supabase
         .from("treatment_plan_payments")
-        .select("treatment_plan_id, clinic_id, amount, created_at")
+        .select("id, treatment_plan_id, clinic_id, amount, payment_method, notes, source_payment_record_id, created_at")
         .in("treatment_plan_id", chunk)
         .lt("created_at", outstandingWindowEnd);
       if (error) throw error;
@@ -672,7 +687,27 @@ export async function POST(request: Request) {
     return rows;
   };
 
-  const [balancePaymentRows, planPaymentRows] = await Promise.all([fetchBalancePayments(), fetchPlanPayments()]);
+  const fetchPlanPaymentRecords = async () => {
+    if (planIds.length === 0) return [] as TreatmentPlanPaymentRecordRow[];
+    const chunkSize = 500;
+    const rows: TreatmentPlanPaymentRecordRow[] = [];
+    for (let index = 0; index < planIds.length; index += chunkSize) {
+      const chunk = planIds.slice(index, index + chunkSize);
+      const { data, error } = await supabase
+        .from("treatment_plan_payment_records")
+        .select("id, treatment_plan_id, total_invoice_amount_settled, status, legacy_treatment_plan_payment_id, created_at")
+        .in("treatment_plan_id", chunk)
+        .lt("created_at", outstandingWindowEnd);
+      if (error) {
+        if (isTableMissing(error)) return [] as TreatmentPlanPaymentRecordRow[];
+        throw error;
+      }
+      rows.push(...((data || []) as TreatmentPlanPaymentRecordRow[]));
+    }
+    return rows;
+  };
+
+  const [balancePaymentRows, planPaymentRows, planPaymentRecordRows] = await Promise.all([fetchBalancePayments(), fetchPlanPayments(), fetchPlanPaymentRecords()]);
 
   const computeOutstandingAt = (endIso: string) => {
     const paidByBalance = new Map<string, number>();
@@ -684,13 +719,35 @@ export async function POST(request: Request) {
       .filter((row) => !row.created_at || row.created_at < endIso)
       .reduce((sum, row) => sum + Math.max(0, asNumber(row.original_amount) - (paidByBalance.get(row.id) || 0)), 0);
 
-    const paidByPlan = new Map<string, number>();
+    const planPaymentsByPlanId = new Map<string, TreatmentPlanPaymentRow[]>();
     for (const row of planPaymentRows) {
-      const createdAt = row.created_at;
-      if (createdAt && createdAt >= endIso) continue;
-      paidByPlan.set(row.treatment_plan_id, (paidByPlan.get(row.treatment_plan_id) || 0) + asNumber(row.amount));
+      const list = planPaymentsByPlanId.get(row.treatment_plan_id) || [];
+      list.push(row);
+      planPaymentsByPlanId.set(row.treatment_plan_id, list);
     }
-    const outstandingPlans = planRows.reduce((sum, row) => sum + Math.max(0, asNumber(row.total_amount) - (paidByPlan.get(row.id) || 0)), 0);
+    const planPaymentRecordsByPlanId = new Map<string, TreatmentPlanPaymentRecordRow[]>();
+    for (const row of planPaymentRecordRows) {
+      const list = planPaymentRecordsByPlanId.get(row.treatment_plan_id) || [];
+      list.push(row);
+      planPaymentRecordsByPlanId.set(row.treatment_plan_id, list);
+    }
+    const asOfDate = new Date(new Date(endIso).getTime() - 1).toISOString();
+    const outstandingPlans = planRows.reduce((sum, row) => {
+      const rollup = computeTreatmentPlanRollup(
+        {
+          id: row.id,
+          total_amount: asNumber(row.total_amount),
+          is_legacy: !!row.is_legacy,
+          historical_amount_paid: asNumber(row.historical_amount_paid),
+        },
+        {
+          structuredPayments: planPaymentRecordsByPlanId.get(row.id) || [],
+          legacyPayments: planPaymentsByPlanId.get(row.id) || [],
+          asOf: asOfDate,
+        }
+      );
+      return sum + rollup.remainingBalance;
+    }, 0);
     return outstandingLegacy + outstandingPlans;
   };
 

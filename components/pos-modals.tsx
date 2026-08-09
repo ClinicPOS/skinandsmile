@@ -30,6 +30,7 @@ import {
 } from "../lib/payment-allocation";
 import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-payment-receipt";
 import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
+import { computeTreatmentPlanRollup } from "../lib/treatment-plan-rollup";
 
 type Patient = {
   id: string;
@@ -86,6 +87,17 @@ function planModeToVariant(mode: PlanPaymentMode): PaymentMethodVariant {
   if (mode === "Tabby") return "tabby_standard";
   if (mode === "Tamara") return "tamara";
   return "cash";
+}
+
+function legacyPaymentMethodToVariant(method: string): { methodVariant: PaymentMethodVariant; cardNetwork?: string; methodLabel: string } {
+  const normalized = method.trim().toLowerCase();
+  if (normalized === "cash") return { methodVariant: "cash", methodLabel: "Cash" };
+  if (normalized === "visa") return { methodVariant: "card", cardNetwork: "Visa", methodLabel: "Visa" };
+  if (normalized === "mastercard") return { methodVariant: "card", cardNetwork: "Mastercard", methodLabel: "Mastercard" };
+  if (normalized === "tabby") return { methodVariant: "tabby_standard", methodLabel: "Tabby" };
+  if (normalized === "tamara") return { methodVariant: "tamara", methodLabel: "Tamara" };
+  if (normalized === "bank transfer") return { methodVariant: "card", methodLabel: "Bank Transfer" };
+  return { methodVariant: "card", methodLabel: method || "Card" };
 }
 
 type SavedTreatmentPlanActionContext = {
@@ -282,6 +294,7 @@ export function SearchPatientModal({
   const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [treatmentPlanVisits, setTreatmentPlanVisits] = useState<TreatmentPlanVisit[]>([]);
   const [treatmentPlanPayments, setTreatmentPlanPayments] = useState<TreatmentPlanPayment[]>([]);
+  const [treatmentPlanPaymentRecords, setTreatmentPlanPaymentRecords] = useState<TreatmentPlanPaymentRecord[]>([]);
   const [historicalVisits, setHistoricalVisits] = useState<HistoricalVisit[]>([]);
   const [doctors, setDoctors] = useState<LookupItem[]>([]);
   const [receptionists, setReceptionists] = useState<LookupItem[]>([]);
@@ -400,6 +413,16 @@ export function SearchPatientModal({
     return map;
   }, [treatmentPlanPayments]);
 
+  const treatmentPlanPaymentRecordsByPlanId = useMemo(() => {
+    const map = new Map<string, TreatmentPlanPaymentRecord[]>();
+    for (const payment of treatmentPlanPaymentRecords) {
+      const list = map.get(payment.treatment_plan_id) || [];
+      list.push(payment);
+      map.set(payment.treatment_plan_id, list);
+    }
+    return map;
+  }, [treatmentPlanPaymentRecords]);
+
   const treatmentPlanVisitsByPlanId = useMemo(() => {
     const map = new Map<string, TreatmentPlanVisit[]>();
     for (const visit of treatmentPlanVisits) {
@@ -420,12 +443,14 @@ export function SearchPatientModal({
       0
     );
     const planTotal = treatmentPlans.reduce((sum, plan) => {
-      const paid = (treatmentPlanPaymentsByPlanId.get(plan.id) || [])
-        .reduce((s, p) => s + Number(p.amount || 0), 0);
-      return sum + Math.max(0, Number(plan.total_amount || 0) - paid);
+      const rollup = computeTreatmentPlanRollup(plan, {
+        structuredPayments: treatmentPlanPaymentRecordsByPlanId.get(plan.id) || [],
+        legacyPayments: treatmentPlanPaymentsByPlanId.get(plan.id) || [],
+      });
+      return sum + rollup.remainingBalance;
     }, 0);
     return balanceTotal + planTotal;
-  }, [selectedPatientBalances, paymentsByBalanceId, treatmentPlans, treatmentPlanPaymentsByPlanId]);
+  }, [selectedPatientBalances, paymentsByBalanceId, treatmentPlans, treatmentPlanPaymentRecordsByPlanId, treatmentPlanPaymentsByPlanId]);
 
   const clinicNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -442,8 +467,11 @@ export function SearchPatientModal({
   const treatmentPlanSummary = useMemo(() => {
     return treatmentPlans.reduce(
       (summary, plan) => {
-        const paid = (treatmentPlanPaymentsByPlanId.get(plan.id) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-        const remaining = Math.max(0, Number(plan.total_amount || 0) - paid);
+        const rollup = computeTreatmentPlanRollup(plan, {
+          structuredPayments: treatmentPlanPaymentRecordsByPlanId.get(plan.id) || [],
+          legacyPayments: treatmentPlanPaymentsByPlanId.get(plan.id) || [],
+        });
+        const remaining = rollup.remainingBalance;
         const visits = treatmentPlanVisitsByPlanId.get(plan.id)?.length || 0;
         summary.totalRemaining += remaining;
         if (plan.status === "Active") summary.activeCount += 1;
@@ -452,7 +480,7 @@ export function SearchPatientModal({
       },
       { activeCount: 0, totalRemaining: 0, visits: 0 }
     );
-  }, [treatmentPlans, treatmentPlanPaymentsByPlanId, treatmentPlanVisitsByPlanId]);
+  }, [treatmentPlans, treatmentPlanPaymentRecordsByPlanId, treatmentPlanPaymentsByPlanId, treatmentPlanVisitsByPlanId]);
 
   function parseMoney(value: string) {
     const amount = Number(value.replace(/,/g, ".").trim());
@@ -496,6 +524,7 @@ export function SearchPatientModal({
   async function saveLegacyTreatment() {
     if (!selectedPatient) return;
     if (!clinic?.id) { alert("Treatment plans need an active clinic. Open the register for a clinic first."); return; }
+    if (!receptionistId) { alert("Open the register first."); return; }
     const title = legacyTitle.trim();
     if (!title) { alert("Enter a treatment name."); return; }
     const agreedTotal = parseMoney(legacyAgreedTotal);
@@ -546,19 +575,58 @@ export function SearchPatientModal({
           notes: "Imported historical visit",
         }]);
       }
+      if (visitsCompleted > 0) {
+        const { data: importedVisits } = await supabase
+          .from("treatment_plan_visits")
+          .select("*")
+          .eq("treatment_plan_id", planData.id)
+          .order("visit_number", { ascending: false });
+        if (importedVisits) {
+          setTreatmentPlanVisits((prev) => [...(importedVisits as TreatmentPlanVisit[]), ...prev.filter((row) => row.treatment_plan_id !== planData.id)]);
+        }
+      }
 
       // Record today's payment if applicable (NOT historical)
       if (paymentToday > 0.001) {
-        await supabase.from("treatment_plan_payments").insert([{
-          treatment_plan_id: planData.id,
-          patient_id: selectedPatient.id,
-          clinic_id: clinic.id,
-          amount: paymentToday,
-          payment_method: legacyPaymentTodayMethod,
-          receptionist_id: receptionistId,
-          register_session_id: registerSessionId || null,
-          notes: `Payment today for legacy plan: ${title}`,
-        }]);
+        const method = legacyPaymentMethodToVariant(legacyPaymentTodayMethod);
+        const paymentDraft = newPlanAllocationDraft(method.methodVariant, paymentToday.toFixed(2));
+        paymentDraft.cardNetwork = method.cardNetwork || "";
+        const allocations = buildPaymentAllocations([paymentDraft], paymentToday, paymentToday, 0);
+        const { error: paymentTodayError } = await supabase
+          .rpc("create_treatment_plan_payment_record_with_allocations", buildTreatmentPlanPaymentRpcArgs({
+            treatmentPlanId: planData.id,
+            patientId: selectedPatient.id,
+            clinicId: clinic.id,
+            receptionistId,
+            registerSessionId,
+            paymentNotePrefix: `Legacy import payment today (${method.methodLabel}): ${title}`,
+            allocations,
+          }))
+          .single();
+        if (paymentTodayError) {
+          alert(`Legacy plan saved, but today's payment could not be recorded: ${paymentTodayError.message || "Unknown error"}`);
+        } else {
+          const [legacyPaymentsResult, structuredPaymentsResult] = await Promise.all([
+            supabase
+              .from("treatment_plan_payments")
+              .select("*")
+              .eq("treatment_plan_id", planData.id)
+              .order("created_at", { ascending: false }),
+            supabase
+              .from("treatment_plan_payment_records")
+              .select("*")
+              .eq("treatment_plan_id", planData.id)
+              .order("created_at", { ascending: false }),
+          ]);
+          if (!legacyPaymentsResult.error) {
+            const nextRows = (legacyPaymentsResult.data as TreatmentPlanPayment[]) || [];
+            setTreatmentPlanPayments((prev) => [...nextRows, ...prev.filter((row) => row.treatment_plan_id !== planData.id)]);
+          }
+          if (!structuredPaymentsResult.error) {
+            const nextRows = (structuredPaymentsResult.data as TreatmentPlanPaymentRecord[]) || [];
+            setTreatmentPlanPaymentRecords((prev) => [...nextRows, ...prev.filter((row) => row.treatment_plan_id !== planData.id)]);
+          }
+        }
       }
 
       setTreatmentPlans((prev) => [planData as TreatmentPlan, ...prev]);
@@ -568,12 +636,20 @@ export function SearchPatientModal({
     }
   }
 
-  function planPaid(planId: string) {
-    return (treatmentPlanPaymentsByPlanId.get(planId) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  function planPaid(plan: TreatmentPlan, asOf?: string | Date) {
+    return computeTreatmentPlanRollup(plan, {
+      structuredPayments: treatmentPlanPaymentRecordsByPlanId.get(plan.id) || [],
+      legacyPayments: treatmentPlanPaymentsByPlanId.get(plan.id) || [],
+      asOf,
+    }).totalPaidToDate;
   }
 
-  function planRemaining(plan: TreatmentPlan) {
-    return Math.max(0, Number(plan.total_amount || 0) - planPaid(plan.id));
+  function planRemaining(plan: TreatmentPlan, asOf?: string | Date) {
+    return computeTreatmentPlanRollup(plan, {
+      structuredPayments: treatmentPlanPaymentRecordsByPlanId.get(plan.id) || [],
+      legacyPayments: treatmentPlanPaymentsByPlanId.get(plan.id) || [],
+      asOf,
+    }).remainingBalance;
   }
 
   function planVisitsCount(planId: string) {
@@ -614,6 +690,7 @@ export function SearchPatientModal({
     setTreatmentPlans([]);
     setTreatmentPlanVisits([]);
     setTreatmentPlanPayments([]);
+    setTreatmentPlanPaymentRecords([]);
     setHistoricalVisits([]);
     setLastVisit(null);
     setShowAddNote(false);
@@ -708,9 +785,10 @@ export function SearchPatientModal({
     const plansData = (plansResult.data as TreatmentPlan[]) || [];
     let visitsData: TreatmentPlanVisit[] = [];
     let paymentsData: TreatmentPlanPayment[] = [];
+    let paymentRecordsData: TreatmentPlanPaymentRecord[] = [];
     const planIds = plansData.map((plan) => plan.id);
     if (planIds.length > 0) {
-      const [visitsResult, paymentsResult] = await Promise.all([
+      const [visitsResult, paymentsResult, paymentRecordsResult] = await Promise.all([
         supabase
           .from("treatment_plan_visits")
           .select("*")
@@ -721,9 +799,15 @@ export function SearchPatientModal({
           .select("*")
           .in("treatment_plan_id", planIds)
           .order("created_at", { ascending: false }),
+        supabase
+          .from("treatment_plan_payment_records")
+          .select("*")
+          .in("treatment_plan_id", planIds)
+          .order("created_at", { ascending: false }),
       ]);
       visitsData = (visitsResult.data as TreatmentPlanVisit[]) || [];
       paymentsData = (paymentsResult.data as TreatmentPlanPayment[]) || [];
+      paymentRecordsData = (paymentRecordsResult.data as TreatmentPlanPaymentRecord[]) || [];
     }
 
     setNotes((notesResult.data as PatientNote[]) || []);
@@ -733,6 +817,7 @@ export function SearchPatientModal({
     setTreatmentPlans(plansData);
     setTreatmentPlanVisits(visitsData);
     setTreatmentPlanPayments(paymentsData);
+    setTreatmentPlanPaymentRecords(paymentRecordsData);
     setDoctors((doctorsResult.data as LookupItem[]) || []);
     setReceptionists((receptionistsResult.data as LookupItem[]) || []);
     setClinics((clinicsResult.data as LookupItem[]) || []);
@@ -976,15 +1061,27 @@ export function SearchPatientModal({
       }
 
       const paymentRecord = data as { payment_record_id: string; created_at: string };
-      const { data: refreshedPayments, error: refreshedPaymentsError } = await supabase
-        .from("treatment_plan_payments")
-        .select("*")
-        .eq("treatment_plan_id", plan.id)
-        .order("created_at", { ascending: false });
-      if (refreshedPaymentsError) {
-        alert(`Payment saved, but reloading treatment plan payments failed: ${refreshedPaymentsError.message || "Unknown error"}`);
+      const [refreshedPaymentsResult, refreshedRecordsResult] = await Promise.all([
+        supabase
+          .from("treatment_plan_payments")
+          .select("*")
+          .eq("treatment_plan_id", plan.id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("treatment_plan_payment_records")
+          .select("*")
+          .eq("treatment_plan_id", plan.id)
+          .order("created_at", { ascending: false }),
+      ]);
+      if (refreshedPaymentsResult.error) {
+        alert(`Payment saved, but reloading treatment plan payments failed: ${refreshedPaymentsResult.error.message || "Unknown error"}`);
       } else {
-        setTreatmentPlanPayments((refreshedPayments as TreatmentPlanPayment[]) || []);
+        setTreatmentPlanPayments((refreshedPaymentsResult.data as TreatmentPlanPayment[]) || []);
+      }
+      if (refreshedRecordsResult.error) {
+        alert(`Payment saved, but reloading structured treatment plan payments failed: ${refreshedRecordsResult.error.message || "Unknown error"}`);
+      } else {
+        setTreatmentPlanPaymentRecords((refreshedRecordsResult.data as TreatmentPlanPaymentRecord[]) || []);
       }
       setPaymentPlanId(null);
       setPlanPaymentAmount("");
@@ -1509,7 +1606,7 @@ export function SearchPatientModal({
                 ) : (
                   <div className="mt-3 space-y-3">
                     {treatmentPlans.map((plan) => {
-                      const paid = planPaid(plan.id);
+                      const paid = planPaid(plan);
                       const remaining = planRemaining(plan);
                       const visits = treatmentPlanVisitsByPlanId.get(plan.id) || [];
                       const payments = treatmentPlanPaymentsByPlanId.get(plan.id) || [];
@@ -2307,6 +2404,7 @@ export function ReceiptHistoryModal({
   const [doctors, setDoctors] = useState<LookupItem[]>([]);
   const [allReceptionists, setAllReceptionists] = useState<LookupItem[]>([]);
   const [treatmentPlanPayments, setTreatmentPlanPayments] = useState<TreatmentPlanPaymentRecord[]>([]);
+  const [legacyTreatmentPlanPayments, setLegacyTreatmentPlanPayments] = useState<TreatmentPlanPayment[]>([]);
   const [treatmentPlanAllocations, setTreatmentPlanAllocations] = useState<TreatmentPlanPaymentAllocation[]>([]);
   const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [receiptItemsMap, setReceiptItemsMap] = useState<Record<string, any[]>>({});
@@ -2356,6 +2454,7 @@ export function ReceiptHistoryModal({
       setReceipts([]);
       setPatients([]);
       setTreatmentPlanPayments([]);
+      setLegacyTreatmentPlanPayments([]);
       setTreatmentPlanAllocations([]);
       setTreatmentPlans([]);
       return;
@@ -2372,12 +2471,13 @@ export function ReceiptHistoryModal({
       setReceipts([]);
       setPatients([]);
       setTreatmentPlanPayments([]);
+      setLegacyTreatmentPlanPayments([]);
       setTreatmentPlanAllocations([]);
       setTreatmentPlans([]);
       return;
     }
 
-    const [receiptResult, patientResult, servicesResult, doctorsResult, receptionistsResult, treatmentPlanResult, treatmentPlanPaymentResult, treatmentPlanAllocationResult] = await Promise.all([
+    const [receiptResult, patientResult, servicesResult, doctorsResult, receptionistsResult, treatmentPlanResult, treatmentPlanPaymentResult, legacyTreatmentPlanPaymentsResult, treatmentPlanAllocationResult] = await Promise.all([
       supabase.from("receipts").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
       fetchAllRows("patients", "id, name, phone, patient_number"),
       supabase.from("services").select("id, name"),
@@ -2385,6 +2485,7 @@ export function ReceiptHistoryModal({
       supabase.from("receptionist").select("id, name"),
       supabase.from("treatment_plans").select("*").in("created_by", receptionistIds).order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payment_records").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payments").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payment_allocations").select("*").order("created_at", { ascending: false }),
     ]);
 
@@ -2416,7 +2517,17 @@ export function ReceiptHistoryModal({
     setAllReceptionists((receptionistsResult.data as LookupItem[]) || []);
     setTreatmentPlans((treatmentPlanResult.data as TreatmentPlan[]) || []);
     setTreatmentPlanPayments((treatmentPlanPaymentResult.data as TreatmentPlanPaymentRecord[]) || []);
+    setLegacyTreatmentPlanPayments((legacyTreatmentPlanPaymentsResult.data as TreatmentPlanPayment[]) || []);
     setTreatmentPlanAllocations((treatmentPlanAllocationResult.data as TreatmentPlanPaymentAllocation[]) || []);
+  }
+
+  function remainingAfterPayment(plan: TreatmentPlan | null, paymentDate: string | null | undefined) {
+    if (!plan) return 0;
+    return computeTreatmentPlanRollup(plan, {
+      structuredPayments: treatmentPlanPayments.filter((entry) => entry.treatment_plan_id === plan.id),
+      legacyPayments: legacyTreatmentPlanPayments.filter((entry) => entry.treatment_plan_id === plan.id),
+      asOf: paymentDate || undefined,
+    }).remainingBalance;
   }
 
   async function loadReceiptItems(receiptId: string) {
@@ -2481,7 +2592,7 @@ export function ReceiptHistoryModal({
       paymentArrangement: plan?.payment_arrangement || "Treatment plan payment",
       agreedTotal: Number(plan?.total_amount || record.total_invoice_amount_settled || 0),
       amountSettledToday: Number(record.total_invoice_amount_settled || 0),
-      remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - Number(record.total_invoice_amount_settled || 0)),
+      remainingAfterToday: remainingAfterPayment(plan, record.created_at),
       totalFeeAmount: Number(record.total_payment_fee_amount || 0),
       totalCustomerPaid: Number(record.total_customer_charged_amount || 0),
       cashierName: receptionist?.name || "Reception",
@@ -2518,7 +2629,7 @@ export function ReceiptHistoryModal({
         providerReferenceNumber: allocation.provider_reference_number,
         terminalAuthorizationCode: allocation.terminal_authorization_code,
       })),
-      remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - Number(record.total_invoice_amount_settled || 0)),
+      remainingAfterToday: remainingAfterPayment(plan, record.created_at),
       plannedVisits: plan?.planned_visits ?? null,
       completedVisits: plan?.clinic_patient_file_id ? 1 : 0,
       notes: plan?.notes || null,
@@ -2552,7 +2663,7 @@ export function ReceiptHistoryModal({
         providerReferenceNumber: allocation.provider_reference_number,
         terminalAuthorizationCode: allocation.terminal_authorization_code,
       })),
-      remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - Number(record.total_invoice_amount_settled || 0)),
+      remainingAfterToday: remainingAfterPayment(plan, record.created_at),
       plannedVisits: plan?.planned_visits ?? null,
       completedVisits: plan?.clinic_patient_file_id ? 1 : 0,
       notes: plan?.notes || null,

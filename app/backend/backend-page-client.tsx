@@ -4,12 +4,13 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabase";
-import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic, OutstandingBalance, BalancePayment, TreatmentPlan, TreatmentPlanPayment, TreatmentPlanVisit } from "../../lib/types";
+import { Patient, Doctor, Service, Receptionist, CashRegisterSession, Clinic, OutstandingBalance, BalancePayment, TreatmentPlan, TreatmentPlanPayment, TreatmentPlanPaymentRecord, TreatmentPlanVisit } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
 import { effectiveServiceCategory } from "../../lib/service-categories";
 import { createClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
+import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 
 const BACKEND_SELECTED_CLINIC_KEY = "backendSelectedClinicId";
 const BACKEND_PATIENTS_PAGE_SIZE = 20;
@@ -155,6 +156,7 @@ function BackendPageContent() {
   const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
   const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [treatmentPlanPayments, setTreatmentPlanPayments] = useState<TreatmentPlanPayment[]>([]);
+  const [treatmentPlanPaymentRecords, setTreatmentPlanPaymentRecords] = useState<TreatmentPlanPaymentRecord[]>([]);
   const [treatmentPlanVisits, setTreatmentPlanVisits] = useState<TreatmentPlanVisit[]>([]);
   const [patientNamesById, setPatientNamesById] = useState<Record<string, string>>({});
   const [addBalancePatient, setAddBalancePatient] = useState<Patient | null>(null);
@@ -313,6 +315,16 @@ function BackendPageContent() {
     return map;
   }, [treatmentPlanPayments]);
 
+  const treatmentPlanPaymentRecordsByPlanId = useMemo(() => {
+    const map = new Map<string, TreatmentPlanPaymentRecord[]>();
+    for (const payment of treatmentPlanPaymentRecords) {
+      const list = map.get(payment.treatment_plan_id) || [];
+      list.push(payment);
+      map.set(payment.treatment_plan_id, list);
+    }
+    return map;
+  }, [treatmentPlanPaymentRecords]);
+
   const treatmentPlanVisitsByPlanId = useMemo(() => {
     const map = new Map<string, TreatmentPlanVisit[]>();
     for (const visit of treatmentPlanVisits) {
@@ -376,8 +388,12 @@ function BackendPageContent() {
       const clinicId = plan.clinic_id || "";
       if (selectedClinicId && clinicId !== selectedClinicId) continue;
       const clinicName = clinicNameById.get(clinicId) || "Unknown clinic";
-      const paid = (treatmentPlanPaymentsByPlanId.get(plan.id) || []).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-      const remaining = Math.max(0, Number(plan.total_amount || 0) - paid);
+      const rollup = computeTreatmentPlanRollup(plan, {
+        structuredPayments: treatmentPlanPaymentRecordsByPlanId.get(plan.id) || [],
+        legacyPayments: treatmentPlanPaymentsByPlanId.get(plan.id) || [],
+      });
+      const paid = rollup.totalPaidToDate;
+      const remaining = rollup.remainingBalance;
       const completedVisits = (treatmentPlanVisitsByPlanId.get(plan.id) || []).length;
       const shownVisits = Math.max(completedVisits, plan.clinic_patient_file_id ? 1 : 0);
       const totalVisits = Math.max(1, Number(plan.planned_visits || 0));
@@ -401,7 +417,7 @@ function BackendPageContent() {
     }
 
     return [...groups.values()].sort((a, b) => a.clinicName.localeCompare(b.clinicName));
-  }, [outstandingBalances, paymentsByBalance, treatmentPlans, treatmentPlanPaymentsByPlanId, treatmentPlanVisitsByPlanId, clinicNameById, patientNameById, selectedClinicId]);
+  }, [outstandingBalances, paymentsByBalance, treatmentPlans, treatmentPlanPaymentRecordsByPlanId, treatmentPlanPaymentsByPlanId, treatmentPlanVisitsByPlanId, clinicNameById, patientNameById, selectedClinicId]);
 
   const selectedClinic = useMemo(
     () => clinics.find((c) => c.id === selectedClinicId) || null,
@@ -552,6 +568,7 @@ function BackendPageContent() {
 
     setTreatmentPlans((prev) => prev.filter((plan) => plan.id !== id));
     setTreatmentPlanPayments((prev) => prev.filter((payment) => payment.treatment_plan_id !== id));
+    setTreatmentPlanPaymentRecords((prev) => prev.filter((payment) => payment.treatment_plan_id !== id));
   }
 
   const displayedDoctors = useMemo(() =>
@@ -786,6 +803,7 @@ function BackendPageContent() {
       treatmentPlansResult,
       treatmentPlanPaymentsResult,
       treatmentPlanVisitsResult,
+      treatmentPlanPaymentRecordsResult,
     ] = await Promise.allSettled([
       resolvedClinicId
         ? supabase
@@ -806,6 +824,7 @@ function BackendPageContent() {
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payments").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_visits").select("*").order("visit_number", { ascending: true }),
+      supabase.from("treatment_plan_payment_records").select("*").order("created_at", { ascending: false }),
     ]);
 
     if (clinicPatientsResult.status === "fulfilled") {
@@ -894,6 +913,17 @@ function BackendPageContent() {
       if (treatmentPlanVisitsResult.value.error) {
         if (treatmentPlanVisitsResult.value.error.code !== "42P01") {
           console.warn("Failed loading treatment plan visits", treatmentPlanVisitsResult.value.error);
+        }
+
+        if (treatmentPlanPaymentRecordsResult.status === "fulfilled") {
+          if (treatmentPlanPaymentRecordsResult.value.error) {
+            if (treatmentPlanPaymentRecordsResult.value.error.code !== "42P01") {
+              console.warn("Failed loading structured treatment plan payments", treatmentPlanPaymentRecordsResult.value.error);
+            }
+            setTreatmentPlanPaymentRecords([]);
+          } else {
+            setTreatmentPlanPaymentRecords((treatmentPlanPaymentRecordsResult.value.data || []) as TreatmentPlanPaymentRecord[]);
+          }
         }
         setTreatmentPlanVisits([]);
       } else {

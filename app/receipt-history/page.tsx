@@ -7,8 +7,9 @@ import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from
 import { generateInvoiceHtml, generateTreatmentPlanPaymentInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { buildThermalReceiptHtml as buildThermalReceiptHtmlShared, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
 import { useClinicAccess } from "../../lib/clinic-access";
-import type { Clinic as ClinicRecord, TreatmentPlan, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, TreatmentPlanVisit } from "../../lib/types";
+import type { Clinic as ClinicRecord, TreatmentPlan, TreatmentPlanPayment, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, TreatmentPlanVisit } from "../../lib/types";
 import { printTreatmentPlanPaymentReceipt } from "../../lib/print-treatment-plan-payment-receipt";
+import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 
 type Receipt = {
   id: string;
@@ -100,6 +101,7 @@ export default function ReceiptHistoryPage() {
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [clinicPatientFiles, setClinicPatientFiles] = useState<ClinicPatientFile[]>([]);
   const [treatmentPlanPaymentRecords, setTreatmentPlanPaymentRecords] = useState<TreatmentPlanPaymentRecord[]>([]);
+  const [legacyTreatmentPlanPayments, setLegacyTreatmentPlanPayments] = useState<TreatmentPlanPayment[]>([]);
   const [treatmentPlanPaymentAllocations, setTreatmentPlanPaymentAllocations] = useState<TreatmentPlanPaymentAllocation[]>([]);
   const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [treatmentPlanVisits, setTreatmentPlanVisits] = useState<TreatmentPlanVisit[]>([]);
@@ -130,7 +132,7 @@ export default function ReceiptHistoryPage() {
   }, [isLoaded]);
 
   async function loadHistory() {
-    const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult, clinicResult, clinicPatientFileResult, treatmentPlanResult, treatmentPlanVisitResult, treatmentPlanPaymentResult, treatmentPlanAllocationResult] = await Promise.all([
+    const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult, clinicResult, clinicPatientFileResult, treatmentPlanResult, treatmentPlanVisitResult, treatmentPlanPaymentResult, legacyTreatmentPlanPaymentResult, treatmentPlanAllocationResult] = await Promise.all([
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
       fetchAllRows("patients", "id, name, phone, patient_number"),
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
@@ -142,6 +144,7 @@ export default function ReceiptHistoryPage() {
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_visits").select("id, treatment_plan_id, visit_number, created_at").order("visit_number", { ascending: true }),
       supabase.from("treatment_plan_payment_records").select("*").order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payments").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payment_allocations").select("*").order("created_at", { ascending: false }),
     ]);
 
@@ -149,6 +152,7 @@ export default function ReceiptHistoryPage() {
     const treatmentPlanRows = (treatmentPlanResult.data as TreatmentPlan[]) || [];
     const treatmentPlanVisitRows = (treatmentPlanVisitResult.data as TreatmentPlanVisit[]) || [];
     const treatmentPlanPaymentRows = (treatmentPlanPaymentResult.data as TreatmentPlanPaymentRecord[]) || [];
+    const legacyTreatmentPlanPaymentRows = (legacyTreatmentPlanPaymentResult.data as TreatmentPlanPayment[]) || [];
     const treatmentPlanAllocationRows = (treatmentPlanAllocationResult.data as TreatmentPlanPaymentAllocation[]) || [];
 
     const regularEntries: HistoryEntry[] = receiptsRows.map((receipt) => ({
@@ -212,6 +216,7 @@ export default function ReceiptHistoryPage() {
     setClinics((clinicResult.data as Clinic[]) || []);
     setClinicPatientFiles((clinicPatientFileResult as ClinicPatientFile[]) || []);
     setTreatmentPlanPaymentRecords(treatmentPlanPaymentRows);
+    setLegacyTreatmentPlanPayments(legacyTreatmentPlanPaymentRows);
     setTreatmentPlanPaymentAllocations(treatmentPlanAllocationRows);
     setTreatmentPlans(treatmentPlanRows);
     setTreatmentPlanVisits(treatmentPlanVisitRows);
@@ -241,6 +246,15 @@ export default function ReceiptHistoryPage() {
   }, [selectedReceiptId, visibleReceipts]);
 
   const selectedReceipt = visibleReceipts.find((entry) => entry.id === selectedReceiptId);
+
+  function remainingAfterPlanPayment(plan: TreatmentPlan | null, paymentDate: string | null | undefined) {
+    if (!plan) return 0;
+    return computeTreatmentPlanRollup(plan, {
+      structuredPayments: treatmentPlanPaymentRecords.filter((entry) => entry.treatment_plan_id === plan.id),
+      legacyPayments: legacyTreatmentPlanPayments.filter((entry) => entry.treatment_plan_id === plan.id),
+      asOf: paymentDate || undefined,
+    }).remainingBalance;
+  }
 
   const selectedReceiptLineItems = useMemo(() => {
     if (!selectedReceipt) {
@@ -395,7 +409,7 @@ export default function ReceiptHistoryPage() {
           providerReferenceNumber: allocation.provider_reference_number,
           terminalAuthorizationCode: allocation.terminal_authorization_code,
         })),
-        remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - Number(selectedReceipt.total_invoice_amount_settled || 0)),
+        remainingAfterToday: remainingAfterPlanPayment(plan, selectedReceipt.created_at),
         plannedVisits: plan?.planned_visits ?? null,
         completedVisits,
         notes: selectedReceipt.notes || null,
@@ -519,17 +533,6 @@ export default function ReceiptHistoryPage() {
         feeAmount: Number(allocation.fee_amount || 0),
         customerChargedAmount: Number(allocation.customer_charged_amount || 0),
       }));
-      const currentPaymentTime = selectedReceipt.created_at ? new Date(selectedReceipt.created_at).getTime() : Number.POSITIVE_INFINITY;
-      const settledToDate = plan
-        ? treatmentPlanPaymentRecords
-            .filter((entry) => entry.treatment_plan_id === plan.id)
-            .filter((entry) => {
-              const entryTime = entry.created_at ? new Date(entry.created_at).getTime() : 0;
-              return entryTime <= currentPaymentTime;
-            })
-            .reduce((sum, entry) => sum + Number(entry.total_invoice_amount_settled || 0), 0)
-        : Number(selectedReceipt.total_invoice_amount_settled ?? selectedReceipt.total ?? 0);
-
       printTreatmentPlanPaymentReceipt({
         clinic: clinic as any,
         patientName: patient?.name || "-",
@@ -540,7 +543,7 @@ export default function ReceiptHistoryPage() {
           : "Treatment plan payment",
         agreedTotal: Number(plan?.total_amount || selectedReceipt.total || 0),
         amountSettledToday: Number(selectedReceipt.total_invoice_amount_settled ?? selectedReceipt.total ?? 0),
-        remainingAfterToday: Math.max(0, Number(plan?.total_amount || 0) - settledToDate),
+        remainingAfterToday: remainingAfterPlanPayment(plan, selectedReceipt.created_at),
         totalFeeAmount: Number(selectedReceipt.payment_fee_amount ?? 0),
         totalCustomerPaid: Number(selectedReceipt.total_customer_charged_amount ?? selectedReceipt.total ?? 0),
         cashierName: receptionist?.name || "Reception",

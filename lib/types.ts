@@ -237,6 +237,7 @@ export type TreatmentPlanPayment = {
   payment_method: string;
   receptionist_id: string;
   register_session_id: string | null;
+  source_payment_record_id?: string | null;
   notes: string | null;
   created_at: string;
 };
