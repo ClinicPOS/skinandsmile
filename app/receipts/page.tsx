@@ -35,6 +35,7 @@ import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } f
 import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 import { extractLegacyCashAmount, getCashDeductionTypeLabel, getDubaiBusinessDate } from "../../lib/cash-deductions";
 import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
+import { getBusinessDayKeyForReporting, getPaymentBreakdownForReporting, summarizeStoredAllocationCollectionsForReporting, summarizeStoredAllocationRowsForReporting } from "../../lib/receipts-reporting";
 
 type PosPricingService = {
   originalPrice?: number | null;
@@ -142,91 +143,11 @@ function getDubaiDayUtcRange(date: Date) {
 }
 
 function getPaymentBreakdown(paymentMethodRaw: string, totalAmount: number) {
-  const paymentMethod = String(paymentMethodRaw || "").toLowerCase();
-  const breakdown = {
-    cash: 0,
-    card: 0,
-    tabby: 0,
-    tabbyCard: 0,
-    tamara: 0,
-    insurance: 0,
-    bankTransfer: 0,
+  const breakdown = getPaymentBreakdownForReporting(paymentMethodRaw, totalAmount);
+  return {
+    ...breakdown,
     addOn: 0,
-    mop: "",
   };
-
-  if (paymentMethod.includes("split payment")) {
-    const matches = [...paymentMethodRaw.matchAll(/([A-Za-z ]+?)\s+AED\s+([\d.]+)/gi)];
-    for (const match of matches) {
-      const methodLabel = String(match[1] || "")
-        .replace(/split payment/ig, "")
-        .replace(/[()]/g, "")
-        .trim()
-        .toLowerCase();
-      const parsedAmount = Number(match[2]);
-      const amount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
-      if (!methodLabel || amount <= 0) continue;
-
-      if (methodLabel.includes("tabby card")) {
-        breakdown.tabbyCard += amount;
-      } else if (methodLabel.includes("tabby")) {
-        breakdown.tabby += amount;
-      } else if (methodLabel.includes("tamara")) {
-        breakdown.tamara += amount;
-      } else if (methodLabel.includes("insurance")) {
-        breakdown.insurance += amount;
-      } else if (methodLabel.includes("bank")) {
-        breakdown.bankTransfer += amount;
-      } else if (methodLabel.includes("cash")) {
-        breakdown.cash += amount;
-      } else {
-        breakdown.card += amount;
-      }
-    }
-
-    breakdown.mop = "SPLIT";
-    return breakdown;
-  }
-
-  if (paymentMethod.includes("tabby card")) {
-    breakdown.tabbyCard = totalAmount;
-    breakdown.mop = "TABBY CARD";
-    return breakdown;
-  }
-
-  if (paymentMethod.includes("tabby")) {
-    breakdown.tabby = totalAmount;
-    breakdown.mop = "TABBY";
-    return breakdown;
-  }
-
-  if (paymentMethod.includes("tamara")) {
-    breakdown.tamara = totalAmount;
-    breakdown.mop = "TAMARA";
-    return breakdown;
-  }
-
-  if (paymentMethod.includes("bank transfer")) {
-    breakdown.bankTransfer = totalAmount;
-    breakdown.mop = "BANK TRANSFER";
-    return breakdown;
-  }
-
-  if (paymentMethod.includes("insurance")) {
-    breakdown.insurance = totalAmount;
-    breakdown.mop = "INSURANCE";
-    return breakdown;
-  }
-
-  if (paymentMethod.includes("cash")) {
-    breakdown.cash = totalAmount;
-    breakdown.mop = "CASH";
-    return breakdown;
-  }
-
-  breakdown.card = totalAmount;
-  breakdown.mop = "CARD";
-  return breakdown;
 }
 
 function extractTransactionReference(paymentMethodRaw: string, channel: "card" | "tabby" | "tamara") {
@@ -253,64 +174,7 @@ function extractTransactionReference(paymentMethodRaw: string, channel: "card" |
 }
 
 function summarizeStoredAllocationRows(rows: PaymentAllocation[]) {
-  const breakdown = {
-    cash: 0,
-    card: 0,
-    tabby: 0,
-    tabbyCard: 0,
-    tamara: 0,
-  };
-  const references = {
-    card: new Set<string>(),
-    tabby: new Set<string>(),
-    tamara: new Set<string>(),
-  };
-  let tabbyFee = 0;
-  let tamaraFee = 0;
-
-  rows.forEach((row) => {
-    const invoiceAllocated = Number(row.invoice_allocation_amount || 0);
-    const feeAmount = Number(row.fee_amount || 0);
-    const reference = String(row.provider_reference_number || "").trim();
-
-    if (row.method_variant === "cash") {
-      breakdown.cash += invoiceAllocated;
-      return;
-    }
-    if (row.method_variant === "card") {
-      breakdown.card += invoiceAllocated;
-      if (reference) references.card.add(reference);
-      return;
-    }
-    if (row.method_variant === "tabby_card") {
-      breakdown.tabbyCard += invoiceAllocated;
-      tabbyFee += feeAmount;
-      if (reference) references.tabby.add(reference);
-      return;
-    }
-    if (row.method_variant === "tabby_standard") {
-      breakdown.tabby += invoiceAllocated;
-      tabbyFee += feeAmount;
-      if (reference) references.tabby.add(reference);
-      return;
-    }
-    if (row.method_variant === "tamara") {
-      breakdown.tamara += invoiceAllocated;
-      tamaraFee += feeAmount;
-      if (reference) references.tamara.add(reference);
-    }
-  });
-
-  return {
-    breakdown,
-    tabbyFee,
-    tamaraFee,
-    references: {
-      card: [...references.card].join(", "),
-      tabby: [...references.tabby].join(", "),
-      tamara: [...references.tamara].join(", "),
-    },
-  };
+  return summarizeStoredAllocationRowsForReporting(rows);
 }
 
 function normalizeServiceText(value: unknown): string {
@@ -2179,19 +2043,122 @@ export default function ReceiptsPage() {
       }
     }
     const refundMap = new Map<string, number>();
+    const refundMethodTotals = {
+      cash: 0,
+      card: 0,
+      tabby: 0,
+      tabbyCard: 0,
+      tamara: 0,
+      bankTransfer: 0,
+      insurance: 0,
+      legacyUnallocated: 0,
+    };
+    const todaysSalesRefundTotal = { amount: 0 };
+    const previousSalesRefundTotal = { amount: 0 };
+    const refundReceiptIds = new Set<string>();
+    const modernRefundIds = new Set<string>();
+    const allocationById = new Map<string, PaymentAllocation>();
+    paymentAllocationsForDay.forEach((allocation) => {
+      allocationById.set(String(allocation.id || ""), allocation);
+    });
+
+    paymentAllocationRefundsForDay.forEach((refund) => {
+      const refundId = String(refund.refund_id || "");
+      const receiptId = String(refund.receipt_id || "");
+      if (refundId) {
+        modernRefundIds.add(refundId);
+      }
+      if (receiptId) {
+        refundReceiptIds.add(receiptId);
+      }
+      const refundAmount = Number(refund.total_returned_amount || 0);
+      const current = refundMap.get(receiptId) || 0;
+      refundMap.set(receiptId, current + refundAmount);
+      const allocation = allocationById.get(String(refund.payment_allocation_id || ""));
+      const methodBucket = allocation?.method_variant === "cash"
+        ? "cash"
+        : allocation?.method_variant === "card"
+          ? "card"
+          : allocation?.method_variant === "tabby_standard"
+            ? "tabby"
+            : allocation?.method_variant === "tabby_card"
+              ? "tabbyCard"
+              : allocation?.method_variant === "tamara"
+                ? "tamara"
+                : "legacyUnallocated";
+      refundMethodTotals[methodBucket as keyof typeof refundMethodTotals] += refundAmount;
+    });
+
+    const legacyRefundsForDay: Array<{ refund_id: string; receipt_id: string; total_amount: number; created_at: string | null }> = [];
     if (receiptIds.length > 0) {
       const { data: refundsData, error: refundsError } = await supabase
         .from("refunds")
-        .select("receipt_id, total_amount")
-        .in("receipt_id", receiptIds);
+        .select("id, receipt_id, total_amount, created_at")
+        .in("receipt_id", receiptIds)
+        .gte("created_at", startUtcIso)
+        .lte("created_at", endUtcIso);
 
       if (refundsError) {
         console.error("Failed loading refunds for report", refundsError);
       } else {
         (refundsData || []).forEach((refund) => {
+          const refundId = String(refund.id || "");
           const receiptId = String(refund.receipt_id || "");
+          if (!receiptId || modernRefundIds.has(refundId)) return;
+          refundReceiptIds.add(receiptId);
+          const refundAmount = Number(refund.total_amount || 0);
+          if (!refundAmount) return;
+          legacyRefundsForDay.push({
+            refund_id: refundId,
+            receipt_id: receiptId,
+            total_amount: refundAmount,
+            created_at: refund.created_at || null,
+          });
           const current = refundMap.get(receiptId) || 0;
-          refundMap.set(receiptId, current + Number(refund.total_amount || 0));
+          refundMap.set(receiptId, current + refundAmount);
+          refundMethodTotals.legacyUnallocated += refundAmount;
+        });
+      }
+    }
+
+    if (refundReceiptIds.size > 0) {
+      const { data: refundReceiptRows, error: refundReceiptError } = await supabase
+        .from("receipts")
+        .select("id, created_at")
+        .in("id", [...refundReceiptIds]);
+      if (refundReceiptError) {
+        console.warn("Failed loading refund receipt metadata", refundReceiptError);
+      } else {
+        const refundReceiptMap = new Map<string, { created_at: string | null }>();
+        (refundReceiptRows || []).forEach((receipt) => {
+          refundReceiptMap.set(String(receipt.id), receipt);
+        });
+
+        paymentAllocationRefundsForDay.forEach((refund) => {
+          const receiptId = String(refund.receipt_id || "");
+          const receiptRecord = refundReceiptMap.get(receiptId);
+          const refundAmount = Number(refund.total_returned_amount || 0);
+          if (!refundAmount) return;
+          const isTodaySalesRefund = receiptRecord?.created_at
+            ? getBusinessDayKeyForReporting(receiptRecord.created_at) === getBusinessDayKeyForReporting(now)
+            : false;
+          if (isTodaySalesRefund) {
+            todaysSalesRefundTotal.amount += refundAmount;
+          } else {
+            previousSalesRefundTotal.amount += refundAmount;
+          }
+        });
+
+        legacyRefundsForDay.forEach((refund) => {
+          const receiptRecord = refundReceiptMap.get(refund.receipt_id);
+          const isTodaySalesRefund = receiptRecord?.created_at
+            ? getBusinessDayKeyForReporting(receiptRecord.created_at) === getBusinessDayKeyForReporting(now)
+            : false;
+          if (isTodaySalesRefund) {
+            todaysSalesRefundTotal.amount += refund.total_amount;
+          } else {
+            previousSalesRefundTotal.amount += refund.total_amount;
+          }
         });
       }
     }
@@ -2304,11 +2271,12 @@ export default function ReceiptsPage() {
     // Payments collected against multi-visit treatment plans today. These are
     // real cash/card collections, but the full plan price must not be counted
     // again on every visit.
-    let treatmentPlanPaymentsTotal = 0;
+    let treatmentPlanCollectionsTotal = 0;
+    let treatmentPlanInitialSalesTotal = 0;
     const { data: treatmentPlanPaymentRecordsData, error: treatmentPlanPaymentRecordsError } = await supabase
       .from("treatment_plan_payment_records")
-      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(title, total_amount, planned_visits, status), patients(name, patient_number)")
-      .in("receptionist_id", receptionistIds)
+      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, title, total_amount, planned_visits, status), patients(name, patient_number)")
+      .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
       .order("created_at", { ascending: true });
@@ -2316,7 +2284,7 @@ export default function ReceiptsPage() {
       console.warn("Failed loading treatment plan payment records for report", treatmentPlanPaymentRecordsError);
     } else {
       treatmentPlanPaymentRecordsForDay = (treatmentPlanPaymentRecordsData || []) as Array<(TreatmentPlanPaymentRecord & { treatment_plans?: any; patients?: any })>;
-      treatmentPlanPaymentsTotal = treatmentPlanPaymentRecordsForDay.reduce((sum, payment) => sum + Number(payment.total_invoice_amount_settled || 0), 0);
+      treatmentPlanCollectionsTotal = treatmentPlanPaymentRecordsForDay.reduce((sum, payment) => sum + Number(payment.total_customer_charged_amount || 0), 0);
       treatmentPlanPaymentRecordsForDay.forEach((payment) => {
         const planId = String(payment.treatment_plan_id || "");
         if (planId) relevantTreatmentPlanIds.add(planId);
@@ -2413,6 +2381,31 @@ export default function ReceiptsPage() {
     }
 
     const treatmentPlanPaymentRows: Array<(string | number)[]> = [];
+    let grossRevenue = 0;
+    let totalDiscounts = 0;
+    let regularTreatmentValueTotal = 0;
+    let regularInvoiceValueTotal = 0;
+    let totalVat = 0;
+    let totalRefunds = 0;
+    let regularPatientPaymentsTotal = 0;
+    let creditUsedTotal = 0;
+    let outstandingCreatedTotal = 0;
+    let cashTotal = 0;
+    let cardTotal = 0;
+    let tabbyTotal = 0;
+    let tabbyCardTotal = 0;
+    let tabbyFeeTotal = 0;
+    let tamaraTotal = 0;
+    let tamaraFeeTotal = 0;
+    let insuranceTotal = 0;
+    let bankTransferTotal = 0;
+    let legacyUnallocatedTotal = 0;
+    let tabbyInvoiceAllocationTotal = 0;
+    let tabbyCardInvoiceAllocationTotal = 0;
+    let tamaraInvoiceAllocationTotal = 0;
+    let tabbySurchargeCollectedTotal = 0;
+    let tabbyCardSurchargeCollectedTotal = 0;
+    let tamaraSurchargeCollectedTotal = 0;
     let cashTreatmentPlanCollectionsTotal = 0;
     treatmentPlanPaymentRecordsForDay.forEach((payment) => {
       const plan = Array.isArray(payment.treatment_plans) ? payment.treatment_plans[0] : payment.treatment_plans;
@@ -2441,18 +2434,43 @@ export default function ReceiptsPage() {
         : 0;
       cashTreatmentPlanCollectionsTotal += structuredCashCollection + fallbackCashCollection;
 
+      const planCreatedBusinessDate = plan?.created_at ? getBusinessDayKeyForReporting(plan.created_at) : null;
+      const paymentBusinessDate = getBusinessDayKeyForReporting(payment.created_at || now);
+      const isInitialSalePayment = Boolean(planCreatedBusinessDate && planCreatedBusinessDate === paymentBusinessDate);
+      if (isInitialSalePayment) {
+        treatmentPlanInitialSalesTotal += Number(payment.total_invoice_amount_settled || 0);
+      }
+
       paymentAllocations.forEach((allocation) => {
         const feeAmount = Number(allocation.fee_amount || 0);
-        if (allocation.method_variant === "tabby_standard" || allocation.method_variant === "tabby_card") {
-          treatmentPlanTabbyFeeTotal += feeAmount;
+        const customerChargedAmount = Number(allocation.customer_charged_amount || 0);
+        const invoiceAllocationAmount = Number(allocation.invoice_allocation_amount || 0);
+        if (allocation.method_variant === "cash") {
+          cashTotal += customerChargedAmount;
+        } else if (allocation.method_variant === "card") {
+          cardTotal += customerChargedAmount;
+        } else if (allocation.method_variant === "tabby_standard") {
+          tabbyTotal += customerChargedAmount;
+          tabbyFeeTotal += feeAmount;
+          tabbyInvoiceAllocationTotal += invoiceAllocationAmount;
+          tabbySurchargeCollectedTotal += feeAmount;
+        } else if (allocation.method_variant === "tabby_card") {
+          tabbyCardTotal += customerChargedAmount;
+          tabbyCardInvoiceAllocationTotal += invoiceAllocationAmount;
+          tabbyCardSurchargeCollectedTotal += feeAmount;
         } else if (allocation.method_variant === "tamara") {
-          treatmentPlanTamaraFeeTotal += feeAmount;
+          tamaraTotal += customerChargedAmount;
+          tamaraFeeTotal += feeAmount;
+          tamaraInvoiceAllocationTotal += invoiceAllocationAmount;
+          tamaraSurchargeCollectedTotal += feeAmount;
+        } else {
+          legacyUnallocatedTotal += customerChargedAmount;
         }
         treatmentPlanPaymentSummaries.push({
           methodVariant: allocation.method_variant as PaymentMethodVariant,
           invoiceAllocated: Number(allocation.invoice_allocation_amount || 0),
           feeAmount,
-          customerChargedAmount: Number(allocation.customer_charged_amount || 0),
+          customerChargedAmount,
           allocationCount: 1,
         });
       });
@@ -2510,25 +2528,6 @@ export default function ReceiptsPage() {
 
     const detailRows: Array<(string | number)[]> = [];
 
-    let grossRevenue = 0;
-    let totalDiscounts = 0;
-    let netRevenue = 0;
-    let totalVat = 0;
-    let totalRefunds = 0;
-    let collectedTodayTotal = 0;
-    let creditUsedTotal = 0;
-    let outstandingCreatedTotal = 0;
-
-    let cashTotal = 0;
-    let cardTotal = 0;
-    let tabbyTotal = 0;
-    let tabbyCardTotal = 0;
-    let tabbyFeeTotal = 0;
-    let tamaraTotal = 0;
-    let tamaraFeeTotal = 0;
-    let insuranceTotal = 0;
-    let bankTransferTotal = 0;
-
     receipts.forEach((receipt) => {
       const receiptId = String(receipt.id || "");
       const structuredPaymentAllocations = paymentAllocationsByReceiptId.get(receiptId) || [];
@@ -2544,6 +2543,8 @@ export default function ReceiptsPage() {
       const netTotal = Number(receipt.total || 0);
       const vatAmount = Number(receipt.vat || 0);
       const grossTotal = Number(receipt.subtotal || 0);
+      const regularTreatmentValue = grossTotal - discountAmount;
+      const regularInvoiceValue = regularTreatmentValue + vatAmount;
       const refundAmount = Number(refundMap.get(receiptId) || 0);
       // NULL amount_paid = paid in full; the breakdown reflects money actually received.
       const paidToday = Number(receipt.amount_paid ?? receipt.total ?? 0);
@@ -2552,35 +2553,48 @@ export default function ReceiptsPage() {
       // Prepaid patient credit covering part of the invoice — not money
       // received today and not outstanding either.
       const creditUsed = Number(receipt.credit_applied || 0);
-      const outstandingCreated = Math.max(0, truncateCurrency(netTotal - paidToday - creditUsed));
-      const breakdown = structuredPaymentSummary
+      const invoiceSettled = structuredPaymentRecords.length > 0
+        ? structuredPaymentRecords.reduce((sum, row) => sum + Number(row.total_invoice_amount_settled || 0), 0)
+        : Math.max(0, Math.min(netTotal, Number(receipt.amount_paid ?? receipt.total ?? 0)));
+      const outstandingCreated = Math.max(0, truncateCurrency(netTotal - invoiceSettled - creditUsed));
+      const receiptCollectionAmount = structuredPaymentRecords.reduce(
+        (sum, row) => sum + Number(row.total_customer_charged_amount || 0),
+        0
+      ) || Math.max(0, Number(receipt.amount_paid ?? receipt.total ?? 0));
+      const structuredCollectionSummary = structuredPaymentAllocations.length > 0
+        ? summarizeStoredAllocationCollectionsForReporting(structuredPaymentAllocations)
+        : null;
+      const breakdown = structuredPaymentAllocations.length > 0
         ? {
-            ...structuredPaymentSummary.breakdown,
+            cash: structuredCollectionSummary?.cash || 0,
+            card: structuredCollectionSummary?.card || 0,
+            tabby: structuredCollectionSummary?.tabby || 0,
+            tabbyCard: structuredCollectionSummary?.tabbyCard || 0,
+            tamara: structuredCollectionSummary?.tamara || 0,
             insurance: 0,
             bankTransfer: 0,
-            addOn: 0,
+            legacyUnallocated: structuredCollectionSummary?.legacyUnallocated || 0,
             mop: structuredPaymentAllocations.length > 1 ? "SPLIT" : "STRUCTURED",
           }
-        : getPaymentBreakdown(paymentMethodRaw, Math.max(0, paidToday - gatewayFee));
-      const tabbyFee = structuredPaymentSummary ? structuredPaymentSummary.tabbyFee : (gatewayProvider.includes("tabby") ? gatewayFee : 0);
+        : getPaymentBreakdown(paymentMethodRaw, Math.max(0, receiptCollectionAmount));
+      const tabbyFee = structuredPaymentSummary
+        ? structuredPaymentSummary.tabbyFee
+        : (gatewayProvider.includes("tabby") ? gatewayFee : 0);
+      const tabbyCardFee = structuredPaymentSummary
+        ? structuredPaymentSummary.tabbyCardFee
+        : (gatewayProvider.includes("tabby card") ? gatewayFee : 0);
       const tamaraFee = structuredPaymentSummary ? structuredPaymentSummary.tamaraFee : (gatewayProvider.includes("tamara") ? gatewayFee : 0);
       const cardReference = structuredPaymentSummary?.references.card || extractTransactionReference(paymentMethodRaw, "card");
       const tabbyReference = structuredPaymentSummary?.references.tabby || extractTransactionReference(paymentMethodRaw, "tabby");
       const tamaraReference = structuredPaymentSummary?.references.tamara || extractTransactionReference(paymentMethodRaw, "tamara");
-      const paidTodayInStructuredAllocations = structuredPaymentRecords.reduce(
-        (sum, row) => sum + Number(row.total_customer_charged_amount || 0),
-        0
-      );
-      const paidTodayForDetail = structuredPaymentSummary && paidTodayInStructuredAllocations > 0
-        ? paidTodayInStructuredAllocations
-        : paidToday;
 
       grossRevenue += grossTotal;
       totalDiscounts += discountAmount;
-      netRevenue += netTotal;
+      regularTreatmentValueTotal += regularTreatmentValue;
+      regularInvoiceValueTotal += regularInvoiceValue;
       totalVat += vatAmount;
       totalRefunds += refundAmount;
-      collectedTodayTotal += paidTodayForDetail;
+      regularPatientPaymentsTotal += receiptCollectionAmount;
       creditUsedTotal += creditUsed;
       outstandingCreatedTotal += outstandingCreated;
 
@@ -2588,11 +2602,18 @@ export default function ReceiptsPage() {
       cardTotal += breakdown.card;
       tabbyTotal += breakdown.tabby;
       tabbyCardTotal += breakdown.tabbyCard;
-      tabbyFeeTotal += tabbyFee;
+      tabbyFeeTotal += structuredCollectionSummary?.tabbySurcharge || tabbyFee;
+      tabbySurchargeCollectedTotal += structuredCollectionSummary?.tabbySurcharge || tabbyFee;
+      tabbyCardSurchargeCollectedTotal += structuredCollectionSummary?.tabbyCardSurcharge || tabbyCardFee;
       tamaraTotal += breakdown.tamara;
-      tamaraFeeTotal += tamaraFee;
+      tamaraFeeTotal += structuredCollectionSummary?.tamaraSurcharge || tamaraFee;
+      tamaraSurchargeCollectedTotal += structuredCollectionSummary?.tamaraSurcharge || tamaraFee;
       insuranceTotal += breakdown.insurance;
       bankTransferTotal += breakdown.bankTransfer;
+      legacyUnallocatedTotal += breakdown.legacyUnallocated;
+      tabbyInvoiceAllocationTotal += structuredCollectionSummary?.tabbyInvoice || 0;
+      tabbyCardInvoiceAllocationTotal += structuredCollectionSummary?.tabbyCardInvoice || 0;
+      tamaraInvoiceAllocationTotal += structuredCollectionSummary?.tamaraInvoice || 0;
 
       const treatments = (treatmentMap.get(receiptId) || []).join("\n") || "CONSULTATION";
 
@@ -2627,17 +2648,16 @@ export default function ReceiptsPage() {
         breakdown.insurance,
         refundAmount,
         paymentMethodRaw,
-        paidTodayForDetail,
+        receiptCollectionAmount,
         creditUsed,
         outstandingCreated,
       ]);
     });
 
-    tabbyFeeTotal += treatmentPlanTabbyFeeTotal;
-    tamaraFeeTotal += treatmentPlanTamaraFeeTotal;
-
-    const totalCollected = cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tabbyFeeTotal + tamaraTotal + tamaraFeeTotal + insuranceTotal + bankTransferTotal + balanceCollectionsTotal + depositsReceivedTotal + treatmentPlanPaymentsTotal;
-    const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
+    const totalMoneyCollected = regularPatientPaymentsTotal + treatmentPlanCollectionsTotal + balanceCollectionsTotal + depositsReceivedTotal;
+    const grossPatientMoneyReceived = totalMoneyCollected;
+    const refundsReturnedTodayTotalAmount = todaysSalesRefundTotal.amount + previousSalesRefundTotal.amount;
+    const netPatientMoneyReceived = grossPatientMoneyReceived - refundsReturnedTodayTotalAmount;
     const totalCommissions = activeCashDeductions
       .filter((entry) => entry.type === "commission")
       .reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
@@ -2645,10 +2665,64 @@ export default function ReceiptsPage() {
       .filter((entry) => entry.type === "expense")
       .reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
     const totalCashDeductions = totalCommissions + totalExpenses;
-    const cashCollectedForDeductions = cashTotal + cashBalanceCollectionsTotal + cashDepositsReceivedTotal + cashTreatmentPlanCollectionsTotal;
-    const cashAfterDeductions = cashCollectedForDeductions - totalCashDeductions;
-    const netCollectionsAfterDeductions = totalCollected - totalCashDeductions;
-    const showCashDeductionSection = activeCashDeductions.length > 0 || !!activeClinic.enable_expenses || !!activeClinic.enable_commissions;
+    const cashGrossCollectedToday = cashTotal;
+    const cashRefundsToday = refundMethodTotals.cash;
+    const cashCollectedForDeductions = cashGrossCollectedToday;
+    const cashAfterDeductions = cashGrossCollectedToday - totalCashDeductions;
+    const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
+    const netCollectionsAfterDeductions = netPatientMoneyReceived - totalCashDeductions;
+    const balanceCollectionBreakdown = (balancePaymentsData || []).reduce((summary, payment) => {
+      const breakdown = getPaymentBreakdownForReporting(String(payment.payment_method || ""), Number(payment.amount || 0));
+      summary.cash += breakdown.cash;
+      summary.card += breakdown.card;
+      summary.tabby += breakdown.tabby;
+      summary.tabbyCard += breakdown.tabbyCard;
+      summary.tamara += breakdown.tamara;
+      summary.insurance += breakdown.insurance;
+      summary.bankTransfer += breakdown.bankTransfer;
+      summary.legacyUnallocated += breakdown.legacyUnallocated;
+      return summary;
+    }, {
+      cash: 0,
+      card: 0,
+      tabby: 0,
+      tabbyCard: 0,
+      tamara: 0,
+      insurance: 0,
+      bankTransfer: 0,
+      legacyUnallocated: 0,
+    });
+
+    const depositBreakdown = (depositsData || []).reduce((summary, deposit) => {
+      const breakdown = getPaymentBreakdownForReporting(String(deposit.payment_method || ""), Number(deposit.amount || 0));
+      summary.cash += breakdown.cash;
+      summary.card += breakdown.card;
+      summary.tabby += breakdown.tabby;
+      summary.tabbyCard += breakdown.tabbyCard;
+      summary.tamara += breakdown.tamara;
+      summary.insurance += breakdown.insurance;
+      summary.bankTransfer += breakdown.bankTransfer;
+      summary.legacyUnallocated += breakdown.legacyUnallocated;
+      return summary;
+    }, {
+      cash: 0,
+      card: 0,
+      tabby: 0,
+      tabbyCard: 0,
+      tamara: 0,
+      insurance: 0,
+      bankTransfer: 0,
+      legacyUnallocated: 0,
+    });
+
+    cashTotal += balanceCollectionBreakdown.cash + depositBreakdown.cash;
+    cardTotal += balanceCollectionBreakdown.card + depositBreakdown.card;
+    tabbyTotal += balanceCollectionBreakdown.tabby + depositBreakdown.tabby;
+    tabbyCardTotal += balanceCollectionBreakdown.tabbyCard + depositBreakdown.tabbyCard;
+    tamaraTotal += balanceCollectionBreakdown.tamara + depositBreakdown.tamara;
+    insuranceTotal += balanceCollectionBreakdown.insurance + depositBreakdown.insurance;
+    bankTransferTotal += balanceCollectionBreakdown.bankTransfer + depositBreakdown.bankTransfer;
+    legacyUnallocatedTotal += balanceCollectionBreakdown.legacyUnallocated + depositBreakdown.legacyUnallocated;
 
     const workbook = XLSX.utils.book_new();
     const normalizeReportCellValue = (value: string | number) => (
@@ -2683,92 +2757,79 @@ export default function ReceiptsPage() {
     }).format(now);
 
     const summaryRows: (string | number)[][] = [
-      ["End-of-Day Reconciliation Report", "", "", "", ""],
-      ["", "", "", "", ""],
-      ["Report Information", "", "", "", ""],
-      ["Clinic Name", activeClinic.name, "", "", ""],
-      ["Report Date", reportDateText, "", "", ""],
-      ["Day of Week", weekdayText, "", "", ""],
-      ["Generated Date & Time", generatedAtText, "", "", ""],
-      ["", "", "", "", ""],
-      ["Daily Summary", "", "", "", ""],
-      ["Total Transactions", receipts.length, "", "", ""],
-      ["Unique Patients", uniquePatients, "", "", ""],
-      ["Gross Revenue", grossRevenue, "", "", ""],
-      ["Total Discounts (Promo)", totalDiscounts, "", "", ""],
-      ["Net Revenue", netRevenue, "", "", ""],
-      ["Total VAT (Included)", totalVat, "", "", ""],
-      ["Total Refunds", totalRefunds, "", "", ""],
-      ["Collected Today (Treatments)", collectedTodayTotal, "", "", ""],
-      ["Outstanding Created Today", outstandingCreatedTotal, "", "", ""],
-      ["Balance Collections (Old Balances)", balanceCollectionsTotal, "", "", ""],
-      ["Deposits Received (Advance Payments)", depositsReceivedTotal, "", "", ""],
-      ["Treatment Plan Payments", treatmentPlanPaymentsTotal, "", "", ""],
-      ["Patient Credit Used", creditUsedTotal, "", "", ""],
-      ["", "", "", "", ""],
-      ["Payment Summary", "", "", "", ""],
-      ["Cash", cashTotal, "", "", ""],
-      ["Card", cardTotal, "", "", ""],
-      ["Tabby", tabbyTotal, "", "", ""],
-      ["Tabby Card", tabbyCardTotal, "", "", ""],
-      ["Tabby Fee", tabbyFeeTotal, "", "", ""],
-      ["Tamara", tamaraTotal, "", "", ""],
-      ["Tamara Fee", tamaraFeeTotal, "", "", ""],
-      ["Insurance", insuranceTotal, "", "", ""],
-      ["Bank Transfer", bankTransferTotal, "", "", ""],
-      ["Balance Collections", balanceCollectionsTotal, "", "", ""],
-      ["Deposits Received", depositsReceivedTotal, "", "", ""],
-      ["Treatment Plan Payments", treatmentPlanPaymentsTotal, "", "", ""],
-      ["Total Collected", totalCollected, "", "", ""],
+      ["End-of-Day Report", "", "", ""],
+      ["", "", "", ""],
+      ["Report Information", "", "", ""],
+      ["Clinic Name", activeClinic.name, "", ""],
+      ["Report Date", reportDateText, "", ""],
+      ["Day of Week", weekdayText, "", ""],
+      ["Generated Date & Time", generatedAtText, "", ""],
+      ["", "", "", ""],
+      ["TODAY'S COLLECTION SUMMARY", "", "", ""],
+      ["Regular Treatment Collections", regularPatientPaymentsTotal, "", ""],
+      ["Treatment Plan Collections", treatmentPlanCollectionsTotal, "", ""],
+      ["Old Balance Collections", balanceCollectionsTotal, "", ""],
+      ["Advance Payments / Prepayments", depositsReceivedTotal, "", ""],
+      ["TOTAL MONEY COLLECTED", totalMoneyCollected, "", ""],
+      ["Refunds", refundsReturnedTodayTotalAmount, "", ""],
+      ["NET MONEY COLLECTED", totalMoneyCollected - refundsReturnedTodayTotalAmount, "", ""],
+      ["Commissions", totalCommissions, "", ""],
+      ["Expenses", totalExpenses, "", ""],
+      ["FINAL COLLECTION AFTER DEDUCTIONS", netCollectionsAfterDeductions, "", ""],
+      ["", "", "", ""],
+      ["SALES / INVOICE", "", "", ""],
+      ["Regular Treatment Invoice", regularInvoiceValueTotal, "", ""],
+      ["VAT (5%) Collected Today", totalVat, "", ""],
+      ["New Treatment Plan Sales", treatmentPlanInitialSalesTotal, "", ""],
+      ["TOTAL INVOICE SALES", regularInvoiceValueTotal + treatmentPlanInitialSalesTotal, "", ""],
+      ["", "", "", ""],
+      ["PAYMENT BREAKDOWN", "", "", ""],
+      ["Payment Method", "Collected", "Refunds", "Net"],
+      ["Cash", cashTotal, refundMethodTotals.cash, cashTotal - refundMethodTotals.cash],
+      ["Card", cardTotal, refundMethodTotals.card, cardTotal - refundMethodTotals.card],
+      ["Tabby", tabbyTotal, refundMethodTotals.tabby, tabbyTotal - refundMethodTotals.tabby],
+      ["Tabby Card", tabbyCardTotal, refundMethodTotals.tabbyCard, tabbyCardTotal - refundMethodTotals.tabbyCard],
+      ["Tamara", tamaraTotal, refundMethodTotals.tamara, tamaraTotal - refundMethodTotals.tamara],
+      ["Bank Transfer", bankTransferTotal, refundMethodTotals.bankTransfer, bankTransferTotal - refundMethodTotals.bankTransfer],
+      ...(legacyUnallocatedTotal !== 0 ? [["Legacy / Unallocated", legacyUnallocatedTotal, refundMethodTotals.legacyUnallocated, legacyUnallocatedTotal - refundMethodTotals.legacyUnallocated]] : []),
+      ["TOTAL", cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tamaraTotal + bankTransferTotal + legacyUnallocatedTotal, refundMethodTotals.cash + refundMethodTotals.card + refundMethodTotals.tabby + refundMethodTotals.tabbyCard + refundMethodTotals.tamara + refundMethodTotals.bankTransfer + refundMethodTotals.legacyUnallocated, (cashTotal + cardTotal + tabbyTotal + tabbyCardTotal + tamaraTotal + bankTransferTotal + legacyUnallocatedTotal) - (refundMethodTotals.cash + refundMethodTotals.card + refundMethodTotals.tabby + refundMethodTotals.tabbyCard + refundMethodTotals.tamara + refundMethodTotals.bankTransfer + refundMethodTotals.legacyUnallocated)],
+      ["", "", "", ""],
+      ["BNPL SURCHARGES", "", "", ""],
+      ...(tabbySurchargeCollectedTotal !== 0 ? [["Tabby Surcharge", tabbySurchargeCollectedTotal, "", ""]] : []),
+      ...(tabbyCardSurchargeCollectedTotal !== 0 ? [["Tabby Card Surcharge", tabbyCardSurchargeCollectedTotal, "", ""]] : []),
+      ...(tamaraSurchargeCollectedTotal !== 0 ? [["Tamara Surcharge", tamaraSurchargeCollectedTotal, "", ""]] : []),
+      ...(tabbySurchargeCollectedTotal !== 0 || tabbyCardSurchargeCollectedTotal !== 0 || tamaraSurchargeCollectedTotal !== 0 ? [["TOTAL BNPL SURCHARGES", tabbySurchargeCollectedTotal + tabbyCardSurchargeCollectedTotal + tamaraSurchargeCollectedTotal, "", ""]] : []),
+      ...(tabbySurchargeCollectedTotal !== 0 || tabbyCardSurchargeCollectedTotal !== 0 || tamaraSurchargeCollectedTotal !== 0 ? [["BNPL surcharges are included in Total Money Collected but excluded from treatment/invoice value.", "", "", ""]] : []),
+      ["", "", "", ""],
+      ["CASH RECONCILIATION", "", "", ""],
+      ["Cash Collected", cashTotal, "", ""],
+      ["Cash Refunds", refundMethodTotals.cash, "", ""],
+      ["Commissions", totalCommissions, "", ""],
+      ["Expenses", totalExpenses, "", ""],
+      ["EXPECTED CASH AFTER DEDUCTIONS", cashTotal - refundMethodTotals.cash - totalCommissions - totalExpenses, "", ""],
+      ["", "", "", ""],
+      ["ACTIVITY", "", "", ""],
+      ["Regular Receipts", receipts.length, "", ""],
+      ["Treatment Plan Visits", treatmentPlanVisitsTodayData?.length || 0, "", ""],
+      ["Treatment Plan Payments", treatmentPlanPaymentRecordsForDay.length, "", ""],
+      ["Old Balance Payments", (balancePaymentsData || []).length, "", ""],
+      ["Advance Payments", (depositsData || []).length, "", ""],
+      ["Refund Transactions", paymentAllocationRefundsForDay.length + legacyRefundsForDay.length, "", ""],
     ];
 
-    const reportInfoHeaderRow = 3;
-    const dailySummaryHeaderRow = 9;
-    const paymentSummaryHeaderRow = 24;
-
-    let cashDeductionHeaderRow: number | null = null;
-    let cashDeductionColumnHeaderRow: number | null = null;
-    let cashDeductionTotalsStartRow: number | null = null;
-
-    if (showCashDeductionSection) {
-      summaryRows.push(["", "", "", "", ""]);
-      cashDeductionHeaderRow = summaryRows.length + 1;
-      summaryRows.push(["Cash Deductions", "", "", "", ""]);
-      cashDeductionColumnHeaderRow = summaryRows.length + 1;
-      summaryRows.push(["Type", "Paid To", "Description", "Reference", "Amount (AED)"]);
-
-      if (activeCashDeductions.length > 0) {
-        activeCashDeductions.forEach((entry) => {
-          summaryRows.push([
-            getCashDeductionTypeLabel(entry.type),
-            entry.paid_to_name || "",
-            entry.description || "",
-            entry.reference_number || "",
-            Number(entry.amount || 0),
-          ]);
-        });
-      } else {
-        summaryRows.push(["—", "No cash deductions recorded", "", "", 0]);
-      }
-
-      cashDeductionTotalsStartRow = summaryRows.length + 1;
-      summaryRows.push(["Total Commissions", "", "", "", totalCommissions]);
-      summaryRows.push(["Total Expenses", "", "", "", totalExpenses]);
-      summaryRows.push(["Total Cash Deductions", "", "", "", totalCashDeductions]);
-      summaryRows.push(["Cash Collected", "", "", "", cashCollectedForDeductions]);
-      summaryRows.push(["Cash After Deductions", "", "", "", cashAfterDeductions]);
-      summaryRows.push(["Total Patient Collections", "", "", "", totalCollected]);
-      summaryRows.push(["Net Collections After Deductions", "", "", "", netCollectionsAfterDeductions]);
-    }
-
     const summarySheet = XLSX.utils.aoa_to_sheet(normalizeReportRows(summaryRows));
-    summarySheet["!cols"] = [{ wch: 36 }, { wch: 28 }, { wch: 32 }, { wch: 24 }, { wch: 18 }];
+    summarySheet["!cols"] = [{ wch: 36 }, { wch: 18 }, { wch: 16 }, { wch: 16 }];
+    const mergeRows: number[] = summaryRows.reduce((rows: number[], row, index) => {
+      const label = typeof row[0] === "string" ? row[0].toUpperCase() : "";
+      if (["REPORT INFORMATION", "TODAY'S COLLECTION SUMMARY", "SALES / INVOICE", "PAYMENT BREAKDOWN", "BNPL SURCHARGES", "CASH RECONCILIATION", "ACTIVITY"].includes(label)) {
+        rows.push(index + 1);
+      }
+      return rows;
+    }, []);
     summarySheet["!merges"] = [
-      { s: { r: 0, c: 0 }, e: { r: 0, c: 4 } },
-      { s: { r: reportInfoHeaderRow - 1, c: 0 }, e: { r: reportInfoHeaderRow - 1, c: 4 } },
-      { s: { r: dailySummaryHeaderRow - 1, c: 0 }, e: { r: dailySummaryHeaderRow - 1, c: 4 } },
-      { s: { r: paymentSummaryHeaderRow - 1, c: 0 }, e: { r: paymentSummaryHeaderRow - 1, c: 4 } },
-      ...(cashDeductionHeaderRow == null ? [] : [{ s: { r: cashDeductionHeaderRow - 1, c: 0 }, e: { r: cashDeductionHeaderRow - 1, c: 4 } }]),
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 3 } },
+      { s: { r: 1, c: 0 }, e: { r: 1, c: 3 } },
+      ...mergeRows.filter((row) => row > 2).map((row) => ({ s: { r: row - 1, c: 0 }, e: { r: row - 1, c: 3 } })),
     ];
 
     const styleSummaryCell = (row: number, col: number, style: Record<string, unknown>) => {
@@ -2778,47 +2839,55 @@ export default function ReceiptsPage() {
       cell.s = { ...(cell.s || {}), ...style };
     };
 
+    const isSectionHeaderRow = (row: number) => {
+      const cellValue = summaryRows[row - 1]?.[0];
+      const label = typeof cellValue === "string" ? cellValue.toUpperCase() : "";
+      return ["REPORT INFORMATION", "TODAY'S COLLECTION SUMMARY", "SALES / INVOICE", "PAYMENT BREAKDOWN", "BNPL SURCHARGES", "CASH RECONCILIATION", "ACTIVITY"].includes(label);
+    };
+
+    const isSubtotalRow = (row: number) => {
+      const cellValue = summaryRows[row - 1]?.[0];
+      const label = typeof cellValue === "string" ? cellValue : "";
+      return [
+        "TOTAL MONEY COLLECTED",
+        "NET MONEY COLLECTED",
+        "FINAL COLLECTION AFTER DEDUCTIONS",
+        "TOTAL INVOICE SALES",
+        "TOTAL",
+        "TOTAL BNPL SURCHARGES",
+        "EXPECTED CASH AFTER DEDUCTIONS",
+      ].includes(label);
+    };
+
     for (let row = 1; row <= summaryRows.length; row++) {
-      for (let col = 1; col <= 5; col++) {
+      for (let col = 1; col <= 4; col++) {
+        const value = summaryRows[row - 1]?.[col - 1];
+        const isNumeric = typeof value === "number";
+        const isNegative = isNumeric && Number(value) < 0;
+        const isHeaderRow = isSectionHeaderRow(row);
+        const isTotal = isSubtotalRow(row);
+
         styleSummaryCell(row, col, {
           border: thinBorder,
-          font: { name: "Calibri", sz: 11, color: { rgb: "1F2937" } },
+          font: {
+            name: "Calibri",
+            sz: 11,
+            bold: isHeaderRow || isTotal,
+            color: { rgb: isNegative ? "C0392B" : isHeaderRow ? "FFFFFF" : "1F2937" },
+          },
+          fill: isHeaderRow
+            ? { fgColor: { rgb: "1F4E78" } }
+            : isTotal
+              ? { fgColor: { rgb: "FFF2CC" } }
+              : undefined,
           alignment: {
             vertical: "center",
-            horizontal: col === 5 || (col === 2 && row < (cashDeductionColumnHeaderRow || Number.MAX_SAFE_INTEGER))
-              ? "right"
-              : "left",
-            wrapText: col >= 2 && row >= (cashDeductionColumnHeaderRow || Number.MAX_SAFE_INTEGER),
+            horizontal: isNumeric || col >= 2 ? "right" : "left",
+            wrapText: true,
           },
         });
-      }
-    }
 
-    [reportInfoHeaderRow, dailySummaryHeaderRow, paymentSummaryHeaderRow, cashDeductionHeaderRow].filter(Boolean).forEach((row) => {
-      for (let col = 1; col <= 5; col++) {
-        styleSummaryCell(Number(row), col, {
-          fill: { fgColor: { rgb: "1F4E78" } },
-          font: { name: "Calibri", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
-          alignment: { horizontal: "left", vertical: "center" },
-        });
-      }
-    });
-
-    styleSummaryCell(1, 1, {
-      fill: { fgColor: { rgb: "0B132B" } },
-      font: { name: "Calibri", sz: 16, bold: true, color: { rgb: "FFFFFF" } },
-      alignment: { horizontal: "center", vertical: "center" },
-    });
-    for (let col = 2; col <= 5; col++) {
-      styleSummaryCell(1, col, {
-        fill: { fgColor: { rgb: "0B132B" } },
-      });
-    }
-
-    for (let row = 1; row <= summaryRows.length; row++) {
-      for (let col = 1; col <= 5; col++) {
-        const value = summaryRows[row - 1]?.[col - 1];
-        if (typeof value === "number") {
+        if (isNumeric) {
           styleSummaryCell(row, col, {
             numFmt: "#,##0.00",
             alignment: { horizontal: "right", vertical: "center" },
@@ -2827,28 +2896,40 @@ export default function ReceiptsPage() {
       }
     }
 
-    const highlightRows = [37];
-    if (cashDeductionTotalsStartRow != null) {
-      highlightRows.push(cashDeductionTotalsStartRow + 2, cashDeductionTotalsStartRow + 4, cashDeductionTotalsStartRow + 6);
-    }
-    highlightRows.forEach((row) => {
-      for (let col = 1; col <= 5; col++) {
-        styleSummaryCell(row, col, {
-          fill: { fgColor: { rgb: "FFF2CC" } },
-          font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "111827" } },
-        });
-      }
+    styleSummaryCell(1, 1, {
+      fill: { fgColor: { rgb: "0B132B" } },
+      font: { name: "Calibri", sz: 16, bold: true, color: { rgb: "FFFFFF" } },
+      alignment: { horizontal: "center", vertical: "center" },
     });
-
-    if (cashDeductionColumnHeaderRow != null) {
-      for (let col = 1; col <= 5; col++) {
-        styleSummaryCell(cashDeductionColumnHeaderRow, col, {
-          fill: { fgColor: { rgb: "EDE9FE" } },
-          font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "4C1D95" } },
-          alignment: { horizontal: col === 5 ? "right" : "left", vertical: "center" },
-        });
-      }
+    for (let col = 2; col <= 4; col++) {
+      styleSummaryCell(1, col, {
+        fill: { fgColor: { rgb: "0B132B" } },
+      });
     }
+
+    styleSummaryCell(2, 1, {
+      fill: { fgColor: { rgb: "E5E7EB" } },
+      font: { name: "Calibri", sz: 13, bold: true, color: { rgb: "111827" } },
+      alignment: { horizontal: "center", vertical: "center" },
+    });
+    for (let col = 2; col <= 4; col++) {
+      styleSummaryCell(2, col, {
+        fill: { fgColor: { rgb: "E5E7EB" } },
+      });
+    }
+
+    styleSummaryCell(3, 1, {
+      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "374151" } },
+    });
+    styleSummaryCell(3, 2, {
+      font: { name: "Calibri", sz: 11, bold: false, color: { rgb: "374151" } },
+    });
+    styleSummaryCell(4, 1, {
+      font: { name: "Calibri", sz: 11, bold: true, color: { rgb: "374151" } },
+    });
+    styleSummaryCell(4, 2, {
+      font: { name: "Calibri", sz: 11, bold: false, color: { rgb: "374151" } },
+    });
 
     const blankDetailRow = new Array(detailHeaders.length).fill("") as string[];
     const visibleDetailRows = detailRows.length > 0 ? detailRows : [blankDetailRow];
