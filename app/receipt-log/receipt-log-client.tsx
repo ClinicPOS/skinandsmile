@@ -1,11 +1,26 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { paymentVariantLabel } from "../../lib/payment-allocation";
+import {
+  calculateAllocationMaxRefundableInvoiceAmount,
+  autoAllocateRefundAmounts,
+  buildAllocationRefundRequests,
+  calculateReceiptItemsRefundTotal,
+  calculateReceiptMaxRefundableAmount,
+  createAllocationBackedRefund,
+  createLegacyBackedRefund,
+  getRemainingAllocationAmounts,
+  isNonRefundableSurchargeVariant,
+  resolveRefundProcessingMode,
+  summarizeRefundMethodVariants,
+} from "../../lib/receipt-refunds";
 import { supabase } from "../../lib/supabase";
 import { printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { generateInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { buildThermalReceiptHtml, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
 import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
+import type { PaymentAllocation } from "../../lib/types";
 
 const PAGE_SIZE = 10;
 
@@ -27,15 +42,20 @@ export default function ReceiptLogClient() {
   const [receiptItems, setReceiptItems] = useState<any[]>([]);
   const [receiptRefunds, setReceiptRefunds] = useState<any[]>([]);
   const [receiptRefundItems, setReceiptRefundItems] = useState<any[]>([]);
+  const [paymentAllocations, setPaymentAllocations] = useState<PaymentAllocation[]>([]);
+  const [paymentRecordCount, setPaymentRecordCount] = useState(0);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
 
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [refundAll, setRefundAll] = useState(true);
   const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({});
+  const [checkedAllocations, setCheckedAllocations] = useState<Record<string, boolean>>({});
+  const [refundAllocationAmountInputs, setRefundAllocationAmountInputs] = useState<Record<string, string>>({});
   const [refundReason, setRefundReason] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [lastRefund, setLastRefund] = useState<any | null>(null);
   const [refundedItems, setRefundedItems] = useState<any[]>([]);
+  const [lastRefundBreakdown, setLastRefundBreakdown] = useState<any[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
 
@@ -126,18 +146,36 @@ export default function ReceiptLogClient() {
     setSelectedReceipt(receipt);
     setLastRefund(null);
     setRefundedItems([]);
+    setLastRefundBreakdown([]);
     setReceiptRefunds([]);
     setReceiptRefundItems([]);
+    setPaymentAllocations([]);
+    setPaymentRecordCount(0);
+    setCheckedAllocations({});
+    setRefundAllocationAmountInputs({});
     setIsLoadingItems(true);
     setReceiptItems([]);
-    const [itemsRes, refundsRes] = await Promise.all([
+    const [itemsRes, refundsRes, paymentRecordsRes] = await Promise.all([
       supabase.from("receipt_items").select("*").eq("receipt_id", receipt.id),
       supabase.from("refunds").select("*").eq("receipt_id", receipt.id).order("created_at", { ascending: false }),
+      supabase.from("payment_records").select("id").eq("receipt_id", receipt.id).order("created_at", { ascending: false }),
     ]);
     const items = itemsRes.data || [];
     const refunds = refundsRes.data || [];
     setReceiptItems(items);
     setReceiptRefunds(refunds);
+    const paymentRecordIds = (paymentRecordsRes.data || []).map((row: { id: string }) => row.id).filter(Boolean);
+    setPaymentRecordCount(paymentRecordIds.length);
+    if (paymentRecordIds.length > 0) {
+      const { data: allocationRows } = await supabase
+        .from("payment_allocations")
+        .select("*")
+        .in("payment_id", paymentRecordIds)
+        .order("created_at", { ascending: true });
+      setPaymentAllocations((allocationRows || []) as PaymentAllocation[]);
+    } else {
+      setPaymentAllocations([]);
+    }
     if (refunds.length > 0) {
       const refundIds = refunds.map((r: any) => r.id);
       const { data: refundItemsData } = await supabase
@@ -150,72 +188,165 @@ export default function ReceiptLogClient() {
   }
 
   function toggleItem(itemId: string) {
-    setCheckedItems((prev) => ({ ...prev, [itemId]: !prev[itemId] }));
+    if (!selectedReceipt) return;
+    setCheckedItems((prev) => {
+      const next = { ...prev, [itemId]: !prev[itemId] };
+      if (refundMode === "modern" && !refundAll) {
+        const nextItems = receiptItems.filter((item) => next[String(item.id)]);
+        const nextTotal = calculateReceiptItemsRefundTotal(selectedReceipt, nextItems);
+        const nextSelectedAllocationIds = Object.entries(checkedAllocations).filter(([, value]) => value).map(([key]) => key);
+        setRefundAllocationAmountInputs(
+          nextSelectedAllocationIds.length > 0
+            ? autoAllocateRefundAmounts(nextTotal, paymentAllocations, nextSelectedAllocationIds)
+            : {}
+        );
+      }
+      return next;
+    });
   }
+
+  function toggleAllocation(allocationId: string) {
+    if (refundMode !== "modern") return;
+    setCheckedAllocations((current) => {
+      const next = { ...current, [allocationId]: !current[allocationId] };
+      const nextSelectedAllocationIds = Object.entries(next).filter(([, value]) => value).map(([key]) => key);
+      setRefundAllocationAmountInputs(
+        nextSelectedAllocationIds.length > 0
+          ? autoAllocateRefundAmounts(refundTargetAmount, paymentAllocations, nextSelectedAllocationIds)
+          : {}
+      );
+      return next;
+    });
+  }
+
+  const selectedRefundItems = useMemo(
+    () => (refundAll ? receiptItems : receiptItems.filter((item) => checkedItems[String(item.id)])),
+    [checkedItems, receiptItems, refundAll]
+  );
+
+  const refundMode = useMemo(
+    () => resolveRefundProcessingMode({ paymentRecordCount, allocationCount: paymentAllocations.length }),
+    [paymentAllocations.length, paymentRecordCount]
+  );
+  const modernMaxRefundableAmount = useMemo(
+    () => calculateAllocationMaxRefundableInvoiceAmount(paymentAllocations),
+    [paymentAllocations]
+  );
+  const maxRefundableAmount = useMemo(() => {
+    if (!selectedReceipt) return 0;
+    if (refundMode === "modern") return modernMaxRefundableAmount;
+    return calculateReceiptMaxRefundableAmount(selectedReceipt, receiptRefunds);
+  }, [modernMaxRefundableAmount, receiptRefunds, refundMode, selectedReceipt]);
+  const refundTargetAmount = useMemo(() => {
+    if (!selectedReceipt) return 0;
+    if (refundAll) return maxRefundableAmount;
+    return calculateReceiptItemsRefundTotal(selectedReceipt, selectedRefundItems);
+  }, [maxRefundableAmount, refundAll, selectedReceipt, selectedRefundItems]);
+
+  const selectedAllocationIds = useMemo(
+    () => Object.entries(checkedAllocations).filter(([, value]) => value).map(([key]) => key),
+    [checkedAllocations]
+  );
+
+  const selectedAllocationRefundTotal = useMemo(
+    () => selectedAllocationIds.reduce((sum, id) => sum + Number(refundAllocationAmountInputs[id] || 0), 0),
+    [refundAllocationAmountInputs, selectedAllocationIds]
+  );
 
   async function processRefund() {
     if (!selectedReceipt) return;
     if (!refundReason.trim()) { alert("Please enter a reason."); return; }
     if (!refundAll && Object.values(checkedItems).filter(Boolean).length === 0) { alert("Select at least one item."); return; }
+    if (refundMode === "admin_review") {
+      alert("This receipt has a payment record but no payment allocations. Refund is blocked for safety. Please ask admin to review this receipt.");
+      return;
+    }
 
     setIsProcessing(true);
 
-    const itemsToRefund = refundAll ? receiptItems : receiptItems.filter((item) => checkedItems[String(item.id)]);
-    const receiptVat = Number(selectedReceipt.vat || 0);
-    const receiptSubtotal = Number(selectedReceipt.subtotal || 0);
-    // Refunds can't exceed money actually collected: partial-payment receipts
-    // only took amount_paid (NULL = paid in full), minus prior refunds.
-    const paidAmount = Number(selectedReceipt.amount_paid ?? selectedReceipt.total ?? 0);
-    const previouslyRefunded = receiptRefunds.reduce((s, r) => s + Number(r.total_amount || 0), 0);
-    const maxRefundable = Math.max(0, Math.round((paidAmount - previouslyRefunded) * 100) / 100);
-    const totalRefund = refundAll
-      ? maxRefundable
-      : (() => {
-          const itemsSubtotal = itemsToRefund.reduce((sum, item) => sum + Number(item.total || item.price || 0), 0);
-          const proportionalVat = receiptSubtotal > 0 ? (itemsSubtotal / receiptSubtotal) * receiptVat : 0;
-          return Math.round((itemsSubtotal + proportionalVat) * 100) / 100;
-        })();
+    const maxRefundable = maxRefundableAmount;
+    const totalRefund = refundTargetAmount;
 
     if (totalRefund <= 0) {
-      alert(`Nothing left to refund — AED ${previouslyRefunded.toFixed(2)} of the AED ${paidAmount.toFixed(2)} paid has already been refunded.`);
+      if (refundMode === "modern") {
+        alert("Nothing left to refund — all invoice allocations were already refunded.");
+      } else {
+        const paidAmount = Number(selectedReceipt.amount_paid ?? selectedReceipt.total ?? 0);
+        const previouslyRefunded = receiptRefunds.reduce((sum, row) => sum + Number(row.total_amount || 0), 0);
+        alert(`Nothing left to refund — AED ${previouslyRefunded.toFixed(2)} of the AED ${paidAmount.toFixed(2)} paid has already been refunded.`);
+      }
       setIsProcessing(false);
       return;
     }
     if (totalRefund > maxRefundable + 0.0049) {
-      alert(`Refund exceeds what the patient actually paid. Maximum refundable is AED ${maxRefundable.toFixed(2)} (paid AED ${paidAmount.toFixed(2)}, already refunded AED ${previouslyRefunded.toFixed(2)}).`);
+      if (refundMode === "modern") {
+        alert(`Refund exceeds remaining refundable invoice allocations. Maximum refundable is AED ${maxRefundable.toFixed(2)}.`);
+      } else {
+        const paidAmount = Number(selectedReceipt.amount_paid ?? selectedReceipt.total ?? 0);
+        const previouslyRefunded = receiptRefunds.reduce((sum, row) => sum + Number(row.total_amount || 0), 0);
+        alert(`Refund exceeds what the patient actually paid. Maximum refundable is AED ${maxRefundable.toFixed(2)} (paid AED ${paidAmount.toFixed(2)}, already refunded AED ${previouslyRefunded.toFixed(2)}).`);
+      }
       setIsProcessing(false);
       return;
     }
 
-    const { data: refundData, error: refundError } = await supabase
-      .from("refunds")
-      .insert([{
-        receipt_id: selectedReceipt.id,
-        receptionist_id: selectedReceipt.receptionist_id,
-        refunded_by: null,
-        reason: refundReason.trim(),
-        total_amount: totalRefund,
-        payment_method: selectedReceipt.payment_method,
-      }])
-      .select()
-      .single();
+    const baseRefundItemRows = selectedRefundItems.map((item) => ({
+      receipt_item_id: item.id,
+      service_id: item.service_id,
+      service_name: services.find((s) => s.id === item.service_id)?.name || "Unknown",
+      amount: Number(item.total || item.price || 0),
+    }));
 
-    if (refundError || !refundData) {
-      alert(`Error creating refund: ${refundError?.message || "unknown"}`);
-      setIsProcessing(false);
-      return;
-    }
-
-    if (itemsToRefund.length > 0) {
-      await supabase.from("refund_items").insert(
-        itemsToRefund.map((item) => ({
-          refund_id: refundData.id,
-          receipt_item_id: item.id,
-          service_id: item.service_id,
-          service_name: services.find((s) => s.id === item.service_id)?.name || "Unknown",
-          amount: Number(item.total || item.price || 0),
-        }))
-      );
+    let result:
+      | { kind: "modern"; refundData: any; warningMessage?: string; breakdown: any[] }
+      | { kind: "legacy"; refundData: any; refundItems: any[] };
+    if (refundMode === "legacy") {
+      try {
+        const legacyResult = await createLegacyBackedRefund({
+          supabase,
+          receiptId: selectedReceipt.id,
+          receptionistId: selectedReceipt.receptionist_id,
+          refundedBy: null,
+          reason: refundReason.trim(),
+          totalAmount: totalRefund,
+          paymentMethod: selectedReceipt.payment_method || "Legacy receipt refund",
+          refundItemRows: baseRefundItemRows,
+        });
+        result = { kind: "legacy", ...legacyResult };
+      } catch (error) {
+        alert(`Error creating legacy refund: ${error instanceof Error ? error.message : String(error)}`);
+        setIsProcessing(false);
+        return;
+      }
+    } else {
+      const { requests, error } = buildAllocationRefundRequests({
+        allocations: paymentAllocations,
+        selectedAllocationIds,
+        requestedAmountsByAllocationId: refundAllocationAmountInputs,
+        expectedRefundAmount: totalRefund,
+      });
+      if (error) {
+        alert(error);
+        setIsProcessing(false);
+        return;
+      }
+      try {
+        const modernResult = await createAllocationBackedRefund({
+          supabase,
+          receiptId: selectedReceipt.id,
+          receptionistId: selectedReceipt.receptionist_id,
+          processedBy: selectedReceipt.receptionist_id,
+          refundedBy: null,
+          reason: refundReason.trim(),
+          requests,
+          refundItemRows: baseRefundItemRows,
+        });
+        result = { kind: "modern", ...modernResult };
+      } catch (error) {
+        alert(`Error creating refund: ${error instanceof Error ? error.message : String(error)}`);
+        setIsProcessing(false);
+        return;
+      }
     }
 
     // A fully refunded partial-payment receipt shouldn't keep chasing the
@@ -242,17 +373,26 @@ export default function ReceiptLogClient() {
     }
 
     // Refresh refund data for the current receipt
-    const { data: freshRefundItems } = await supabase.from("refund_items").select("*").eq("refund_id", refundData.id);
-    setReceiptRefunds((prev) => [refundData, ...prev]);
-    setReceiptRefundItems((prev) => [...prev, ...(freshRefundItems || [])]);
-    setAllRefunds((prev) => [...prev, refundData]);
+    const freshRefundItems = result.kind === "legacy"
+      ? result.refundItems
+      : (await supabase.from("refund_items").select("*").eq("refund_id", result.refundData.id)).data || [];
+    setReceiptRefunds((prev) => [result.refundData, ...prev]);
+    setReceiptRefundItems((prev) => [...prev, ...freshRefundItems]);
+    setAllRefunds((prev) => [...prev, result.refundData]);
 
-    setLastRefund(refundData);
-    setRefundedItems(itemsToRefund);
+    setLastRefund(result.refundData);
+    setRefundedItems(selectedRefundItems);
+    setLastRefundBreakdown(result.kind === "modern" ? result.breakdown : []);
     setShowRefundModal(false);
     setIsProcessing(false);
     setRefundReason("");
     setCheckedItems({});
+    setCheckedAllocations({});
+    setRefundAllocationAmountInputs({});
+    if (result.kind === "modern" && result.warningMessage) {
+      alert(result.warningMessage);
+      return;
+    }
   }
 
   function buildRefundReceiptHtml(): string {
@@ -270,6 +410,21 @@ export default function ReceiptLogClient() {
         <div class="row item-row">
           <span class="item-name">${services.find((s) => s.id === item.service_id)?.name || "Unknown"}</span>
           <span class="amount">-AED ${Number(item.total || item.price).toFixed(2)}</span>
+        </div>`)
+      .join("");
+    const paymentMethodHtml = lastRefundBreakdown
+      .map((item) => `
+        <div class="row item-row">
+          <span class="item-name">${item.methodLabel}${item.providerReference ? ` (${item.providerReference})` : ""}</span>
+          <span class="amount">AED ${Number(item.refundedInvoiceAmount || 0).toFixed(2)}</span>
+        </div>`)
+      .join("");
+    const feeHtml = lastRefundBreakdown
+      .filter((item) => Number(item.nonRefundableFeeAmount || 0) > 0)
+      .map((item) => `
+        <div class="row">
+          <span>Non-refundable ${item.methodLabel} fee</span>
+          <span>AED ${Number(item.nonRefundableFeeAmount || 0).toFixed(2)}</span>
         </div>`)
       .join("");
 
@@ -298,11 +453,13 @@ export default function ReceiptLogClient() {
   <div style="text-align:center;font-weight:700;margin:3px 0;">Services Refunded</div>
   <div class="hr" style="margin-top:2px;"></div>
   ${itemsHtml || `<div class="row"><span>Full Receipt Refund</span><span>-AED ${totalRefund.toFixed(2)}</span></div>`}
+  ${paymentMethodHtml ? `<div class="hr"></div><div style="text-align:center;font-weight:700;margin:3px 0;">Original Payment Method</div><div class="hr" style="margin-top:2px;"></div>${paymentMethodHtml}` : ""}
   <div class="hr"></div>
   <div class="row" style="font-weight:700;font-size:12px;"><span>REFUND TOTAL</span><span>-AED ${totalRefund.toFixed(2)}</span></div>
   <div class="hr"></div>
   <div class="row"><span>Reason</span><span style="text-align:right;font-size:9px;">: ${lastRefund.reason || "-"}</span></div>
-  <div class="row"><span>Payment Method</span><span>: ${lastRefund.payment_method || "-"}</span></div>
+  <div class="row"><span>Payment Method</span><span>: ${lastRefund.payment_method || summarizeRefundMethodVariants(lastRefundBreakdown.map((item) => item.methodVariant)) || "-"}</span></div>
+  ${feeHtml ? `<div class="hr"></div>${feeHtml}` : ""}
   <div class="hr"></div>
   <div style="text-align:center;font-size:9px;margin-top:6px;">Thank you</div>
 </body></html>`;
@@ -719,12 +876,31 @@ export default function ReceiptLogClient() {
                               </button>
                               <button
                                 onClick={() => {
-                                  setShowRefundModal(true);
-                                  setRefundAll(true);
-                                  setCheckedItems({});
-                                  setRefundReason("");
-                                  setLastRefund(null);
-                                }}
+                                   const mode = resolveRefundProcessingMode({
+                                     paymentRecordCount,
+                                     allocationCount: paymentAllocations.length,
+                                   });
+                                   const shouldUseAllocations = mode === "modern";
+                                   const nextCheckedAllocations = shouldUseAllocations
+                                     ? Object.fromEntries(paymentAllocations.map((allocation) => [allocation.id, true]))
+                                     : {};
+                                   setShowRefundModal(true);
+                                   setRefundAll(true);
+                                   setCheckedItems({});
+                                   setCheckedAllocations(nextCheckedAllocations);
+                                   setRefundAllocationAmountInputs(
+                                     shouldUseAllocations
+                                       ? autoAllocateRefundAmounts(
+                                           calculateAllocationMaxRefundableInvoiceAmount(paymentAllocations),
+                                           paymentAllocations,
+                                           paymentAllocations.map((allocation) => allocation.id)
+                                         )
+                                       : {}
+                                   );
+                                   setRefundReason("");
+                                   setLastRefund(null);
+                                   setLastRefundBreakdown([]);
+                                 }}
                                 className="flex-1 rounded-2xl border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
                               >
                                 Refund
@@ -749,6 +925,11 @@ export default function ReceiptLogClient() {
                                 <p className="text-sm font-semibold text-green-800">
                                   ✓ Refund of AED {Number(lastRefund.total_amount).toFixed(2)} processed
                                 </p>
+                                {lastRefundBreakdown.length > 0 && (
+                                  <p className="mt-1 text-xs text-green-700">
+                                    Refunded via {summarizeRefundMethodVariants(lastRefundBreakdown.map((item) => item.methodVariant))}.
+                                  </p>
+                                )}
                                 <button
                                   onClick={printRefundReceipt}
                                   className="mt-2 w-full rounded-xl bg-green-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-green-500"
@@ -807,12 +988,26 @@ export default function ReceiptLogClient() {
                   type="radio"
                   name="refundType"
                   checked={refundAll}
-                  onChange={() => { setRefundAll(true); setCheckedItems({}); }}
+                  onChange={() => {
+                    setRefundAll(true);
+                    setCheckedItems({});
+                    if (refundMode === "modern") {
+                      setRefundAllocationAmountInputs(
+                        selectedAllocationIds.length > 0
+                          ? autoAllocateRefundAmounts(
+                            modernMaxRefundableAmount,
+                              paymentAllocations,
+                              selectedAllocationIds
+                            )
+                          : {}
+                      );
+                    }
+                  }}
                   className="accent-red-500"
                 />
                 <div>
                   <p className="text-sm font-semibold text-slate-900">Refund entire receipt</p>
-                  <p className="text-xs text-slate-500">AED {Number(selectedReceipt.total).toFixed(2)}</p>
+                  <p className="text-xs text-slate-500">AED {maxRefundableAmount.toFixed(2)}</p>
                 </div>
               </label>
               <label className="flex cursor-pointer items-center gap-3 rounded-2xl border-2 border-slate-200 p-3 transition hover:border-red-300">
@@ -820,7 +1015,16 @@ export default function ReceiptLogClient() {
                   type="radio"
                   name="refundType"
                   checked={!refundAll}
-                  onChange={() => setRefundAll(false)}
+                  onChange={() => {
+                    setRefundAll(false);
+                    if (refundMode === "modern") {
+                      setRefundAllocationAmountInputs(
+                        selectedAllocationIds.length > 0
+                          ? autoAllocateRefundAmounts(0, paymentAllocations, selectedAllocationIds)
+                          : {}
+                      );
+                    }
+                  }}
                   className="accent-red-500"
                 />
                 <p className="text-sm font-semibold text-slate-900">Refund selected services only</p>
@@ -842,27 +1046,92 @@ export default function ReceiptLogClient() {
                     />
                     <div className="flex flex-1 items-center justify-between">
                       <span className="text-sm text-slate-800">{services.find((s) => s.id === item.service_id)?.name || "Service"}</span>
-                      <span className="text-sm font-semibold text-slate-700">AED {Number(item.price).toFixed(2)}</span>
+                      <span className="text-sm font-semibold text-slate-700">AED {Number(item.total || item.price || 0).toFixed(2)}</span>
                     </div>
                   </label>
                 ))}
                 {Object.values(checkedItems).some(Boolean) && (
                   <div className="text-right">
                     <p className="text-sm font-semibold text-red-600">
-                      Refund total: AED{" "}
-                      {(() => {
-                        const itemsSubtotal = receiptItems
-                          .filter((i) => checkedItems[String(i.id)])
-                          .reduce((s, i) => s + Number(i.total || i.price || 0), 0);
-                        const receiptSubtotal = Number(selectedReceipt.subtotal || 0);
-                        const receiptVat = Number(selectedReceipt.vat || 0);
-                        const proportionalVat = receiptSubtotal > 0 ? (itemsSubtotal / receiptSubtotal) * receiptVat : 0;
-                        return (Math.round((itemsSubtotal + proportionalVat) * 100) / 100).toFixed(2);
-                      })()}
+                      Refund total: AED {refundTargetAmount.toFixed(2)}
                     </p>
                     <p className="text-xs text-slate-400">(includes proportional VAT)</p>
                   </div>
                 )}
+              </div>
+            )}
+
+            {refundMode === "modern" && (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">Original payment allocations</p>
+                    <p className="text-xs text-slate-500">Choose which original payment method should fund this refund.</p>
+                  </div>
+                  <p className="text-sm font-semibold text-slate-700">Target: AED {refundTargetAmount.toFixed(2)}</p>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {paymentAllocations.map((allocation) => {
+                    const remaining = getRemainingAllocationAmounts(allocation);
+                    return (
+                      <label
+                        key={allocation.id}
+                        className="block rounded-2xl border border-slate-200 bg-white p-3"
+                      >
+                        <div className="flex items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={!!checkedAllocations[allocation.id]}
+                            onChange={() => toggleAllocation(allocation.id)}
+                            className="mt-1 h-4 w-4 accent-red-500"
+                          />
+                          <div className="flex-1">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <p className="text-sm font-semibold text-slate-900">{paymentVariantLabel(allocation.method_variant)}</p>
+                                <p className="text-xs text-slate-500">
+                                  Invoice remaining AED {remaining.invoice.toFixed(2)}
+                                  {allocation.provider_reference_number ? ` · Ref ${allocation.provider_reference_number}` : ""}
+                                </p>
+                              </div>
+                              <div className="w-28">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={refundAllocationAmountInputs[allocation.id] || ""}
+                                  onChange={(e) => setRefundAllocationAmountInputs((current) => ({ ...current, [allocation.id]: e.target.value }))}
+                                  placeholder={remaining.invoice.toFixed(2)}
+                                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                                />
+                              </div>
+                            </div>
+                            {isNonRefundableSurchargeVariant(allocation.method_variant) && Number(allocation.fee_amount || 0) > 0 && (
+                              <p className="mt-2 text-xs font-medium text-amber-700">
+                                Original fee AED {Number(allocation.fee_amount || 0).toFixed(2)} stays on record and is not refunded.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                  <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-3 py-2 text-xs text-slate-600">
+                    Selected allocation total: AED {selectedAllocationRefundTotal.toFixed(2)}
+                    {" · "}
+                    Remaining to assign: AED {Math.max(0, refundTargetAmount - selectedAllocationRefundTotal).toFixed(2)}
+                  </div>
+                </div>
+              </div>
+            )}
+            {refundMode === "legacy" && (
+              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                Legacy receipt refund: this receipt predates structured payment allocations, so refund uses compatibility mode.
+              </div>
+            )}
+            {refundMode === "admin_review" && (
+              <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                This receipt has payment records but missing payment allocations. Refund is blocked for safety; ask admin to review.
               </div>
             )}
 
@@ -880,7 +1149,11 @@ export default function ReceiptLogClient() {
             <div className="mt-4 flex gap-3">
               <button
                 onClick={processRefund}
-                disabled={isProcessing}
+                disabled={
+                  isProcessing
+                  || refundMode === "admin_review"
+                  || (refundMode === "modern" && selectedAllocationIds.length === 0)
+                }
                 className="flex-1 rounded-2xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-50"
               >
                 {isProcessing ? "Processing..." : "Confirm Refund"}

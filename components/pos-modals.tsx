@@ -6,6 +6,7 @@ import { receptionistIdsForClinic } from "../lib/clinic-scope";
 import type {
   OutstandingBalance,
   BalancePayment,
+  PaymentAllocation,
   PatientCredit,
   TreatmentPlan,
   TreatmentPlanPayment,
@@ -29,6 +30,18 @@ import {
   PaymentMethodVariant,
 } from "../lib/payment-allocation";
 import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-payment-receipt";
+import {
+  calculateAllocationMaxRefundableInvoiceAmount,
+  autoAllocateRefundAmounts,
+  buildAllocationRefundRequests,
+  calculateReceiptItemsRefundTotal,
+  calculateReceiptMaxRefundableAmount,
+  createAllocationBackedRefund,
+  createLegacyBackedRefund,
+  getRemainingAllocationAmounts,
+  isNonRefundableSurchargeVariant,
+  resolveRefundProcessingMode,
+} from "../lib/receipt-refunds";
 import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 import { computeTreatmentPlanRollup } from "../lib/treatment-plan-rollup";
 
@@ -2409,6 +2422,8 @@ export function ReceiptHistoryModal({
   const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [receiptItemsMap, setReceiptItemsMap] = useState<Record<string, any[]>>({});
   const [refundsMap, setRefundsMap] = useState<Record<string, any[]>>({});
+  const [paymentRecordIdsMap, setPaymentRecordIdsMap] = useState<Record<string, string[]>>({});
+  const [paymentAllocationsMap, setPaymentAllocationsMap] = useState<Record<string, PaymentAllocation[]>>({});
   const [expandedReceiptId, setExpandedReceiptId] = useState<string | null>(null);
   const [loadingItemsFor, setLoadingItemsFor] = useState<string | null>(null);
 
@@ -2416,6 +2431,8 @@ export function ReceiptHistoryModal({
   const [refundTargetReceipt, setRefundTargetReceipt] = useState<Receipt | null>(null);
   const [refundItems, setRefundItems] = useState<any[]>([]);
   const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({});
+  const [checkedRefundAllocations, setCheckedRefundAllocations] = useState<Record<string, boolean>>({});
+  const [refundAllocationAmountInputs, setRefundAllocationAmountInputs] = useState<Record<string, string>>({});
   const [refundAll, setRefundAll] = useState(false);
   const [refundReason, setRefundReason] = useState("");
   const [isProcessingRefund, setIsProcessingRefund] = useState(false);
@@ -2428,6 +2445,8 @@ export function ReceiptHistoryModal({
       setExpandedReceiptId(null);
       setReceiptItemsMap({});
       setRefundsMap({});
+      setPaymentRecordIdsMap({});
+      setPaymentAllocationsMap({});
       loadHistory();
     }
   }, [isOpen]);
@@ -2531,15 +2550,45 @@ export function ReceiptHistoryModal({
   }
 
   async function loadReceiptItems(receiptId: string) {
-    if (receiptItemsMap[receiptId]) return;
+    if (receiptItemsMap[receiptId] && refundsMap[receiptId] && paymentRecordIdsMap[receiptId] && paymentAllocationsMap[receiptId]) {
+      return {
+        items: receiptItemsMap[receiptId] || [],
+        refunds: refundsMap[receiptId] || [],
+        paymentRecordIds: paymentRecordIdsMap[receiptId] || [],
+        allocations: paymentAllocationsMap[receiptId] || [],
+      };
+    }
     setLoadingItemsFor(receiptId);
-    const [itemsRes, refundsRes] = await Promise.all([
+    const [itemsRes, refundsRes, paymentRecordsRes] = await Promise.all([
       supabase.from("receipt_items").select("*").eq("receipt_id", receiptId),
       supabase.from("refunds").select("*").eq("receipt_id", receiptId).order("created_at", { ascending: false }),
+      supabase.from("payment_records").select("id").eq("receipt_id", receiptId).order("created_at", { ascending: false }),
     ]);
-    setReceiptItemsMap((prev) => ({ ...prev, [receiptId]: itemsRes.data || [] }));
-    setRefundsMap((prev) => ({ ...prev, [receiptId]: refundsRes.data || [] }));
+    const loadedItems = itemsRes.data || [];
+    const loadedRefunds = refundsRes.data || [];
+    setReceiptItemsMap((prev) => ({ ...prev, [receiptId]: loadedItems }));
+    setRefundsMap((prev) => ({ ...prev, [receiptId]: loadedRefunds }));
+    const paymentRecordIds = (paymentRecordsRes.data || []).map((row: { id: string }) => row.id).filter(Boolean);
+    setPaymentRecordIdsMap((prev) => ({ ...prev, [receiptId]: paymentRecordIds }));
+    let loadedAllocations: PaymentAllocation[] = [];
+    if (paymentRecordIds.length > 0) {
+      const { data: allocationRows } = await supabase
+        .from("payment_allocations")
+        .select("*")
+        .in("payment_id", paymentRecordIds)
+        .order("created_at", { ascending: true });
+      loadedAllocations = (allocationRows || []) as PaymentAllocation[];
+      setPaymentAllocationsMap((prev) => ({ ...prev, [receiptId]: loadedAllocations }));
+    } else {
+      setPaymentAllocationsMap((prev) => ({ ...prev, [receiptId]: [] }));
+    }
     setLoadingItemsFor(null);
+    return {
+      items: loadedItems,
+      refunds: loadedRefunds,
+      paymentRecordIds,
+      allocations: loadedAllocations,
+    };
   }
 
   const treatmentPlanPaymentEntries = useMemo(() => {
@@ -2563,10 +2612,110 @@ export function ReceiptHistoryModal({
     }
   }
 
-  function startRefund(receipt: Receipt) {
+  const refundTargetAllocations = useMemo(
+    () => (refundTargetReceipt ? (paymentAllocationsMap[refundTargetReceipt.id] || []) : []),
+    [paymentAllocationsMap, refundTargetReceipt]
+  );
+
+  const refundTargetPaymentRecordCount = useMemo(
+    () => (refundTargetReceipt ? (paymentRecordIdsMap[refundTargetReceipt.id] || []).length : 0),
+    [paymentRecordIdsMap, refundTargetReceipt]
+  );
+  const refundMode = useMemo(
+    () => resolveRefundProcessingMode({ paymentRecordCount: refundTargetPaymentRecordCount, allocationCount: refundTargetAllocations.length }),
+    [refundTargetAllocations.length, refundTargetPaymentRecordCount]
+  );
+  const modernMaxRefundableAmount = useMemo(
+    () => calculateAllocationMaxRefundableInvoiceAmount(refundTargetAllocations),
+    [refundTargetAllocations]
+  );
+  const selectedRefundItemRows = useMemo(
+    () => (refundAll ? refundItems : refundItems.filter((item) => checkedItems[item.id])),
+    [checkedItems, refundAll, refundItems]
+  );
+
+  const refundTargetTotal = useMemo(() => {
+    if (!refundTargetReceipt) return 0;
+    if (refundAll) {
+      if (refundMode === "modern") return modernMaxRefundableAmount;
+      return calculateReceiptMaxRefundableAmount(refundTargetReceipt, refundsMap[refundTargetReceipt.id] || []);
+    }
+    return calculateReceiptItemsRefundTotal(refundTargetReceipt, selectedRefundItemRows);
+  }, [modernMaxRefundableAmount, refundAll, refundMode, refundTargetReceipt, refundsMap, selectedRefundItemRows]);
+
+  const selectedRefundAllocationIds = useMemo(
+    () => Object.entries(checkedRefundAllocations).filter(([, value]) => value).map(([key]) => key),
+    [checkedRefundAllocations]
+  );
+
+  const selectedRefundAllocationTotal = useMemo(
+    () => selectedRefundAllocationIds.reduce((sum, id) => sum + Number(refundAllocationAmountInputs[id] || 0), 0),
+    [refundAllocationAmountInputs, selectedRefundAllocationIds]
+  );
+
+  function rebalanceRefundAllocationInputs(nextCheckedAllocations: Record<string, boolean>, nextRefundTotal: number) {
+    const nextSelectedIds = Object.entries(nextCheckedAllocations).filter(([, value]) => value).map(([key]) => key);
+    setRefundAllocationAmountInputs(
+      nextSelectedIds.length > 0
+        ? autoAllocateRefundAmounts(nextRefundTotal, refundTargetAllocations, nextSelectedIds)
+        : {}
+    );
+  }
+
+  function handleRefundItemToggle(itemId: string, checked: boolean) {
+    if (!refundTargetReceipt) return;
+    setCheckedItems((prev) => {
+      const next = { ...prev, [itemId]: checked };
+      if (refundMode === "modern" && !refundAll) {
+        const nextItems = refundItems.filter((item) => next[item.id]);
+        const nextTotal = calculateReceiptItemsRefundTotal(refundTargetReceipt, nextItems);
+        rebalanceRefundAllocationInputs(checkedRefundAllocations, nextTotal);
+      }
+      return next;
+    });
+  }
+
+  function toggleRefundAllocation(allocationId: string) {
+    if (refundMode !== "modern") return;
+    setCheckedRefundAllocations((prev) => {
+      const next = { ...prev, [allocationId]: !prev[allocationId] };
+      rebalanceRefundAllocationInputs(next, refundTargetTotal);
+      return next;
+    });
+  }
+
+  function handleRefundAllToggle(checked: boolean) {
+    if (!refundTargetReceipt) return;
+    setRefundAll(checked);
+    if (refundMode !== "modern") {
+      if (checked) setCheckedItems({});
+      return;
+    }
+    if (checked) {
+      setCheckedItems({});
+      rebalanceRefundAllocationInputs(checkedRefundAllocations, modernMaxRefundableAmount);
+      return;
+    }
+    rebalanceRefundAllocationInputs(checkedRefundAllocations, 0);
+  }
+
+  async function startRefund(receipt: Receipt) {
+    const loaded = await loadReceiptItems(receipt.id);
+    const allocations = loaded?.allocations || paymentAllocationsMap[receipt.id] || [];
+    const paymentRecordCount = (loaded?.paymentRecordIds || paymentRecordIdsMap[receipt.id] || []).length;
+    const mode = resolveRefundProcessingMode({ paymentRecordCount, allocationCount: allocations.length });
     setRefundTargetReceipt(receipt);
-    setRefundItems(receiptItemsMap[receipt.id] || []);
+    setRefundItems(loaded?.items || receiptItemsMap[receipt.id] || []);
     setCheckedItems({});
+    const initialCheckedAllocations = mode === "modern"
+      ? Object.fromEntries(allocations.map((allocation) => [allocation.id, true]))
+      : {};
+    setCheckedRefundAllocations(initialCheckedAllocations);
+    setRefundAllocationAmountInputs(
+      mode === "modern"
+        ? autoAllocateRefundAmounts(0, allocations, allocations.map((allocation) => allocation.id))
+        : {}
+    );
     setRefundAll(false);
     setRefundReason("");
     setView("refund");
@@ -2674,30 +2823,24 @@ export function ReceiptHistoryModal({
   // Refunds can't exceed money actually collected: partial-payment receipts
   // only took amount_paid (NULL = paid in full), minus prior refunds.
   function maxRefundableFor(receipt: Receipt): number {
-    const paidAmount = Number(receipt.amount_paid ?? receipt.total ?? 0);
-    const previouslyRefunded = (refundsMap[receipt.id] || []).reduce(
-      (s: number, r: any) => s + Number(r.total_amount || 0),
-      0
-    );
-    return Math.max(0, Math.round((paidAmount - previouslyRefunded) * 100) / 100);
+    if (refundMode === "modern") return modernMaxRefundableAmount;
+    return calculateReceiptMaxRefundableAmount(receipt, refundsMap[receipt.id] || []);
   }
 
   function calcRefundTotal(): number {
     if (!refundTargetReceipt) return 0;
     if (refundAll) return maxRefundableFor(refundTargetReceipt);
-    const itemsToRefund = refundItems.filter((i) => checkedItems[i.id]);
-    const receiptVat = Number(refundTargetReceipt.vat || 0);
-    const receiptSubtotal = Number(refundTargetReceipt.subtotal || 0);
-    const sub = itemsToRefund.reduce((s, i) => s + Number(i.total || i.price || 0), 0);
-    const proportionalVat = receiptSubtotal > 0 ? (sub / receiptSubtotal) * receiptVat : 0;
-    return Math.round((sub + proportionalVat) * 100) / 100;
+    return calculateReceiptItemsRefundTotal(refundTargetReceipt, selectedRefundItemRows);
   }
 
   async function processRefund() {
     if (!refundTargetReceipt) return;
     if (!refundReason.trim()) { alert("Please enter a reason."); return; }
-    const itemsToRefund = refundAll ? refundItems : refundItems.filter((i) => checkedItems[i.id]);
-    if (!refundAll && itemsToRefund.length === 0) { alert("Select at least one item."); return; }
+    if (!refundAll && selectedRefundItemRows.length === 0) { alert("Select at least one item."); return; }
+    if (refundMode === "admin_review") {
+      alert("This receipt has a payment record but no payment allocations. Refund is blocked for safety. Please ask admin to review this receipt.");
+      return;
+    }
 
     setIsProcessingRefund(true);
     const totalRefund = calcRefundTotal();
@@ -2714,35 +2857,63 @@ export function ReceiptHistoryModal({
       return;
     }
 
-    const { data: refundData, error: refundError } = await supabase
-      .from("refunds")
-      .insert([{
-        receipt_id: refundTargetReceipt.id,
-        receptionist_id: refundTargetReceipt.receptionist_id,
-        refunded_by: null,
-        reason: refundReason.trim(),
-        total_amount: totalRefund,
-        payment_method: refundTargetReceipt.payment_method,
-      }])
-      .select()
-      .single();
+    const baseRefundItemRows = selectedRefundItemRows.map((item) => ({
+      receipt_item_id: item.id,
+      service_id: item.service_id,
+      service_name: services.find((s) => s.id === item.service_id)?.name || "Unknown",
+      amount: Number(item.total || item.price || 0),
+    }));
 
-    if (refundError || !refundData) {
-      alert(`Error: ${refundError?.message || "unknown"}`);
-      setIsProcessingRefund(false);
-      return;
-    }
-
-    if (itemsToRefund.length > 0) {
-      await supabase.from("refund_items").insert(
-        itemsToRefund.map((item) => ({
-          refund_id: refundData.id,
-          receipt_item_id: item.id,
-          service_id: item.service_id,
-          service_name: services.find((s) => s.id === item.service_id)?.name || "Unknown",
-          amount: Number(item.total || item.price || 0),
-        }))
-      );
+    let result:
+      | { kind: "modern"; refundData: any; warningMessage?: string }
+      | { kind: "legacy"; refundData: any };
+    if (refundMode === "legacy") {
+      try {
+        const legacyResult = await createLegacyBackedRefund({
+          supabase,
+          receiptId: refundTargetReceipt.id,
+          receptionistId: refundTargetReceipt.receptionist_id,
+          refundedBy: null,
+          reason: refundReason.trim(),
+          totalAmount: totalRefund,
+          paymentMethod: refundTargetReceipt.payment_method || "Legacy receipt refund",
+          refundItemRows: baseRefundItemRows,
+        });
+        result = { kind: "legacy", refundData: legacyResult.refundData };
+      } catch (error) {
+        alert(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        setIsProcessingRefund(false);
+        return;
+      }
+    } else {
+      const { requests, error } = buildAllocationRefundRequests({
+        allocations: refundTargetAllocations,
+        selectedAllocationIds: selectedRefundAllocationIds,
+        requestedAmountsByAllocationId: refundAllocationAmountInputs,
+        expectedRefundAmount: totalRefund,
+      });
+      if (error) {
+        alert(error);
+        setIsProcessingRefund(false);
+        return;
+      }
+      try {
+        const modernResult = await createAllocationBackedRefund({
+          supabase,
+          receiptId: refundTargetReceipt.id,
+          receptionistId: refundTargetReceipt.receptionist_id,
+          processedBy: refundTargetReceipt.receptionist_id,
+          refundedBy: null,
+          reason: refundReason.trim(),
+          requests,
+          refundItemRows: baseRefundItemRows,
+        });
+        result = { kind: "modern", refundData: modernResult.refundData, warningMessage: modernResult.warningMessage };
+      } catch (error) {
+        alert(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        setIsProcessingRefund(false);
+        return;
+      }
     }
 
     // A fully refunded partial-payment receipt shouldn't keep chasing the
@@ -2770,11 +2941,14 @@ export function ReceiptHistoryModal({
 
     setRefundsMap((prev) => ({
       ...prev,
-      [refundTargetReceipt.id]: [refundData, ...(prev[refundTargetReceipt.id] || [])],
+      [refundTargetReceipt.id]: [result.refundData, ...(prev[refundTargetReceipt.id] || [])],
     }));
     setIsProcessingRefund(false);
+    if (result.kind === "modern" && result.warningMessage) {
+      alert(result.warningMessage);
+    }
     setView("list");
-    alert(`Refund of AED ${totalRefund.toFixed(2)} processed successfully.`);
+    alert(`Refund of AED ${Number(result.refundData.total_amount || totalRefund).toFixed(2)} processed successfully.`);
   }
 
   async function reprintReceipt(receipt: Receipt) {
@@ -3148,8 +3322,7 @@ export function ReceiptHistoryModal({
                                       </button>
                                       <button
                                         onClick={() => startRefund(receipt)}
-                                        disabled={hasRefund}
-                                        className="flex-1 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40"
+                                        className="flex-1 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-400"
                                       >
                                         Refund
                                       </button>
@@ -3186,7 +3359,7 @@ export function ReceiptHistoryModal({
                 <input
                   type="checkbox"
                   checked={refundAll}
-                  onChange={(e) => { setRefundAll(e.target.checked); setCheckedItems({}); }}
+                  onChange={(e) => handleRefundAllToggle(e.target.checked)}
                   className="h-4 w-4 rounded accent-teal-500"
                 />
                 <span className="text-sm font-semibold text-slate-700">Refund full amount</span>
@@ -3200,7 +3373,7 @@ export function ReceiptHistoryModal({
                         <input
                           type="checkbox"
                           checked={!!checkedItems[item.id]}
-                          onChange={(e) => setCheckedItems((prev) => ({ ...prev, [item.id]: e.target.checked }))}
+                          onChange={(e) => handleRefundItemToggle(item.id, e.target.checked)}
                           className="h-4 w-4 rounded accent-teal-500"
                         />
                         <span className="text-sm text-slate-800">{services.find((s) => s.id === item.service_id)?.name || "Service"}</span>
@@ -3216,6 +3389,75 @@ export function ReceiptHistoryModal({
                 <span className="text-sm font-bold text-teal-800">AED {calcRefundTotal().toFixed(2)}</span>
               </div>
 
+              {refundMode === "modern" && (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">Original payment allocations</p>
+                      <p className="mt-0.5 text-xs text-slate-500">Choose which original payment method should fund this refund.</p>
+                    </div>
+                    <p className="text-sm font-semibold text-slate-700">Target: AED {refundTargetTotal.toFixed(2)}</p>
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {refundTargetAllocations.map((allocation) => {
+                      const remaining = getRemainingAllocationAmounts(allocation);
+                      return (
+                        <label key={allocation.id} className="block rounded-2xl border border-slate-200 bg-white p-3">
+                          <div className="flex items-start gap-3">
+                            <input
+                              type="checkbox"
+                              checked={!!checkedRefundAllocations[allocation.id]}
+                              onChange={() => toggleRefundAllocation(allocation.id)}
+                              className="mt-1 h-4 w-4 rounded accent-teal-500"
+                            />
+                            <div className="flex-1">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-semibold text-slate-900">{paymentVariantLabel(allocation.method_variant)}</p>
+                                  <p className="text-xs text-slate-500">
+                                    Invoice remaining AED {remaining.invoice.toFixed(2)}
+                                    {allocation.provider_reference_number ? ` · Ref ${allocation.provider_reference_number}` : ""}
+                                  </p>
+                                </div>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={refundAllocationAmountInputs[allocation.id] || ""}
+                                  onChange={(e) => setRefundAllocationAmountInputs((prev) => ({ ...prev, [allocation.id]: e.target.value }))}
+                                  placeholder={remaining.invoice.toFixed(2)}
+                                  className="w-28 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                                />
+                              </div>
+                              {isNonRefundableSurchargeVariant(allocation.method_variant) && Number(allocation.fee_amount || 0) > 0 && (
+                                <p className="mt-2 text-xs font-medium text-amber-700">
+                                  Original fee AED {Number(allocation.fee_amount || 0).toFixed(2)} stays on record and is not refunded.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                    <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-3 py-2 text-xs text-slate-600">
+                      Selected allocation total: AED {selectedRefundAllocationTotal.toFixed(2)}
+                      {" · "}
+                      Remaining to assign: AED {Math.max(0, refundTargetTotal - selectedRefundAllocationTotal).toFixed(2)}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {refundMode === "legacy" && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  Legacy receipt refund: this receipt predates structured payment allocations, so refund uses compatibility mode.
+                </div>
+              )}
+              {refundMode === "admin_review" && (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                  This receipt has payment records but missing payment allocations. Refund is blocked for safety; ask admin to review.
+                </div>
+              )}
+
               <div>
                 <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Reason (required)</label>
                 <textarea
@@ -3230,7 +3472,13 @@ export function ReceiptHistoryModal({
               <div className="flex gap-3">
                 <button
                   onClick={processRefund}
-                  disabled={isProcessingRefund || !refundReason.trim() || (!refundAll && Object.values(checkedItems).filter(Boolean).length === 0)}
+                  disabled={
+                    isProcessingRefund
+                    || !refundReason.trim()
+                    || (!refundAll && Object.values(checkedItems).filter(Boolean).length === 0)
+                    || refundMode === "admin_review"
+                    || (refundMode === "modern" && selectedRefundAllocationIds.length === 0)
+                  }
                   className="flex-1 rounded-2xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-amber-400 disabled:opacity-50"
                 >
                   {isProcessingRefund ? "Processing…" : "Process Refund"}

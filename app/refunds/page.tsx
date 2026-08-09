@@ -2,6 +2,13 @@
 
 import { useState, useEffect } from "react";
 import { AppFrame } from "../../components/app-frame";
+import { paymentVariantLabel } from "../../lib/payment-allocation";
+import {
+  buildAllocationRefundRequests,
+  createAllocationBackedRefund,
+  getRemainingAllocationAmounts,
+  isNonRefundableSurchargeVariant,
+} from "../../lib/receipt-refunds";
 import { supabase } from "../../lib/supabase";
 import { receptionistIdsForClinic } from "../../lib/clinic-scope";
 
@@ -116,6 +123,13 @@ export default function RefundsPage() {
       updated.delete(allocationId);
     } else {
       updated.add(allocationId);
+      setRefundInvoiceAmountInputs((current) => {
+        if (String(current[allocationId] || "").trim()) return current;
+        const allocation = paymentRows.find((row) => row.id === allocationId);
+        if (!allocation) return current;
+        const remaining = getRemainingAllocationAmounts(allocation).invoice;
+        return { ...current, [allocationId]: remaining.toFixed(2) };
+      });
     }
     setCheckedAllocations(updated);
   }
@@ -140,112 +154,43 @@ export default function RefundsPage() {
         return;
       }
 
-      const invoiceRefundRequests = allocationsToRefund.map((allocation) => {
-        const remainingTreatment = Math.max(
-          0,
-          Number(allocation.treatment_net_amount || 0) - Number(allocation.refunded_treatment_amount || 0)
-        );
-        const remainingVat = Math.max(0, Number(allocation.vat_amount || 0) - Number(allocation.refunded_vat_amount || 0));
-        const remainingInvoice = Math.round((remainingTreatment + remainingVat) * 100) / 100;
-        const input = String(refundInvoiceAmountInputs[allocation.id] || "").trim();
-        const requestedInvoice = input ? Number(input) : remainingInvoice;
-        return {
-          allocation,
-          remainingTreatment,
-          remainingVat,
-          remainingInvoice,
-          requestedInvoice: Math.round(requestedInvoice * 100) / 100,
-        };
+      const { requests, error } = buildAllocationRefundRequests({
+        allocations: allocationsToRefund,
+        selectedAllocationIds: allocationsToRefund.map((row) => row.id),
+        requestedAmountsByAllocationId: refundInvoiceAmountInputs,
+        expectedRefundAmount: allocationsToRefund.reduce((sum, allocation) => {
+          const input = String(refundInvoiceAmountInputs[allocation.id] || "").trim();
+          return sum + Number(input || 0);
+        }, 0),
       });
-
-      const invalidRow = invoiceRefundRequests.find(
-        (row) =>
-          !Number.isFinite(row.requestedInvoice) ||
-          row.requestedInvoice <= 0 ||
-          row.requestedInvoice > row.remainingInvoice + 0.0001
-      );
-      if (invalidRow) {
-        setRefundMessage("Refund invoice amount must be greater than 0 and cannot exceed remaining refundable invoice amount.");
+      if (error) {
+        setRefundMessage(error);
         setIsProcessing(false);
         return;
       }
 
-      const totalRefund = invoiceRefundRequests.reduce((sum, row) => {
-        const reversedFee = Math.round(row.requestedInvoice * Number(row.allocation.fee_rate || 0) * 100) / 100;
-        return sum + row.requestedInvoice + reversedFee;
-      }, 0);
-
-      const { data: refundData, error: refundError } = await supabase
-        .from("refunds")
-        .insert([
-          {
-            receipt_id: selectedReceipt.id,
-            receptionist_id: selectedReceipt.receptionist_id,
-            reason: refundReason.trim(),
-            total_amount: totalRefund,
-            payment_method: "Allocation Refund",
-          },
-        ])
-        .select()
-        .single();
-
-      if (refundError || !refundData) {
-        setRefundMessage(`Error creating refund: ${refundError?.message || "unknown"}`);
-        setIsProcessing(false);
-        return;
-      }
-
-      const refundedBreakdown: any[] = [];
-      for (const row of invoiceRefundRequests) {
-        const ratio = row.remainingInvoice > 0 ? row.requestedInvoice / row.remainingInvoice : 0;
-        const refundedTreatment = Math.round(row.remainingTreatment * ratio * 100) / 100;
-        const refundedVat = Math.round((row.requestedInvoice - refundedTreatment) * 100) / 100;
-        const idempotencyKey = `${refundData.id}:${row.allocation.id}:${row.requestedInvoice.toFixed(2)}`;
-        const { data: allocationRefundId, error: allocationRefundError } = await supabase.rpc("create_payment_allocation_refund", {
-          p_refund_id: refundData.id,
-          p_payment_allocation_id: row.allocation.id,
-          p_refunded_treatment_amount: refundedTreatment,
-          p_refunded_vat_amount: refundedVat,
-          p_reason: refundReason.trim(),
-          p_processed_by: selectedReceipt.receptionist_id,
-          p_idempotency_key: idempotencyKey,
-        });
-        if (allocationRefundError) {
-          setRefundMessage(`Error reversing allocation ${row.allocation.id.slice(0, 8)}: ${allocationRefundError.message}`);
-          setIsProcessing(false);
-          return;
-        }
-        const reversedFee = Math.round(row.requestedInvoice * Number(row.allocation.fee_rate || 0) * 100) / 100;
-        const returnedAmount = Math.round((row.requestedInvoice + reversedFee) * 100) / 100;
-        refundedBreakdown.push({
-          id: allocationRefundId,
-          allocationId: row.allocation.id,
-          methodGroup: row.allocation.method_group,
-          methodVariant: row.allocation.method_variant,
-          refundedTreatment,
-          refundedVat,
-          reversedFee,
-          returnedAmount,
-          providerReference: row.allocation.provider_reference_number || "",
-        });
-      }
-
-      const { error: itemsError } = await supabase.from("refund_items").insert(
-        refundedBreakdown.map((item) => ({
-          refund_id: refundData.id,
+      const result = await createAllocationBackedRefund({
+        supabase,
+        receiptId: selectedReceipt.id,
+        receptionistId: selectedReceipt.receptionist_id,
+        processedBy: selectedReceipt.receptionist_id,
+        reason: refundReason.trim(),
+        requests,
+        refundItemRows: requests.map((request) => ({
           receipt_item_id: null,
           service_id: null,
-          service_name: `${item.methodVariant} allocation`,
-          amount: item.returnedAmount,
-        }))
-      );
-      if (itemsError) {
-        setRefundMessage(`Refund created, but refund item rows failed: ${itemsError.message}`);
-      }
+          service_name: `${paymentVariantLabel(request.allocation.method_variant)} allocation`,
+          amount: request.refundedTreatmentAmount,
+        })),
+      });
 
-      setRefundMessage(`✓ Refund processed for AED ${totalRefund.toFixed(2)}`);
-      setLastRefund(refundData);
-      setRefundedItems(refundedBreakdown);
+      setRefundMessage(
+        result.warningMessage
+          ? `✓ Refund processed for AED ${Number(result.refundData.total_amount || 0).toFixed(2)}. ${result.warningMessage}`
+          : `✓ Refund processed for AED ${Number(result.refundData.total_amount || 0).toFixed(2)}`
+      );
+      setLastRefund(result.refundData);
+      setRefundedItems(result.breakdown);
       setSelectedReceipt(null);
       setCheckedAllocations(new Set());
       setRefundInvoiceAmountInputs({});
@@ -269,8 +214,18 @@ export default function RefundsPage() {
       .map(
         (item) => `
           <div class="row item-row">
-            <span class="item-name">${item.methodVariant || "Allocation"}${item.providerReference ? ` (${item.providerReference})` : ""}</span>
-            <span class="amount">-AED ${Number(item.returnedAmount || 0).toFixed(2)}</span>
+            <span class="item-name">${item.methodLabel || "Allocation"}${item.providerReference ? ` (${item.providerReference})` : ""}</span>
+            <span class="amount">-AED ${Number(item.totalReturnedAmount || 0).toFixed(2)}</span>
+          </div>`
+      )
+      .join("");
+    const feeHtml = refundedItems
+      .filter((item) => Number(item.nonRefundableFeeAmount || 0) > 0)
+      .map(
+        (item) => `
+          <div class="row">
+            <span>Non-refundable ${item.methodLabel} fee</span>
+            <span>AED ${Number(item.nonRefundableFeeAmount || 0).toFixed(2)}</span>
           </div>`
       )
       .join("");
@@ -349,6 +304,7 @@ export default function RefundsPage() {
 
         <div class="row"><span>Reason / السبب</span><span style="text-align: right; font-size: 9px;">: ${lastRefund.reason || "-"}</span></div>
         <div class="row"><span>Payment Method</span><span>: ${lastRefund.payment_method || "-"}</span></div>
+        ${feeHtml ? `<div class="hr"></div>${feeHtml}` : ""}
 
         <div class="hr"></div>
 
@@ -483,12 +439,7 @@ export default function RefundsPage() {
 
             <div className="mt-4 space-y-2">
               {paymentRows.map((allocation) => {
-                const remainingTreatment = Math.max(
-                  0,
-                  Number(allocation.treatment_net_amount || 0) - Number(allocation.refunded_treatment_amount || 0)
-                );
-                const remainingVat = Math.max(0, Number(allocation.vat_amount || 0) - Number(allocation.refunded_vat_amount || 0));
-                const remainingInvoice = Math.round((remainingTreatment + remainingVat) * 100) / 100;
+                const remainingInvoice = getRemainingAllocationAmounts(allocation).invoice;
                 return (
                 <label
                   key={allocation.id}
@@ -501,10 +452,15 @@ export default function RefundsPage() {
                     className="h-4 w-4 rounded border-slate-300"
                   />
                   <div className="flex-1">
-                    <p className="font-medium text-slate-900">{String(allocation.method_variant || "").replace("_", " ")}</p>
+                    <p className="font-medium text-slate-900">{paymentVariantLabel(allocation.method_variant)}</p>
                     <p className="text-xs text-slate-500">
-                      Invoice remaining: AED {remainingInvoice.toFixed(2)} · Fee rate: {(Number(allocation.fee_rate || 0) * 100).toFixed(1)}%
+                      Invoice remaining: AED {remainingInvoice.toFixed(2)}
                     </p>
+                    {isNonRefundableSurchargeVariant(allocation.method_variant) && Number(allocation.fee_amount || 0) > 0 && (
+                      <p className="mt-1 text-xs font-medium text-amber-700">
+                        Original fee AED {Number(allocation.fee_amount || 0).toFixed(2)} is non-refundable.
+                      </p>
+                    )}
                     <input
                       type="number"
                       min="0"
