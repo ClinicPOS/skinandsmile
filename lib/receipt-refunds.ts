@@ -7,6 +7,223 @@ export type ReceiptRefundLike = {
   total_amount?: number | null;
 };
 
+// ─── Snapshot-backed item refund types ──────────────────────────────────────
+
+/** Classification of a receipt's snapshot coverage for refund routing. */
+export type ReceiptSnapshotStatus = "snapshot" | "legacy" | "mixed";
+
+/**
+ * Immutable historical values from receipt_items snapshot fields.
+ * Derived entirely from saved receipt_items data — never from current services.
+ */
+export type ReceiptItemRefundSnapshot = {
+  receiptItemId: string;
+  serviceName: string;
+  treatmentAmount: number;  // = taxable_amount
+  vatAmount: number;        // = vat_amount
+  invoiceAmount: number;    // = final_line_total
+};
+
+/** Remaining refundable amounts after subtracting all prior snapshot refund_items. */
+export type ReceiptItemRemainingRefundable = {
+  receiptItemId: string;
+  remainingTreatment: number;
+  remainingVat: number;
+  remainingInvoice: number;
+  isFullyRefunded: boolean;
+};
+
+// ─── Snapshot helpers ────────────────────────────────────────────────────────
+
+/**
+ * Classify whether a set of receipt_items rows for one receipt is snapshot-backed,
+ * legacy, or mixed/incomplete.
+ *
+ * SNAPSHOT:  ALL items have taxable_amount, vat_amount, and final_line_total non-null.
+ * LEGACY:    ALL items lack all three snapshot fields.
+ * MIXED:     Any other combination — treated as data integrity error, refund blocked.
+ */
+export function classifyReceiptSnapshotStatus(
+  items: Array<{ taxable_amount?: number | null; vat_amount?: number | null; final_line_total?: number | null }>
+): ReceiptSnapshotStatus {
+  if (items.length === 0) return "legacy";
+  const snapshotCount = items.filter(
+    (item) => item.taxable_amount != null && item.vat_amount != null && item.final_line_total != null
+  ).length;
+  if (snapshotCount === items.length) return "snapshot";
+  if (snapshotCount === 0) return "legacy";
+  return "mixed";
+}
+
+/**
+ * Extract the immutable refund snapshot from a snapshot-backed receipt_items row.
+ * Returns null if the item is not snapshot-backed (missing any required field).
+ */
+export function getReceiptItemRefundSnapshot(item: {
+  id: string;
+  service_name_snapshot?: string | null;
+  service_id?: string | null;
+  taxable_amount?: number | null;
+  vat_amount?: number | null;
+  final_line_total?: number | null;
+}): ReceiptItemRefundSnapshot | null {
+  if (item.taxable_amount == null || item.vat_amount == null || item.final_line_total == null) {
+    return null;
+  }
+  return {
+    receiptItemId: item.id,
+    serviceName: String(item.service_name_snapshot || "Service"),
+    treatmentAmount: roundCurrency(Number(item.taxable_amount)),
+    vatAmount: roundCurrency(Number(item.vat_amount)),
+    invoiceAmount: roundCurrency(Number(item.final_line_total)),
+  };
+}
+
+/**
+ * Compute the remaining refundable amounts for one snapshot-backed item,
+ * subtracting all prior refund_items rows that have non-null refunded_invoice_amount.
+ *
+ * Uses minor-unit arithmetic throughout to avoid floating-point drift.
+ * Clamps to [0, historical] on each component.
+ * Throws if prior refund totals exceed the historical snapshot values —
+ * this indicates corrupt data and must not be silently accepted.
+ */
+export function getReceiptItemRemainingRefundable(
+  snapshot: ReceiptItemRefundSnapshot,
+  priorRefundItems: Array<{
+    receipt_item_id?: string | null;
+    refunded_treatment_amount?: number | null;
+    refunded_vat_amount?: number | null;
+    refunded_invoice_amount?: number | null;
+  }>
+): ReceiptItemRemainingRefundable {
+  // Sum only snapshot-backed prior refunds (refunded_invoice_amount non-null) for this item.
+  const relevant = priorRefundItems.filter(
+    (row) => row.receipt_item_id === snapshot.receiptItemId && row.refunded_invoice_amount != null
+  );
+
+  const priorTreatmentMinor = relevant.reduce(
+    (sum, row) => sum + toMinorUnits(Number(row.refunded_treatment_amount ?? 0)),
+    0
+  );
+  const priorVatMinor = relevant.reduce(
+    (sum, row) => sum + toMinorUnits(Number(row.refunded_vat_amount ?? 0)),
+    0
+  );
+  const priorInvoiceMinor = relevant.reduce(
+    (sum, row) => sum + toMinorUnits(Number(row.refunded_invoice_amount ?? 0)),
+    0
+  );
+
+  const historicalTreatmentMinor = toMinorUnits(snapshot.treatmentAmount);
+  const historicalVatMinor = toMinorUnits(snapshot.vatAmount);
+  const historicalInvoiceMinor = toMinorUnits(snapshot.invoiceAmount);
+
+  // Corrupt-data guard: prior refunds must not exceed historical values.
+  if (priorTreatmentMinor > historicalTreatmentMinor + 1) {
+    throw new Error(
+      `Corrupt refund data for item ${snapshot.receiptItemId}: prior refunded treatment ` +
+      `${fromMinorUnits(priorTreatmentMinor).toFixed(2)} exceeds historical ` +
+      `${snapshot.treatmentAmount.toFixed(2)}.`
+    );
+  }
+  if (priorVatMinor > historicalVatMinor + 1) {
+    throw new Error(
+      `Corrupt refund data for item ${snapshot.receiptItemId}: prior refunded VAT ` +
+      `${fromMinorUnits(priorVatMinor).toFixed(2)} exceeds historical ` +
+      `${snapshot.vatAmount.toFixed(2)}.`
+    );
+  }
+  if (priorInvoiceMinor > historicalInvoiceMinor + 1) {
+    throw new Error(
+      `Corrupt refund data for item ${snapshot.receiptItemId}: prior refunded invoice ` +
+      `${fromMinorUnits(priorInvoiceMinor).toFixed(2)} exceeds historical ` +
+      `${snapshot.invoiceAmount.toFixed(2)}.`
+    );
+  }
+
+  const remainingTreatmentMinor = Math.max(0, historicalTreatmentMinor - priorTreatmentMinor);
+  const remainingVatMinor = Math.max(0, historicalVatMinor - priorVatMinor);
+  const remainingInvoiceMinor = Math.max(0, historicalInvoiceMinor - priorInvoiceMinor);
+
+  return {
+    receiptItemId: snapshot.receiptItemId,
+    remainingTreatment: fromMinorUnits(remainingTreatmentMinor),
+    remainingVat: fromMinorUnits(remainingVatMinor),
+    remainingInvoice: fromMinorUnits(remainingInvoiceMinor),
+    isFullyRefunded: remainingInvoiceMinor === 0,
+  };
+}
+
+/**
+ * Sum the remaining invoice amounts for a set of selected snapshot-backed items.
+ * Use this as the refund target for snapshot receipts instead of
+ * calculateReceiptItemsRefundTotal (which is kept for legacy receipts).
+ */
+export function calculateSnapshotItemsRefundTotal(
+  remainingItems: ReceiptItemRemainingRefundable[]
+): number {
+  const totalMinor = remainingItems.reduce(
+    (sum, item) => sum + toMinorUnits(item.remainingInvoice),
+    0
+  );
+  return fromMinorUnits(totalMinor);
+}
+
+/**
+ * Build refund_items insert rows for snapshot-backed items (full remaining refund per item).
+ *
+ * amount = refunded_treatment_amount  (preserves CEO dashboard compatibility —
+ *   the dashboard sums amount as "treatment/service value").
+ * All three new snapshot columns are also populated for per-item audit.
+ */
+export function buildSnapshotRefundItemRows(
+  items: Array<{
+    snapshot: ReceiptItemRefundSnapshot;
+    remaining: ReceiptItemRemainingRefundable;
+    serviceId?: string | null;
+  }>
+): RefundItemInsertRow[] {
+  return items.map(({ snapshot, remaining, serviceId }) => ({
+    receipt_item_id: snapshot.receiptItemId,
+    service_id: serviceId ?? null,
+    service_name: snapshot.serviceName,
+    amount: roundCurrency(remaining.remainingTreatment),
+    refunded_treatment_amount: roundCurrency(remaining.remainingTreatment),
+    refunded_vat_amount: roundCurrency(remaining.remainingVat),
+    refunded_invoice_amount: roundCurrency(remaining.remainingInvoice),
+  }));
+}
+
+/**
+ * [Future use — not exposed in Phase 4 UI]
+ * For a partial invoice amount against one snapshot item, compute
+ * the proportional treatment/VAT split using minor-unit arithmetic.
+ * requestedInvoice must be <= remaining.remainingInvoice.
+ */
+export function splitSnapshotItemPartialRefund(
+  remaining: ReceiptItemRemainingRefundable,
+  requestedInvoice: number
+): { refundedTreatment: number; refundedVat: number; refundedInvoice: number } {
+  const requestedMinor = toMinorUnits(requestedInvoice);
+  const remainingInvoiceMinor = toMinorUnits(remaining.remainingInvoice);
+  const remainingTreatmentMinor = toMinorUnits(remaining.remainingTreatment);
+
+  if (remainingInvoiceMinor <= 0 || requestedMinor <= 0) {
+    return { refundedTreatment: 0, refundedVat: 0, refundedInvoice: 0 };
+  }
+
+  const clampedMinor = Math.min(requestedMinor, remainingInvoiceMinor);
+  const treatmentMinor = Math.round((remainingTreatmentMinor * clampedMinor) / remainingInvoiceMinor);
+  const vatMinor = clampedMinor - treatmentMinor;
+
+  return {
+    refundedTreatment: fromMinorUnits(treatmentMinor),
+    refundedVat: fromMinorUnits(vatMinor),
+    refundedInvoice: fromMinorUnits(clampedMinor),
+  };
+}
+
 export type RefundableReceiptLike = {
   id: string;
   receipt_number?: number | null;
@@ -32,6 +249,10 @@ export type RefundItemInsertRow = {
   service_id: string | null;
   service_name: string;
   amount: number;
+  // Populated for snapshot-backed refunds; NULL for legacy.
+  refunded_treatment_amount?: number | null;
+  refunded_vat_amount?: number | null;
+  refunded_invoice_amount?: number | null;
 };
 
 export type AllocationRefundDraftRequest = {
@@ -313,6 +534,10 @@ export async function createAllocationBackedRefund(params: {
         service_id: row.service_id,
         service_name: row.service_name,
         amount: roundCurrency(row.amount),
+        // Pass snapshot columns through — NULL for legacy rows, populated for snapshot rows.
+        ...(row.refunded_treatment_amount != null ? { refunded_treatment_amount: roundCurrency(row.refunded_treatment_amount) } : {}),
+        ...(row.refunded_vat_amount != null ? { refunded_vat_amount: roundCurrency(row.refunded_vat_amount) } : {}),
+        ...(row.refunded_invoice_amount != null ? { refunded_invoice_amount: roundCurrency(row.refunded_invoice_amount) } : {}),
       }))
     );
     if (refundItemsError) {

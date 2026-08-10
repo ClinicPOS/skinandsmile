@@ -36,11 +36,17 @@ import {
   buildAllocationRefundRequests,
   calculateReceiptItemsRefundTotal,
   calculateReceiptMaxRefundableAmount,
+  calculateSnapshotItemsRefundTotal,
+  buildSnapshotRefundItemRows,
+  classifyReceiptSnapshotStatus,
   createAllocationBackedRefund,
   createLegacyBackedRefund,
+  getReceiptItemRefundSnapshot,
+  getReceiptItemRemainingRefundable,
   getRemainingAllocationAmounts,
   isNonRefundableSurchargeVariant,
   resolveRefundProcessingMode,
+  type ReceiptItemRemainingRefundable,
 } from "../lib/receipt-refunds";
 import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 import { computeTreatmentPlanRollup } from "../lib/treatment-plan-rollup";
@@ -2441,6 +2447,7 @@ export function ReceiptHistoryModal({
   const [view, setView] = useState<"list" | "refund">("list");
   const [refundTargetReceipt, setRefundTargetReceipt] = useState<Receipt | null>(null);
   const [refundItems, setRefundItems] = useState<any[]>([]);
+  const [priorRefundItemsMap, setPriorRefundItemsMap] = useState<Record<string, any[]>>({});
   const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({});
   const [checkedRefundAllocations, setCheckedRefundAllocations] = useState<Record<string, boolean>>({});
   const [refundAllocationAmountInputs, setRefundAllocationAmountInputs] = useState<Record<string, string>>({});
@@ -2456,6 +2463,7 @@ export function ReceiptHistoryModal({
       setExpandedReceiptId(null);
       setReceiptItemsMap({});
       setRefundsMap({});
+      setPriorRefundItemsMap({});
       setPaymentRecordIdsMap({});
       setPaymentAllocationsMap({});
       loadHistory();
@@ -2645,14 +2653,44 @@ export function ReceiptHistoryModal({
     [checkedItems, refundAll, refundItems]
   );
 
+  // Snapshot classification for the target receipt's items.
+  const receiptSnapshotStatus = useMemo(
+    () => classifyReceiptSnapshotStatus(refundItems),
+    [refundItems]
+  );
+
+  // Per-item remaining refundable values (snapshot receipts only).
+  const itemRemainingMap = useMemo((): Record<string, ReceiptItemRemainingRefundable> => {
+    if (receiptSnapshotStatus !== "snapshot" || !refundTargetReceipt) return {};
+    const priorRows = priorRefundItemsMap[refundTargetReceipt.id] || [];
+    const result: Record<string, ReceiptItemRemainingRefundable> = {};
+    for (const item of refundItems) {
+      const snapshot = getReceiptItemRefundSnapshot(item);
+      if (!snapshot) continue;
+      try {
+        result[item.id] = getReceiptItemRemainingRefundable(snapshot, priorRows);
+      } catch {
+        // corrupt data — leave out of map; will be surfaced during processRefund
+      }
+    }
+    return result;
+  }, [receiptSnapshotStatus, refundTargetReceipt, refundItems, priorRefundItemsMap]);
+
   const refundTargetTotal = useMemo(() => {
     if (!refundTargetReceipt) return 0;
+    if (receiptSnapshotStatus === "snapshot") {
+      // For snapshot receipts, total = sum of remaining invoice for selected (or all) items.
+      const targetItems = refundAll
+        ? Object.values(itemRemainingMap).filter((r) => !r.isFullyRefunded)
+        : Object.values(itemRemainingMap).filter((r) => checkedItems[r.receiptItemId] && !r.isFullyRefunded);
+      return calculateSnapshotItemsRefundTotal(targetItems);
+    }
     if (refundAll) {
       if (refundMode === "modern") return modernMaxRefundableAmount;
       return calculateReceiptMaxRefundableAmount(refundTargetReceipt, refundsMap[refundTargetReceipt.id] || []);
     }
     return calculateReceiptItemsRefundTotal(refundTargetReceipt, selectedRefundItemRows);
-  }, [modernMaxRefundableAmount, refundAll, refundMode, refundTargetReceipt, refundsMap, selectedRefundItemRows]);
+  }, [receiptSnapshotStatus, itemRemainingMap, checkedItems, refundAll, modernMaxRefundableAmount, refundMode, refundTargetReceipt, refundsMap, selectedRefundItemRows]);
 
   const selectedRefundAllocationIds = useMemo(
     () => Object.entries(checkedRefundAllocations).filter(([, value]) => value).map(([key]) => key),
@@ -2678,8 +2716,16 @@ export function ReceiptHistoryModal({
     setCheckedItems((prev) => {
       const next = { ...prev, [itemId]: checked };
       if (refundMode === "modern" && !refundAll) {
-        const nextItems = refundItems.filter((item) => next[item.id]);
-        const nextTotal = calculateReceiptItemsRefundTotal(refundTargetReceipt, nextItems);
+        let nextTotal: number;
+        if (receiptSnapshotStatus === "snapshot") {
+          const selectedRemaining = Object.values(itemRemainingMap).filter(
+            (r) => next[r.receiptItemId] && !r.isFullyRefunded
+          );
+          nextTotal = calculateSnapshotItemsRefundTotal(selectedRemaining);
+        } else {
+          const nextItems = refundItems.filter((item) => next[item.id]);
+          nextTotal = calculateReceiptItemsRefundTotal(refundTargetReceipt, nextItems);
+        }
         rebalanceRefundAllocationInputs(checkedRefundAllocations, nextTotal);
       }
       return next;
@@ -2704,7 +2750,10 @@ export function ReceiptHistoryModal({
     }
     if (checked) {
       setCheckedItems({});
-      rebalanceRefundAllocationInputs(checkedRefundAllocations, modernMaxRefundableAmount);
+      const allTotal = receiptSnapshotStatus === "snapshot"
+        ? calculateSnapshotItemsRefundTotal(Object.values(itemRemainingMap).filter((r) => !r.isFullyRefunded))
+        : modernMaxRefundableAmount;
+      rebalanceRefundAllocationInputs(checkedRefundAllocations, allTotal);
       return;
     }
     rebalanceRefundAllocationInputs(checkedRefundAllocations, 0);
@@ -2712,11 +2761,26 @@ export function ReceiptHistoryModal({
 
   async function startRefund(receipt: Receipt) {
     const loaded = await loadReceiptItems(receipt.id);
+    const items = loaded?.items || receiptItemsMap[receipt.id] || [];
     const allocations = loaded?.allocations || paymentAllocationsMap[receipt.id] || [];
     const paymentRecordCount = (loaded?.paymentRecordIds || paymentRecordIdsMap[receipt.id] || []).length;
     const mode = resolveRefundProcessingMode({ paymentRecordCount, allocationCount: allocations.length });
+    // Load prior refund_items for per-item remaining calculations (snapshot receipts).
+    if (!(receipt.id in priorRefundItemsMap)) {
+      const loadedRefunds = loaded?.refunds || refundsMap[receipt.id] || [];
+      const refundIds = loadedRefunds.map((r: any) => r.id);
+      if (refundIds.length > 0) {
+        const { data: riRows } = await supabase
+          .from("refund_items")
+          .select("id, refund_id, receipt_item_id, refunded_treatment_amount, refunded_vat_amount, refunded_invoice_amount, amount")
+          .in("refund_id", refundIds);
+        setPriorRefundItemsMap((prev) => ({ ...prev, [receipt.id]: riRows || [] }));
+      } else {
+        setPriorRefundItemsMap((prev) => ({ ...prev, [receipt.id]: [] }));
+      }
+    }
     setRefundTargetReceipt(receipt);
-    setRefundItems(loaded?.items || receiptItemsMap[receipt.id] || []);
+    setRefundItems(items);
     setCheckedItems({});
     const initialCheckedAllocations = mode === "modern"
       ? Object.fromEntries(allocations.map((allocation) => [allocation.id, true]))
@@ -2834,12 +2898,21 @@ export function ReceiptHistoryModal({
   // Refunds can't exceed money actually collected: partial-payment receipts
   // only took amount_paid (NULL = paid in full), minus prior refunds.
   function maxRefundableFor(receipt: Receipt): number {
+    if (receiptSnapshotStatus === "snapshot") {
+      return calculateSnapshotItemsRefundTotal(Object.values(itemRemainingMap).filter((r) => !r.isFullyRefunded));
+    }
     if (refundMode === "modern") return modernMaxRefundableAmount;
     return calculateReceiptMaxRefundableAmount(receipt, refundsMap[receipt.id] || []);
   }
 
   function calcRefundTotal(): number {
     if (!refundTargetReceipt) return 0;
+    if (receiptSnapshotStatus === "snapshot") {
+      const targetItems = refundAll
+        ? Object.values(itemRemainingMap).filter((r) => !r.isFullyRefunded)
+        : Object.values(itemRemainingMap).filter((r) => checkedItems[r.receiptItemId] && !r.isFullyRefunded);
+      return calculateSnapshotItemsRefundTotal(targetItems);
+    }
     if (refundAll) return maxRefundableFor(refundTargetReceipt);
     return calculateReceiptItemsRefundTotal(refundTargetReceipt, selectedRefundItemRows);
   }
@@ -2847,7 +2920,28 @@ export function ReceiptHistoryModal({
   async function processRefund() {
     if (!refundTargetReceipt) return;
     if (!refundReason.trim()) { alert("Please enter a reason."); return; }
-    if (!refundAll && selectedRefundItemRows.length === 0) { alert("Select at least one item."); return; }
+
+    // Mixed/incomplete receipt: block with explicit error.
+    if (receiptSnapshotStatus === "mixed") {
+      alert("This receipt contains incomplete historical pricing data and cannot be refunded automatically. Please contact an administrator.");
+      return;
+    }
+
+    if (receiptSnapshotStatus === "snapshot") {
+      // For snapshot receipts, item selection is required.
+      const hasCheckedNonFullyRefunded = refundAll
+        ? Object.values(itemRemainingMap).some((r) => !r.isFullyRefunded)
+        : Object.values(itemRemainingMap).some((r) => checkedItems[r.receiptItemId] && !r.isFullyRefunded);
+      if (!hasCheckedNonFullyRefunded) {
+        alert("Select at least one item to refund.");
+        setIsProcessingRefund(false);
+        return;
+      }
+    } else if (!refundAll && selectedRefundItemRows.length === 0) {
+      alert("Select at least one item.");
+      return;
+    }
+
     if (refundMode === "admin_review") {
       alert("This receipt has a payment record but no payment allocations. Refund is blocked for safety. Please ask admin to review this receipt.");
       return;
@@ -2868,12 +2962,32 @@ export function ReceiptHistoryModal({
       return;
     }
 
-    const baseRefundItemRows = selectedRefundItemRows.map((item) => ({
-      receipt_item_id: item.id,
-      service_id: item.service_id,
-      service_name: services.find((s) => s.id === item.service_id)?.name || "Unknown",
-      amount: Number(item.total || item.price || 0),
-    }));
+    // Build refund item rows.
+    let baseRefundItemRows: ReturnType<typeof buildSnapshotRefundItemRows>;
+    if (receiptSnapshotStatus === "snapshot") {
+      const targetRemaining = refundAll
+        ? Object.values(itemRemainingMap).filter((r) => !r.isFullyRefunded)
+        : Object.values(itemRemainingMap).filter((r) => checkedItems[r.receiptItemId] && !r.isFullyRefunded);
+      const snapshotArgs = targetRemaining.map((remaining) => {
+        const item = refundItems.find((i: any) => i.id === remaining.receiptItemId);
+        const snapshot = getReceiptItemRefundSnapshot(item)!;
+        return { snapshot, remaining, serviceId: item?.service_id ?? null };
+      });
+      try {
+        baseRefundItemRows = buildSnapshotRefundItemRows(snapshotArgs);
+      } catch (err) {
+        alert(`Refund data error: ${err instanceof Error ? err.message : String(err)}`);
+        setIsProcessingRefund(false);
+        return;
+      }
+    } else {
+      baseRefundItemRows = selectedRefundItemRows.map((item: any) => ({
+        receipt_item_id: item.id,
+        service_id: item.service_id,
+        service_name: item.service_name_snapshot || services.find((s: any) => s.id === item.service_id)?.name || "Unknown",
+        amount: Number(item.total || item.price || 0),
+      }));
+    }
 
     let result:
       | { kind: "modern"; refundData: any; warningMessage?: string }
@@ -3349,107 +3463,131 @@ export function ReceiptHistoryModal({
                 </p>
               </div>
 
-              <label className="flex cursor-pointer items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={refundAll}
-                  onChange={(e) => handleRefundAllToggle(e.target.checked)}
-                  className="h-4 w-4 rounded accent-teal-500"
-                />
-                <span className="text-sm font-semibold text-slate-700">Refund full amount</span>
-              </label>
-
-              {!refundAll && (
-                <div className="space-y-2">
-                  {refundItems.map((item) => (
-                    <label key={item.id} className="flex cursor-pointer items-center justify-between rounded-2xl border border-slate-200 bg-white p-3 hover:bg-slate-50">
-                      <div className="flex items-center gap-3">
-                        <input
-                          type="checkbox"
-                          checked={!!checkedItems[item.id]}
-                          onChange={(e) => handleRefundItemToggle(item.id, e.target.checked)}
-                          className="h-4 w-4 rounded accent-teal-500"
-                        />
-                        <span className="text-sm text-slate-800">{services.find((s) => s.id === item.service_id)?.name || "Service"}</span>
-                      </div>
-                      <span className="text-sm font-semibold text-slate-900">AED {Number(item.total || item.price || 0).toFixed(2)}</span>
-                    </label>
-                  ))}
+              {receiptSnapshotStatus === "mixed" && (
+                <div className="rounded-2xl border border-rose-300 bg-rose-50 p-3 text-sm font-medium text-rose-800">
+                  This receipt contains incomplete historical pricing data and cannot be refunded automatically. Please contact an administrator.
                 </div>
               )}
 
-              <div className="flex justify-between rounded-2xl border border-teal-200 bg-teal-50 px-4 py-3">
-                <span className="text-sm font-bold text-teal-800">Refund Total</span>
-                <span className="text-sm font-bold text-teal-800">AED {calcRefundTotal().toFixed(2)}</span>
-              </div>
+              {receiptSnapshotStatus !== "mixed" && (
+                <>
+                  <label className="flex cursor-pointer items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={refundAll}
+                      onChange={(e) => handleRefundAllToggle(e.target.checked)}
+                      className="h-4 w-4 rounded accent-teal-500"
+                    />
+                    <span className="text-sm font-semibold text-slate-700">Refund full amount</span>
+                  </label>
 
-              {refundMode === "modern" && (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold text-slate-900">Original payment allocations</p>
-                      <p className="mt-0.5 text-xs text-slate-500">Choose which original payment method should fund this refund.</p>
-                    </div>
-                    <p className="text-sm font-semibold text-slate-700">Target: AED {refundTargetTotal.toFixed(2)}</p>
-                  </div>
-                  <div className="mt-3 space-y-2">
-                    {refundTargetAllocations.map((allocation) => {
-                      const remaining = getRemainingAllocationAmounts(allocation);
-                      return (
-                        <label key={allocation.id} className="block rounded-2xl border border-slate-200 bg-white p-3">
-                          <div className="flex items-start gap-3">
-                            <input
-                              type="checkbox"
-                              checked={!!checkedRefundAllocations[allocation.id]}
-                              onChange={() => toggleRefundAllocation(allocation.id)}
-                              className="mt-1 h-4 w-4 rounded accent-teal-500"
-                            />
-                            <div className="flex-1">
-                              <div className="flex items-start justify-between gap-3">
-                                <div>
-                                  <p className="text-sm font-semibold text-slate-900">{paymentVariantLabel(allocation.method_variant)}</p>
-                                  <p className="text-xs text-slate-500">
-                                    Invoice remaining AED {remaining.invoice.toFixed(2)}
-                                    {allocation.provider_reference_number ? ` · Ref ${allocation.provider_reference_number}` : ""}
-                                  </p>
-                                </div>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={refundAllocationAmountInputs[allocation.id] || ""}
-                                  onChange={(e) => setRefundAllocationAmountInputs((prev) => ({ ...prev, [allocation.id]: e.target.value }))}
-                                  placeholder={remaining.invoice.toFixed(2)}
-                                  className="w-28 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
-                                />
-                              </div>
-                              {isNonRefundableSurchargeVariant(allocation.method_variant) && Number(allocation.fee_amount || 0) > 0 && (
-                                <p className="mt-2 text-xs font-medium text-amber-700">
-                                  Original fee AED {Number(allocation.fee_amount || 0).toFixed(2)} stays on record and is not refunded.
-                                </p>
-                              )}
+                  {!refundAll && (
+                    <div className="space-y-2">
+                      {refundItems.map((item: any) => {
+                        const remaining = receiptSnapshotStatus === "snapshot" ? itemRemainingMap[item.id] : null;
+                        const isDisabled = remaining?.isFullyRefunded === true;
+                        const displayName = item.service_name_snapshot || services.find((s: any) => s.id === item.service_id)?.name || "Service";
+                        const displayAmount = remaining != null
+                          ? `AED ${remaining.remainingInvoice.toFixed(2)} remaining`
+                          : `AED ${Number(item.total || item.price || 0).toFixed(2)}`;
+                        return (
+                          <label
+                            key={item.id}
+                            className={`flex cursor-pointer items-center justify-between rounded-2xl border border-slate-200 p-3 ${isDisabled ? "bg-slate-100 opacity-60 cursor-not-allowed" : "bg-white hover:bg-slate-50"}`}
+                          >
+                            <div className="flex items-center gap-3">
+                              <input
+                                type="checkbox"
+                                checked={!isDisabled && !!checkedItems[item.id]}
+                                onChange={(e) => !isDisabled && handleRefundItemToggle(item.id, e.target.checked)}
+                                disabled={isDisabled}
+                                className="h-4 w-4 rounded accent-teal-500"
+                              />
+                              <span className="text-sm text-slate-800">{displayName}</span>
                             </div>
-                          </div>
-                        </label>
-                      );
-                    })}
-                    <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-3 py-2 text-xs text-slate-600">
-                      Selected allocation total: AED {selectedRefundAllocationTotal.toFixed(2)}
-                      {" · "}
-                      Remaining to assign: AED {Math.max(0, refundTargetTotal - selectedRefundAllocationTotal).toFixed(2)}
+                            <span className="text-sm font-semibold text-slate-900">
+                              {isDisabled ? <span className="text-xs font-medium text-slate-400">Fully Refunded</span> : displayAmount}
+                            </span>
+                          </label>
+                        );
+                      })}
                     </div>
+                  )}
+
+                  <div className="flex justify-between rounded-2xl border border-teal-200 bg-teal-50 px-4 py-3">
+                    <span className="text-sm font-bold text-teal-800">Refund Total</span>
+                    <span className="text-sm font-bold text-teal-800">AED {calcRefundTotal().toFixed(2)}</span>
                   </div>
-                </div>
-              )}
-              {refundMode === "legacy" && (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                  Legacy receipt refund: this receipt predates structured payment allocations, so refund uses compatibility mode.
-                </div>
-              )}
-              {refundMode === "admin_review" && (
-                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
-                  This receipt has payment records but missing payment allocations. Refund is blocked for safety; ask admin to review.
-                </div>
+
+                  {refundMode === "modern" && (
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900">Original payment allocations</p>
+                          <p className="mt-0.5 text-xs text-slate-500">Choose which original payment method should fund this refund.</p>
+                        </div>
+                        <p className="text-sm font-semibold text-slate-700">Target: AED {refundTargetTotal.toFixed(2)}</p>
+                      </div>
+                      <div className="mt-3 space-y-2">
+                        {refundTargetAllocations.map((allocation) => {
+                          const remaining = getRemainingAllocationAmounts(allocation);
+                          return (
+                            <label key={allocation.id} className="block rounded-2xl border border-slate-200 bg-white p-3">
+                              <div className="flex items-start gap-3">
+                                <input
+                                  type="checkbox"
+                                  checked={!!checkedRefundAllocations[allocation.id]}
+                                  onChange={() => toggleRefundAllocation(allocation.id)}
+                                  className="mt-1 h-4 w-4 rounded accent-teal-500"
+                                />
+                                <div className="flex-1">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                      <p className="text-sm font-semibold text-slate-900">{paymentVariantLabel(allocation.method_variant)}</p>
+                                      <p className="text-xs text-slate-500">
+                                        Invoice remaining AED {remaining.invoice.toFixed(2)}
+                                        {allocation.provider_reference_number ? ` · Ref ${allocation.provider_reference_number}` : ""}
+                                      </p>
+                                    </div>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="0.01"
+                                      value={refundAllocationAmountInputs[allocation.id] || ""}
+                                      onChange={(e) => setRefundAllocationAmountInputs((prev) => ({ ...prev, [allocation.id]: e.target.value }))}
+                                      placeholder={remaining.invoice.toFixed(2)}
+                                      className="w-28 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
+                                    />
+                                  </div>
+                                  {isNonRefundableSurchargeVariant(allocation.method_variant) && Number(allocation.fee_amount || 0) > 0 && (
+                                    <p className="mt-2 text-xs font-medium text-amber-700">
+                                      Original fee AED {Number(allocation.fee_amount || 0).toFixed(2)} stays on record and is not refunded.
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            </label>
+                          );
+                        })}
+                        <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-3 py-2 text-xs text-slate-600">
+                          Selected allocation total: AED {selectedRefundAllocationTotal.toFixed(2)}
+                          {" · "}
+                          Remaining to assign: AED {Math.max(0, refundTargetTotal - selectedRefundAllocationTotal).toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {refundMode === "legacy" && (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                      Legacy receipt refund: this receipt predates structured payment allocations, so refund uses compatibility mode.
+                    </div>
+                  )}
+                  {refundMode === "admin_review" && (
+                    <div className="rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                      This receipt has payment records but missing payment allocations. Refund is blocked for safety; ask admin to review.
+                    </div>
+                  )}
+                </>
               )}
 
               <div>
@@ -3468,8 +3606,9 @@ export function ReceiptHistoryModal({
                   onClick={processRefund}
                   disabled={
                     isProcessingRefund
+                    || receiptSnapshotStatus === "mixed"
                     || !refundReason.trim()
-                    || (!refundAll && Object.values(checkedItems).filter(Boolean).length === 0)
+                    || (!refundAll && receiptSnapshotStatus !== "snapshot" && Object.values(checkedItems).filter(Boolean).length === 0)
                     || refundMode === "admin_review"
                     || (refundMode === "modern" && selectedRefundAllocationIds.length === 0)
                   }

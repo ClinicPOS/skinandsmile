@@ -5,6 +5,7 @@ import { AppFrame } from "../../components/app-frame";
 import { paymentVariantLabel } from "../../lib/payment-allocation";
 import {
   buildAllocationRefundRequests,
+  classifyReceiptSnapshotStatus,
   createAllocationBackedRefund,
   getRemainingAllocationAmounts,
   isNonRefundableSurchargeVariant,
@@ -27,6 +28,7 @@ export default function RefundsPage() {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [selectedReceipt, setSelectedReceipt] = useState<any | null>(null);
   const [paymentRows, setPaymentRows] = useState<any[]>([]);
+  const [receiptItems, setReceiptItems] = useState<any[]>([]);
   const [checkedAllocations, setCheckedAllocations] = useState<Set<string>>(new Set());
   const [refundInvoiceAmountInputs, setRefundInvoiceAmountInputs] = useState<Record<string, string>>({});
   const [refundReason, setRefundReason] = useState("");
@@ -96,6 +98,27 @@ export default function RefundsPage() {
     setSelectedReceipt(receipt);
     setCheckedAllocations(new Set());
     setRefundInvoiceAmountInputs({});
+    setReceiptItems([]);
+
+    // Fetch receipt_items to classify snapshot status.
+    const { data: itemRows } = await supabase
+      .from("receipt_items")
+      .select("id, taxable_amount, vat_amount, final_line_total")
+      .eq("receipt_id", receipt.id);
+    const loadedItems = itemRows || [];
+    setReceiptItems(loadedItems);
+
+    const snapshotStatus = classifyReceiptSnapshotStatus(loadedItems);
+    if (snapshotStatus === "snapshot" || snapshotStatus === "mixed") {
+      setRefundMessage(
+        snapshotStatus === "snapshot"
+          ? "This receipt uses per-service VAT pricing. Please use the Receipt Log or POS Receipt History to process this refund — they support the full item-linked refund flow."
+          : "This receipt contains incomplete historical pricing data and cannot be refunded automatically. Please contact an administrator."
+      );
+      setPaymentRows([]);
+      return;
+    }
+
     const { data: paymentRecords } = await supabase
       .from("payment_records")
       .select("id, payment_method_summary, status")
