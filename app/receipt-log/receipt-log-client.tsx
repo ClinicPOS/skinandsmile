@@ -21,6 +21,7 @@ import { generateInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invo
 import { buildThermalReceiptHtml, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
 import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 import type { PaymentAllocation } from "../../lib/types";
+import { mapRegularReceiptRenderLine, summarizeRegularReceiptForRender } from "../../lib/regular-receipt-rendering";
 
 const PAGE_SIZE = 10;
 
@@ -486,6 +487,20 @@ export default function ReceiptLogClient() {
     const total = Number(selectedReceipt.total || 0);
     const amountPaidRaw = selectedReceipt.amount_paid;
     const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : total;
+    const renderLines = receiptItems.map((item) => {
+      const service = services.find((entry) => entry.id === item.service_id);
+      return mapRegularReceiptRenderLine(item, {
+        serviceName: service?.name || "Service",
+        fallbackOriginalUnitPrice: item.original_price != null
+          ? Number(item.original_price)
+          : service?.standard_price != null
+            ? Number(service.standard_price)
+            : service?.price != null
+              ? Number(service.price)
+              : null,
+      });
+    });
+    const summary = summarizeRegularReceiptForRender(selectedReceipt as any, renderLines);
     const options: BuildThermalReceiptHtmlOptions = {
       title: "Receipt Reprint",
       clinic,
@@ -498,28 +513,28 @@ export default function ReceiptLogClient() {
       patientPhone: patient?.phone || "-",
       patientFileNumber: patient?.patient_number ? `#${String(patient.patient_number).padStart(5, "0")}` : "-",
       doctorField: clinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب",
-      items: receiptItems.map((item) => {
-        const service = services.find((entry) => entry.id === item.service_id);
-        return {
-          name: service?.name || "Service",
-          quantity: Number(item.quantity ?? 1),
-          price: Number(item.price ?? 0),
-          originalPrice: item.original_price != null
-            ? Number(item.original_price)
-            : service?.standard_price != null
-              ? Number(service.standard_price)
-              : service?.price != null
-                ? Number(service.price)
-                : null,
-        };
-      }),
-      subtotal: Number(selectedReceipt.subtotal || 0),
-      discountAmount: Number(selectedReceipt.discount_amount || 0),
-      vat: Number(selectedReceipt.vat || 0),
-      total,
+      items: renderLines.map((line) => ({
+        name: line.name,
+        quantity: line.quantity,
+        price: line.soldUnitPrice,
+        originalPrice: line.originalUnitPrice ?? undefined,
+        allocatedGlobalDiscountAmount: line.allocatedGlobalDiscountAmount,
+        taxableAmount: line.taxableAmount ?? undefined,
+        vatRate: line.vatRate ?? undefined,
+        vatAmount: line.vatAmount ?? undefined,
+        finalLineTotal: line.finalLineTotal ?? undefined,
+        teeth: line.teeth,
+      })),
+      subtotal: summary.subtotal,
+      discountAmount: summary.discountAmount,
+      vat: summary.vat,
+      total: summary.invoiceTotalBeforeGatewayFee,
+      paymentFeeAmount: summary.paymentFeeAmount,
       allocations: [],
+      manualDiscountAmount: summary.useSnapshotSummary ? summary.manualDiscountAmount : undefined,
+      globalDiscountAmount: summary.useSnapshotSummary ? summary.globalDiscountAmount : undefined,
       creditUsed: 0,
-      outstandingBalance: Math.max(0, total - amountPaid),
+      outstandingBalance: Math.max(0, summary.finalTotal - amountPaid),
       notes: selectedReceipt.notes || "",
       paymentMethod: selectedReceipt.payment_method || "",
       receiptHeaderLabel: `${clinic?.receipt_title || "TAX INVOICE"} (REPRINT)`,
@@ -546,26 +561,25 @@ export default function ReceiptLogClient() {
       : selectedReceipt.id.slice(0, 8).toUpperCase();
     const grandTotal = Number(selectedReceipt.total ?? 0);
     const gatewayFee = Number(selectedReceipt.gateway_fee ?? 0);
+    const renderLines = receiptItems.map((item: any) => {
+      const svc = services.find((s: any) => s.id === item.service_id);
+      return mapRegularReceiptRenderLine(item, {
+        serviceName: svc?.name || "Service",
+        fallbackOriginalUnitPrice: item.original_price != null
+          ? Number(item.original_price)
+          : svc?.standard_price != null
+            ? Number(svc.standard_price)
+            : svc?.price != null
+              ? Number(svc.price)
+              : null,
+      });
+    });
+    const summary = summarizeRegularReceiptForRender(selectedReceipt as any, renderLines);
     const amountPaidRaw = selectedReceipt.amount_paid;
-    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : grandTotal;
+    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : summary.finalTotal;
     const previouslyRefunded = receiptRefunds.reduce((s: number, r: any) => s + Number(r.total_amount || 0), 0);
     const hasRefund = previouslyRefunded > 0.005;
-    const outstandingBalance = Math.max(0, grandTotal - amountPaid);
-    const computedDiscountAmount = (() => {
-      const storedDiscount = Number(selectedReceipt.discount_amount ?? 0);
-      if (storedDiscount > 0.0049) {
-        return storedDiscount;
-      }
-      return receiptItems.reduce((sum: number, item: any) => {
-        const currentPrice = Number(item.price ?? 0);
-        const originalPrice = item.original_price != null ? Number(item.original_price) : null;
-        const quantity = Number(item.quantity ?? 1);
-        if (originalPrice != null && originalPrice > currentPrice + 0.0049) {
-          return sum + (originalPrice - currentPrice) * quantity;
-        }
-        return sum;
-      }, 0);
-    })();
+    const outstandingBalance = Math.max(0, summary.finalTotal - amountPaid);
     const invoiceStatus: InvoiceStatus =
       hasRefund ? "REFUNDED"
       : outstandingBalance > 0.005 ? "PARTIALLY PAID"
@@ -585,25 +599,23 @@ export default function ReceiptLogClient() {
         patientNumber: patient?.patient_number ?? null,
       },
       doctorName: doctor?.name ?? null,
-      items: receiptItems.map((item: any) => {
-        const svc = services.find((s: any) => s.id === item.service_id);
-        return {
-          description: svc?.name || "Service",
-          quantity: Number(item.quantity ?? 1),
-          originalUnitPrice: item.original_price != null
-            ? Number(item.original_price)
-            : svc?.standard_price != null
-              ? Number(svc.standard_price)
-              : svc?.price != null
-                ? Number(svc.price)
-                : null,
-          unitPrice: Number(item.price ?? 0),
-        };
-      }),
-      totalDiscount: computedDiscountAmount,
-      vatAmount: Number(selectedReceipt.vat ?? 0),
-      paymentFeeAmount: gatewayFee > 0 ? gatewayFee : 0,
-      grandTotal,
+      items: renderLines.map((line) => ({
+        description: line.name,
+        quantity: line.quantity,
+        originalUnitPrice: line.originalUnitPrice,
+        unitPrice: line.soldUnitPrice,
+        discountAmount: line.totalDiscountAmount,
+        allocatedGlobalDiscountAmount: line.allocatedGlobalDiscountAmount,
+        taxableAmount: line.taxableAmount ?? undefined,
+        vatRate: line.vatRate ?? undefined,
+        vatAmount: line.vatAmount ?? undefined,
+        finalLineTotal: line.finalLineTotal ?? undefined,
+        teeth: line.teeth,
+      })),
+      totalDiscount: summary.discountAmount,
+      vatAmount: summary.vat,
+      paymentFeeAmount: summary.paymentFeeAmount > 0 ? summary.paymentFeeAmount : gatewayFee > 0 ? gatewayFee : 0,
+      grandTotal: summary.finalTotal,
       amountPaid,
       outstandingBalance,
       notes: selectedReceipt.notes || null,

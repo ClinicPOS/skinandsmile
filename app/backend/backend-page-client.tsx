@@ -31,6 +31,26 @@ type BackendSection =
   | "access"
   | "system-settings";
 
+type VatRateDraft = "" | "0" | "0.05";
+
+function parseVatRateDraft(value: VatRateDraft): number | null {
+  if (value === "0") return 0;
+  if (value === "0.05") return 0.05;
+  return null;
+}
+
+function vatRateDraftFromValue(value: number | null | undefined): VatRateDraft {
+  if (value === 0) return "0";
+  if (value === 0.05) return "0.05";
+  return "";
+}
+
+function formatVatRateLabel(value: number | null | undefined): string {
+  if (value === 0) return "No VAT";
+  if (value === 0.05) return "5% VAT";
+  return "VAT not configured";
+}
+
 function resolveBackendSection(pathname: string): BackendSection {
   if (pathname.startsWith("/backend/clinics")) return "clinics";
   if (pathname.startsWith("/backend/patients")) return "patients";
@@ -171,6 +191,7 @@ function BackendPageContent() {
   const [serviceDisplayName, setServiceDisplayName] = useState("");
   const [serviceVariant, setServiceVariant] = useState("");
   const [servicePrice, setServicePrice] = useState("");
+  const [serviceVatRate, setServiceVatRate] = useState<VatRateDraft>("");
   const [serviceCategory, setServiceCategory] = useState("");
   const [serviceSearchKeywords, setServiceSearchKeywords] = useState("");
   const [serviceCommonAliases, setServiceCommonAliases] = useState("");
@@ -186,6 +207,7 @@ function BackendPageContent() {
   const [editingServiceDisplayName, setEditingServiceDisplayName] = useState("");
   const [editingServiceVariant, setEditingServiceVariant] = useState("");
   const [editingServicePrice, setEditingServicePrice] = useState("");
+  const [editingServiceVatRate, setEditingServiceVatRate] = useState<VatRateDraft>("");
   const [editingServiceCategory, setEditingServiceCategory] = useState("");
   const [editingServiceSearchKeywords, setEditingServiceSearchKeywords] = useState("");
   const [editingServiceCommonAliases, setEditingServiceCommonAliases] = useState("");
@@ -1307,6 +1329,11 @@ function BackendPageContent() {
       alert("Please enter a valid service price.");
       return;
     }
+    const parsedVatRate = parseVatRateDraft(serviceVatRate);
+    if (serviceVatRate === "" || parsedVatRate == null) {
+      alert("Please select a VAT rate for the new service.");
+      return;
+    }
     const parsedVisitCount = Math.max(1, Number(serviceDefaultVisitCount || 1));
     if (!Number.isFinite(parsedVisitCount)) {
       alert("Please enter a valid default visit count.");
@@ -1330,6 +1357,7 @@ function BackendPageContent() {
         variant: serviceVariant.trim() || null,
         price: parsedPrice,
         standard_price: parsedPrice,
+        vat_rate: parsedVatRate,
         clinic_id: selectedClinicId,
         category: canonicalServiceCategory(serviceCategory),
         category_id: canonicalServiceCategory(serviceCategory),
@@ -1346,6 +1374,10 @@ function BackendPageContent() {
     ]);
 
     if (error) {
+      if (error.message?.includes("vat_rate")) {
+        alert(`Error saving service: ${error.message}. Please apply the services VAT migration first.`);
+        return;
+      }
       alert("Error saving service");
       return;
     }
@@ -1354,6 +1386,7 @@ function BackendPageContent() {
     setServiceDisplayName("");
     setServiceVariant("");
     setServicePrice("");
+    setServiceVatRate("");
     setServiceCategory("");
     setServiceSearchKeywords("");
     setServiceCommonAliases("");
@@ -1378,6 +1411,7 @@ function BackendPageContent() {
       alert("Please enter a valid service price.");
       return;
     }
+    const parsedVatRate = parseVatRateDraft(editingServiceVatRate);
     const parsedVisitCount = Math.max(1, Number(editingServiceDefaultVisitCount || 1));
     if (!Number.isFinite(parsedVisitCount)) {
       alert("Please enter a valid default visit count.");
@@ -1414,6 +1448,7 @@ function BackendPageContent() {
       variant: editingServiceVariant.trim() || null,
       price: parsedPrice,
       standard_price: parsedPrice,
+      vat_rate: parsedVatRate,
       category: canonicalServiceCategory(editingServiceCategory),
       category_id: canonicalServiceCategory(editingServiceCategory),
       search_keywords: editingServiceSearchKeywords.trim() || null,
@@ -1445,9 +1480,14 @@ function BackendPageContent() {
       const isMissingColumn =
         error.message?.includes("column") &&
         (error.message?.includes("pricing_type") ||
+          error.message?.includes("vat_rate") ||
           error.message?.includes("min_price") ||
           error.message?.includes("max_price"));
       if (isMissingColumn) {
+        if (error.message?.includes("vat_rate")) {
+          alert(`Error updating service: ${error.message}. Please apply the services VAT migration first.`);
+          return;
+        }
         const fallback = await supabase
           .from("services")
           .update(baseUpdate)
@@ -1470,6 +1510,7 @@ function BackendPageContent() {
     setEditingServiceDisplayName("");
     setEditingServiceVariant("");
     setEditingServicePrice("");
+    setEditingServiceVatRate("");
     setEditingServiceSearchKeywords("");
     setEditingServiceCommonAliases("");
     setEditingServiceDefaultVisitCount("1");
@@ -2387,6 +2428,19 @@ function BackendPageContent() {
               placeholder="Price"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
             />
+            <div className="space-y-1">
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">VAT Rate</label>
+              <select
+                value={serviceVatRate}
+                onChange={(e) => setServiceVatRate(e.target.value as VatRateDraft)}
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              >
+                <option value="">Select VAT rate</option>
+                <option value="0">No VAT</option>
+                <option value="0.05">5% VAT</option>
+              </select>
+              <p className="text-[11px] text-slate-500">Required for new services.</p>
+            </div>
             <input
               value={serviceVariant}
               onChange={(e) => setServiceVariant(e.target.value)}
@@ -2521,6 +2575,21 @@ function BackendPageContent() {
                       placeholder={editingServicePricingType === "variable" ? "Suggested price" : "Price"}
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
+                    <div className="space-y-1">
+                      <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">VAT Rate</label>
+                      <select
+                        value={editingServiceVatRate}
+                        onChange={(e) => setEditingServiceVatRate(e.target.value as VatRateDraft)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
+                      >
+                        <option value="">Not configured</option>
+                        <option value="0">No VAT</option>
+                        <option value="0.05">5% VAT</option>
+                      </select>
+                      {editingServiceVatRate === "" && (
+                        <p className="text-[11px] text-amber-700">Legacy service: VAT has not been configured yet.</p>
+                      )}
+                    </div>
                     <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
                       <div className="flex items-center gap-3">
                         <label className="text-xs font-semibold text-slate-500">Pricing Type</label>
@@ -2720,6 +2789,17 @@ function BackendPageContent() {
                         {service.active_plan_recommended && (
                           <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-xs font-semibold text-emerald-700">Plan</span>
                         )}
+                        <span
+                          className={`rounded-full px-1.5 py-0.5 text-xs font-semibold ${
+                            service.vat_rate == null
+                              ? "bg-amber-100 text-amber-700"
+                              : service.vat_rate === 0.05
+                                ? "bg-emerald-100 text-emerald-700"
+                                : "bg-slate-100 text-slate-600"
+                          }`}
+                        >
+                          {formatVatRateLabel(service.vat_rate)}
+                        </span>
                       </p>
                     </div>
                     <div className="flex gap-2">
@@ -2730,6 +2810,7 @@ function BackendPageContent() {
                           setEditingServiceDisplayName(service.display_name || service.name || "");
                           setEditingServiceVariant(service.variant || service.description || "");
                           setEditingServicePrice(String(service.price ?? ""));
+                          setEditingServiceVatRate(vatRateDraftFromValue(service.vat_rate));
                           setEditingServiceCategory(service.category || "");
                           setEditingServiceSearchKeywords(service.search_keywords || "");
                           setEditingServiceCommonAliases(service.common_aliases || "");

@@ -10,6 +10,7 @@ import { useClinicAccess } from "../../lib/clinic-access";
 import type { Clinic as ClinicRecord, TreatmentPlan, TreatmentPlanPayment, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, TreatmentPlanVisit } from "../../lib/types";
 import { printTreatmentPlanPaymentReceipt } from "../../lib/print-treatment-plan-payment-receipt";
 import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
+import { mapRegularReceiptRenderLine, summarizeRegularReceiptForRender } from "../../lib/regular-receipt-rendering";
 
 type Receipt = {
   id: string;
@@ -21,6 +22,10 @@ type Receipt = {
   subtotal: number;
   vat: number;
   total: number;
+  total_before_gateway_fee?: number | null;
+  discount_amount?: number | null;
+  amount_paid?: number | null;
+  credit_applied?: number | null;
   gateway_fee?: number | null;
   gateway_fee_provider?: string | null;
   notes: string | null;
@@ -57,7 +62,14 @@ type ReceiptItem = {
   quantity: number;
   price: number;
   total: number;
+  service_name_snapshot?: string | null;
   original_price?: number | null;
+  teeth?: string[] | null;
+  allocated_global_discount_amount?: number | null;
+  taxable_amount?: number | null;
+  vat_rate?: number | null;
+  vat_amount?: number | null;
+  final_line_total?: number | null;
 };
 
 type HistoryEntry = {
@@ -138,7 +150,7 @@ export default function ReceiptHistoryPage() {
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
       supabase.from("receptionist").select("id, name, clinic_id").order("name", { ascending: true }),
       supabase.from("services").select("id, name, price, standard_price, pricing_type").order("name", { ascending: true }),
-      supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total, original_price"),
+      supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total, original_price, service_name_snapshot, teeth, allocated_global_discount_amount, taxable_amount, vat_rate, vat_amount, final_line_total"),
       supabase.from("clinics").select("*"),
       fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no"),
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
@@ -278,20 +290,31 @@ export default function ReceiptHistoryPage() {
       .filter((item) => item.receipt_id === selectedReceipt.id)
       .map((item) => {
         const service = services.find((entry) => entry.id === item.service_id);
-
-        return {
-          id: item.service_id,
-          name: service?.name || "Service",
-          quantity: item.quantity,
-          price: Number(item.price ?? 0),
-          originalPrice: item.original_price != null
+        const renderLine = mapRegularReceiptRenderLine(item, {
+          serviceName: service?.name || "Service",
+          fallbackOriginalUnitPrice: item.original_price != null
             ? Number(item.original_price)
             : service?.standard_price != null
               ? Number(service.standard_price)
               : service?.price != null
                 ? Number(service.price)
                 : null,
+        });
+
+        return {
+          id: item.service_id,
+          name: renderLine.name,
+          quantity: renderLine.quantity,
+          price: renderLine.soldUnitPrice,
+          originalPrice: renderLine.originalUnitPrice,
           total: item.total,
+          allocatedGlobalDiscountAmount: renderLine.allocatedGlobalDiscountAmount,
+          taxableAmount: renderLine.taxableAmount,
+          vatRate: renderLine.vatRate,
+          vatAmount: renderLine.vatAmount,
+          finalLineTotal: renderLine.finalLineTotal,
+          teeth: renderLine.teeth,
+          totalDiscountAmount: renderLine.totalDiscountAmount,
         };
       });
   }, [receiptItems, selectedReceipt, services]);
@@ -302,6 +325,7 @@ export default function ReceiptHistoryPage() {
 
   function buildThermalReceiptHtmlForSelected(): string {
     if (!selectedReceipt || selectedReceipt.kind === "treatment-plan") return "";
+    const regularSelectedReceiptLineItems = selectedReceiptLineItems as any[];
 
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0];
@@ -326,14 +350,28 @@ export default function ReceiptHistoryPage() {
     const doctorName = doctor?.name || "-";
     const cashierName = receptionist?.name || "Reception";
 
-    const grandTotal = Number(selectedReceipt.total ?? 0);
-    const discountAmount = Number(selectedReceipt.discount_amount ?? 0);
-    const subtotal = discountAmount > 0.0049 ? grandTotal + discountAmount : grandTotal;
-    const vat = Number(selectedReceipt.vat ?? 0);
-    const gatewayFee = Number(selectedReceipt.gateway_fee ?? 0);
+    const summary = summarizeRegularReceiptForRender(selectedReceipt as any, regularSelectedReceiptLineItems.map((item) => ({
+      name: item.name,
+      quantity: item.quantity,
+      soldUnitPrice: Number(item.price ?? 0),
+      soldLineTotal: Number(item.total ?? 0),
+      originalUnitPrice: item.originalPrice != null ? Number(item.originalPrice) : null,
+      originalLineTotal: item.originalPrice != null ? Number(item.originalPrice) * Number(item.quantity ?? 1) : null,
+      manualDiscountAmount: Math.max(0, (item.originalPrice != null ? Number(item.originalPrice) * Number(item.quantity ?? 1) : Number(item.total ?? 0)) - Number(item.total ?? 0)),
+      allocatedGlobalDiscountAmount: Number(item.allocatedGlobalDiscountAmount ?? 0),
+      totalDiscountAmount: Number(item.totalDiscountAmount ?? 0),
+      taxableAmount: item.taxableAmount != null ? Number(item.taxableAmount) : null,
+      vatRate: item.vatRate != null ? Number(item.vatRate) : null,
+      vatAmount: item.vatAmount != null ? Number(item.vatAmount) : null,
+      finalLineTotal: item.finalLineTotal != null ? Number(item.finalLineTotal) : null,
+      isSnapshotBacked: item.taxableAmount != null && item.vatRate != null && item.vatAmount != null && item.finalLineTotal != null,
+      hasTruePromo: item.originalPrice != null && Number(item.originalPrice) * Number(item.quantity ?? 1) > Number(item.total ?? 0) + 0.0049,
+      hasPriceIncrease: false,
+      teeth: item.teeth || [],
+    })));
     const amountPaidRaw = (selectedReceipt as any).amount_paid;
-    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : grandTotal;
-    const outstandingBalance = Math.max(0, grandTotal - amountPaid);
+    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : summary.finalTotal;
+    const outstandingBalance = Math.max(0, summary.finalTotal - amountPaid);
 
     const options: BuildThermalReceiptHtmlOptions = {
       title: "Receipt",
@@ -347,11 +385,23 @@ export default function ReceiptHistoryPage() {
       patientPhone,
       patientFileNumber,
       doctorField: clinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب",
-      items: selectedReceiptLineItems,
-      subtotal,
-      discountAmount,
-      vat,
-      total: grandTotal,
+      items: regularSelectedReceiptLineItems.map((item) => ({
+        name: item.name,
+        quantity: item.quantity,
+        price: Number(item.price ?? 0),
+        originalPrice: item.originalPrice != null ? Number(item.originalPrice) : undefined,
+        allocatedGlobalDiscountAmount: item.allocatedGlobalDiscountAmount ?? undefined,
+        taxableAmount: item.taxableAmount ?? undefined,
+        vatRate: item.vatRate ?? undefined,
+        vatAmount: item.vatAmount ?? undefined,
+        finalLineTotal: item.finalLineTotal ?? undefined,
+        teeth: item.teeth || [],
+      })),
+      subtotal: summary.subtotal,
+      discountAmount: summary.discountAmount,
+      vat: summary.vat,
+      total: summary.invoiceTotalBeforeGatewayFee,
+      paymentFeeAmount: summary.paymentFeeAmount,
       allocations: (selectedReceipt.payment_allocations || []).map((allocation: any) => ({
         methodVariant: allocation.method_variant || "payment",
         customerChargedAmount: Number(allocation.customer_charged_amount || 0),
@@ -363,6 +413,8 @@ export default function ReceiptHistoryPage() {
       })),
       creditUsed: 0,
       outstandingBalance,
+      manualDiscountAmount: summary.useSnapshotSummary ? summary.manualDiscountAmount : undefined,
+      globalDiscountAmount: summary.useSnapshotSummary ? summary.globalDiscountAmount : undefined,
       notes: selectedReceipt.notes || "",
       paymentMethod: selectedReceipt.payment_method || "",
     };
@@ -415,33 +467,37 @@ export default function ReceiptHistoryPage() {
         notes: selectedReceipt.notes || null,
       });
     }
+    const regularSelectedReceiptLineItems = selectedReceiptLineItems as any[];
 
     const invoiceNum = selectedReceipt.receipt_number
       ? `#${String(selectedReceipt.receipt_number).padStart(5, "0")}`
       : selectedReceipt.id.slice(0, 8).toUpperCase();
-    const grandTotal = Number(selectedReceipt.total ?? 0);
-    const gatewayFee = Number(selectedReceipt.gateway_fee ?? 0);
+    const summary = summarizeRegularReceiptForRender(selectedReceipt as any, regularSelectedReceiptLineItems.map((item) => ({
+      name: item.name,
+      quantity: item.quantity,
+      soldUnitPrice: Number(item.price ?? 0),
+      soldLineTotal: Number(item.total ?? 0),
+      originalUnitPrice: item.originalPrice != null ? Number(item.originalPrice) : null,
+      originalLineTotal: item.originalPrice != null ? Number(item.originalPrice) * Number(item.quantity ?? 1) : null,
+      manualDiscountAmount: Math.max(0, (item.originalPrice != null ? Number(item.originalPrice) * Number(item.quantity ?? 1) : Number(item.total ?? 0)) - Number(item.total ?? 0)),
+      allocatedGlobalDiscountAmount: Number(item.allocatedGlobalDiscountAmount ?? 0),
+      totalDiscountAmount: Number(item.totalDiscountAmount ?? 0),
+      taxableAmount: item.taxableAmount != null ? Number(item.taxableAmount) : null,
+      vatRate: item.vatRate != null ? Number(item.vatRate) : null,
+      vatAmount: item.vatAmount != null ? Number(item.vatAmount) : null,
+      finalLineTotal: item.finalLineTotal != null ? Number(item.finalLineTotal) : null,
+      isSnapshotBacked: item.taxableAmount != null && item.vatRate != null && item.vatAmount != null && item.finalLineTotal != null,
+      hasTruePromo: item.originalPrice != null && Number(item.originalPrice) * Number(item.quantity ?? 1) > Number(item.total ?? 0) + 0.0049,
+      hasPriceIncrease: false,
+      teeth: item.teeth || [],
+    })));
     const amountPaidRaw = (selectedReceipt as any).amount_paid;
-    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : grandTotal;
-    const outstandingBalance = Math.max(0, grandTotal - amountPaid);
+    const amountPaid = amountPaidRaw != null ? Number(amountPaidRaw) : summary.finalTotal;
+    const outstandingBalance = Math.max(0, summary.finalTotal - amountPaid);
     const invoiceStatus: InvoiceStatus =
       outstandingBalance > 0.005 ? "PARTIALLY PAID"
       : amountPaid < 0.005 ? "UNPAID"
       : "PAID";
-    const receiptDiscountAmount = (() => {
-      const storedDiscount = Number(selectedReceipt.discount_amount ?? 0);
-      if (storedDiscount > 0.0049) {
-        return storedDiscount;
-      }
-      return selectedReceiptLineItems.reduce((sum, item) => {
-        const currentPrice = item.quantity > 0 ? Number(item.total || 0) / item.quantity : Number(item.total || 0);
-        const originalPrice = item.originalPrice != null ? Number(item.originalPrice) : null;
-        if (originalPrice != null && originalPrice > currentPrice + 0.0049) {
-          return sum + (originalPrice - currentPrice) * item.quantity;
-        }
-        return sum;
-      }, 0);
-    })();
 
     return generateInvoiceHtml({
       clinic: clinic as any,
@@ -456,19 +512,23 @@ export default function ReceiptHistoryPage() {
         fileNumber: patientClinicFile?.file_no || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
       },
       doctorName: doctor?.name ?? null,
-      items: selectedReceiptLineItems.map((item) => ({
+      items: regularSelectedReceiptLineItems.map((item) => ({
         description: item.name,
         quantity: item.quantity,
         originalUnitPrice: item.originalPrice != null ? Number(item.originalPrice) : null,
         unitPrice: Number(item.price ?? 0),
-        discountAmount: item.originalPrice != null && item.quantity ? 
-          Math.max(0, (Number(item.originalPrice) - Number(item.price ?? 0)) * item.quantity) : 
-          undefined,
+        discountAmount: item.totalDiscountAmount,
+        allocatedGlobalDiscountAmount: item.allocatedGlobalDiscountAmount ?? undefined,
+        taxableAmount: item.taxableAmount ?? undefined,
+        vatRate: item.vatRate ?? undefined,
+        vatAmount: item.vatAmount ?? undefined,
+        finalLineTotal: item.finalLineTotal ?? undefined,
+        teeth: item.teeth || [],
       })),
-      totalDiscount: receiptDiscountAmount,
-      vatAmount: Number(selectedReceipt.vat ?? 0),
-      paymentFeeAmount: gatewayFee > 0 ? gatewayFee : 0,
-      grandTotal,
+      totalDiscount: summary.discountAmount,
+      vatAmount: summary.vat,
+      paymentFeeAmount: summary.paymentFeeAmount,
+      grandTotal: summary.finalTotal,
       amountPaid,
       outstandingBalance,
       notes: selectedReceipt.notes || null,

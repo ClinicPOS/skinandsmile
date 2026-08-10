@@ -74,6 +74,7 @@ export type Service = {
   price: number;
   standard_price?: number | null;
   promo_price?: number | null;
+  vat_rate?: number | null;
   clinic_id?: string | null;
   category?: string | null;
   category_id?: string | null;

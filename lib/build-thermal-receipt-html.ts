@@ -12,6 +12,11 @@ export interface ThermalReceiptItem {
   price: number;
   originalPrice?: number | null;
   teeth?: string[];
+  allocatedGlobalDiscountAmount?: number | null;
+  taxableAmount?: number | null;
+  vatRate?: number | null;
+  vatAmount?: number | null;
+  finalLineTotal?: number | null;
 }
 
 export interface ThermalReceiptAllocation {
@@ -42,12 +47,15 @@ export interface BuildThermalReceiptHtmlOptions {
   discountInput?: string;
   vat: number;
   total: number;
+  paymentFeeAmount?: number;
   allocations: ThermalReceiptAllocation[];
   creditUsed: number;
   outstandingBalance: number;
   notes: string;
   paymentMethod: string;
   receiptHeaderLabel?: string;
+  manualDiscountAmount?: number;
+  globalDiscountAmount?: number;
 }
 
 export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions): string {
@@ -70,12 +78,15 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
     discountInput,
     vat,
     total,
+    paymentFeeAmount,
     allocations,
     creditUsed,
     outstandingBalance,
     notes,
     paymentMethod,
     receiptHeaderLabel,
+    manualDiscountAmount,
+    globalDiscountAmount,
   } = options;
 
   const logoPath = getReceiptLogoPath(clinic, undefined, "thermal");
@@ -129,29 +140,91 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
       const qty = item.quantity ?? 1;
       const discountedLineTotal = Number(item.price) * qty;
       const originalLineTotal = item.originalPrice != null ? Number(item.originalPrice) * qty : null;
-      const displayLineTotal = originalLineTotal != null ? originalLineTotal : discountedLineTotal;
+      const hasTruePromo = originalLineTotal != null && originalLineTotal > discountedLineTotal + 0.0049;
+      const hasPriceIncrease = originalLineTotal != null && discountedLineTotal > originalLineTotal + 0.0049;
+      const hasSnapshotDetails = item.taxableAmount != null
+        && item.vatRate != null
+        && item.vatAmount != null
+        && item.finalLineTotal != null;
+      const allocatedGlobalDiscountAmount = Number(item.allocatedGlobalDiscountAmount ?? 0);
+      const vatRate = item.vatRate != null ? Number(item.vatRate) : null;
+      const vatAmount = item.vatAmount != null ? Number(item.vatAmount) : null;
+      const finalLineTotal = item.finalLineTotal != null ? Number(item.finalLineTotal) : null;
       const qtyLabel = qty > 1 ? ` <span style="font-size:9px;">×${qty} Unit</span>` : "";
       const teethLabel = item.teeth || [];
       const teethDisplay = teethLabel.length > 0 ? ` (Tooth #${teethLabel.join(", #")})` : "";
-      return item.originalPrice != null
-        ? `
+      if (!hasSnapshotDetails) {
+        const displayLineTotal = hasTruePromo && originalLineTotal != null ? originalLineTotal : discountedLineTotal;
+        return hasTruePromo
+          ? `
           <div class="row item-row">
             <span class="item-name">${item.name}${qtyLabel}${teethDisplay} <span style="font-size:10px;">(Promo)</span></span>
             <span class="amount" style="text-align:right;">${displayLineTotal === 0 ? "Free" : `AED ${displayLineTotal.toFixed(2)}`}</span>
           </div>`
-        : `
+          : `
           <div class="row item-row">
             <span class="item-name">${item.name}${qtyLabel}${teethDisplay}</span>
             <span class="amount">${discountedLineTotal === 0 ? "Free" : `AED ${discountedLineTotal.toFixed(2)}`}</span>
           </div>`;
+      }
+
+      const detailRows: string[] = [];
+      if (hasTruePromo && originalLineTotal != null) {
+        detailRows.push(`<div class="row detail-row"><span>Original Price</span><span>AED ${originalLineTotal.toFixed(2)}</span></div>`);
+        detailRows.push(`<div class="row detail-row"><span>Promo Price</span><span>AED ${discountedLineTotal.toFixed(2)}</span></div>`);
+      } else if (hasPriceIncrease && originalLineTotal != null) {
+        detailRows.push(`<div class="row detail-row"><span>Original Price</span><span>AED ${originalLineTotal.toFixed(2)}</span></div>`);
+        detailRows.push(`<div class="row detail-row"><span>Price Adjustment</span><span>AED ${discountedLineTotal.toFixed(2)}</span></div>`);
+      } else if (allocatedGlobalDiscountAmount > 0.0049 || (vatAmount ?? 0) > 0.0049 || Math.abs((finalLineTotal ?? discountedLineTotal) - discountedLineTotal) > 0.0049) {
+        detailRows.push(`<div class="row detail-row"><span>Price</span><span>AED ${discountedLineTotal.toFixed(2)}</span></div>`);
+      }
+
+      if (allocatedGlobalDiscountAmount > 0.0049) {
+        detailRows.push(`<div class="row detail-row"><span>Discount</span><span>-AED ${allocatedGlobalDiscountAmount.toFixed(2)}</span></div>`);
+      }
+      if ((vatRate ?? 0) > 0.0049 && (vatAmount ?? 0) > 0.0049) {
+        detailRows.push(`<div class="row detail-row"><span>VAT ${(vatRate! * 100).toFixed(0)}%</span><span>AED ${vatAmount!.toFixed(2)}</span></div>`);
+      }
+
+      const shouldShowLineTotal = hasTruePromo
+        || hasPriceIncrease
+        || allocatedGlobalDiscountAmount > 0.0049
+        || (vatAmount ?? 0) > 0.0049
+        || Math.abs((finalLineTotal ?? discountedLineTotal) - discountedLineTotal) > 0.0049;
+
+      if (shouldShowLineTotal && finalLineTotal != null) {
+        detailRows.push(`<div class="row detail-row detail-total"><span>Line Total</span><span>AED ${finalLineTotal.toFixed(2)}</span></div>`);
+      }
+
+      if (detailRows.length === 0) {
+        return `
+          <div class="row item-row">
+            <span class="item-name">${item.name}${qtyLabel}${teethDisplay}</span>
+            <span class="amount">${discountedLineTotal === 0 ? "Free" : `AED ${discountedLineTotal.toFixed(2)}`}</span>
+          </div>`;
+      }
+
+      return `
+        <div class="item-block">
+          <div class="row item-row">
+            <span class="item-name">${item.name}${qtyLabel}${teethDisplay}</span>
+            <span class="amount"></span>
+          </div>
+          ${detailRows.join("")}
+        </div>`;
     })
     .join("");
 
-  const allocationFeeTotal = allocations.reduce((sum, row) => sum + row.feeAmount, 0);
+  const allocationFeeTotal = allocations.length > 0
+    ? allocations.reduce((sum, row) => sum + row.feeAmount, 0)
+    : Number(paymentFeeAmount ?? 0);
   const paidToday = total + allocationFeeTotal - outstandingBalance;
   const isPartial = outstandingBalance > 0.0049;
   const originalSubtotal = subtotal;
   const grandTotalBeforeFees = Math.max(0, subtotal - discountAmount);
+  const manualDiscountTotal = Number(manualDiscountAmount ?? 0);
+  const globalDiscountTotal = Number(globalDiscountAmount ?? 0);
+  const showSnapshotDiscountBreakdown = manualDiscountTotal > 0.0049 || globalDiscountTotal > 0.0049;
 
   const escapeReceiptText = (value: string) =>
     value
@@ -217,6 +290,9 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
           ${buildThermalReceiptCss(thermalSettings)}
           .head-row { display: flex; justify-content: space-between; font-weight: 700; }
           .item-row { margin: 2px 0; }
+          .item-block { margin: 3px 0; }
+          .detail-row { padding-left: 6px; font-size: 10px; }
+          .detail-total { font-weight: 700; }
           .item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
           .amount { text-align: right; white-space: nowrap; }
         </style>
@@ -256,8 +332,19 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
 
         <div class="hr"></div>
 
-        ${discountAmount > 0 ? `<div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${originalSubtotal.toFixed(2)}</span></div>` : `<div class="row"><span>Subtotal / الإجمالي الجزئي</span><span>AED ${subtotal.toFixed(2)}</span></div>`}
-        ${discountAmount > 0 ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>` : ""}
+        <div class="row"><span>Subtotal / Services</span><span>AED ${originalSubtotal.toFixed(2)}</span></div>
+        ${showSnapshotDiscountBreakdown && manualDiscountTotal > 0.0049 && globalDiscountTotal <= 0.0049
+          ? `<div class="row"><span>Discount</span><span>- AED ${manualDiscountTotal.toFixed(2)}</span></div>`
+          : ""}
+        ${showSnapshotDiscountBreakdown && manualDiscountTotal > 0.0049 && globalDiscountTotal > 0.0049
+          ? `<div class="row"><span>Promo / Price Adjustments</span><span>- AED ${manualDiscountTotal.toFixed(2)}</span></div>`
+          : ""}
+        ${showSnapshotDiscountBreakdown && globalDiscountTotal > 0.0049
+          ? `<div class="row"><span>Global Discount</span><span>- AED ${globalDiscountTotal.toFixed(2)}</span></div>`
+          : ""}
+        ${!showSnapshotDiscountBreakdown && discountAmount > 0
+          ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>`
+          : ""}
         <div class="row"><span>Grand Total / الإجمالي</span><span>AED ${grandTotalBeforeFees.toFixed(2)}</span></div>
         <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
         ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee</span><span>AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}

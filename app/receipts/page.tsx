@@ -26,7 +26,7 @@ import {
   referenceRequiredForVariant,
   validatePaymentAllocations,
 } from "../../lib/payment-allocation";
-import { fromMinorUnits, toMinorUnits, truncateCurrency } from "../../lib/money";
+import { fromMinorUnits, roundCurrency, toMinorUnits, truncateCurrency } from "../../lib/money";
 import { getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { generateInvoiceHtml as buildInvoiceHtml, type InvoiceAllocationRow, type InvoiceStatus } from "../../lib/generate-invoice-html";
@@ -36,12 +36,95 @@ import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } fro
 import { extractLegacyCashAmount, getCashDeductionTypeLabel, getDubaiBusinessDate } from "../../lib/cash-deductions";
 import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 import { getBusinessDayKeyForReporting, getPaymentBreakdownForReporting, summarizeStoredAllocationCollectionsForReporting, summarizeStoredAllocationRowsForReporting } from "../../lib/receipts-reporting";
+import { mapRegularReceiptRenderLine } from "../../lib/regular-receipt-rendering";
 
 type PosPricingService = {
+  id?: string | null;
+  name?: string | null;
   originalPrice?: number | null;
   price?: number | null;
   quantity?: number | null;
+  vat_rate?: number | null;
+  isVariablePriced?: boolean;
+  minPrice?: number | null;
+  maxPrice?: number | null;
 };
+
+type PosPricingLineSummary = {
+  serviceId: string;
+  serviceName: string;
+  quantity: number;
+  currentUnitPrice: number;
+  originalUnitPrice: number | null;
+  hasManualDiscount: boolean;
+  originalLineTotal: number;
+  discountedLineTotal: number;
+  manualDiscountAmount: number;
+  globalDiscountAmount: number;
+  taxableAmount: number;
+  vatRate: number | null;
+  vatAmount: number;
+  finalLineTotal: number;
+  isVatConfigured: boolean;
+};
+
+function normalizeServiceVatRate(value: number | null | undefined): number | null {
+  if (value === 0) return 0;
+  if (value === 0.05) return 0.05;
+  return null;
+}
+
+function getServiceVatLabel(value: number | null | undefined): string {
+  if (value === 0) return "No VAT";
+  if (value === 0.05) return "VAT 5%";
+  return "VAT not configured";
+}
+
+function buildGlobalDiscountAllocationMinor(lineTotalsMinor: number[], globalDiscountMinor: number): number[] {
+  if (globalDiscountMinor <= 0 || lineTotalsMinor.length === 0) {
+    return lineTotalsMinor.map(() => 0);
+  }
+
+  const totalMinor = lineTotalsMinor.reduce((sum, value) => sum + value, 0);
+  if (totalMinor <= 0) {
+    return lineTotalsMinor.map(() => 0);
+  }
+
+  const provisional = lineTotalsMinor.map((lineMinor, index) => {
+    if (lineMinor <= 0) {
+      return { index, allocated: 0, remainder: -1 };
+    }
+    const exactShare = (lineMinor * globalDiscountMinor) / totalMinor;
+    const allocated = Math.min(lineMinor, Math.floor(exactShare));
+    return {
+      index,
+      allocated,
+      remainder: exactShare - allocated,
+    };
+  });
+
+  let remaining = globalDiscountMinor - provisional.reduce((sum, entry) => sum + entry.allocated, 0);
+  const result = provisional.map((entry) => entry.allocated);
+  const order = [...provisional].sort((a, b) => {
+    if (b.remainder !== a.remainder) return b.remainder - a.remainder;
+    return a.index - b.index;
+  });
+
+  while (remaining > 0) {
+    let changed = false;
+    for (const entry of order) {
+      if (remaining <= 0) break;
+      const maxAllowed = lineTotalsMinor[entry.index];
+      if (result[entry.index] >= maxAllowed) continue;
+      result[entry.index] += 1;
+      remaining -= 1;
+      changed = true;
+    }
+    if (!changed) break;
+  }
+
+  return result;
+}
 
 function summarizePosServicePricing(service: PosPricingService) {
   const originalPrice = Number(service.originalPrice ?? 0);
@@ -68,10 +151,57 @@ function summarizeCartPricing(services: PosPricingService[], discountInput: stri
   const globalDiscountAmount = parsedDiscountInput <= 0
     ? 0
     : discountType === "%"
-      ? Math.min(originalSubtotal, (originalSubtotal * parsedDiscountInput) / 100)
-      : Math.min(originalSubtotal, parsedDiscountInput);
+      ? Math.min(discountedSubtotal, (discountedSubtotal * parsedDiscountInput) / 100)
+      : Math.min(discountedSubtotal, parsedDiscountInput);
   const totalDiscount = Math.max(0, Math.min(originalSubtotal, itemDiscountAmount + globalDiscountAmount));
   const netSubtotal = Math.max(0, originalSubtotal - totalDiscount);
+
+  const lineTotalsMinor = services.map((service) => {
+    const quantity = Number(service.quantity ?? 1);
+    const currentPrice = Number(service.price ?? 0);
+    return Math.max(0, toMinorUnits(currentPrice * quantity));
+  });
+  const globalDiscountMinor = Math.max(0, toMinorUnits(globalDiscountAmount));
+  const allocatedGlobalDiscountMinor = buildGlobalDiscountAllocationMinor(lineTotalsMinor, globalDiscountMinor);
+
+  const lineDetails: PosPricingLineSummary[] = services.map((service, index) => {
+    const quantity = Number(service.quantity ?? 1);
+    const currentUnitPrice = Number(service.price ?? 0);
+    const discountedLineTotalMinor = lineTotalsMinor[index] || 0;
+    const originalUnitPrice = service.originalPrice != null ? Number(service.originalPrice) : null;
+    const hasManualDiscount = originalUnitPrice != null && originalUnitPrice > currentUnitPrice + 0.0049;
+    const originalLineTotalMinor = hasManualDiscount
+      ? toMinorUnits(originalUnitPrice * quantity)
+      : discountedLineTotalMinor;
+    const manualDiscountMinor = Math.max(0, originalLineTotalMinor - discountedLineTotalMinor);
+    const globalDiscountLineMinor = Math.min(discountedLineTotalMinor, allocatedGlobalDiscountMinor[index] || 0);
+    const taxableMinor = Math.max(0, discountedLineTotalMinor - globalDiscountLineMinor);
+    const vatRate = normalizeServiceVatRate(service.vat_rate);
+    const vatMinor = vatRate != null ? toMinorUnits(fromMinorUnits(taxableMinor) * vatRate) : 0;
+    const finalLineMinor = taxableMinor + vatMinor;
+
+    return {
+      serviceId: String(service.id || ""),
+      serviceName: String(service.name || "Service"),
+      quantity,
+      currentUnitPrice,
+      originalUnitPrice,
+      hasManualDiscount,
+      originalLineTotal: fromMinorUnits(originalLineTotalMinor),
+      discountedLineTotal: fromMinorUnits(discountedLineTotalMinor),
+      manualDiscountAmount: fromMinorUnits(manualDiscountMinor),
+      globalDiscountAmount: fromMinorUnits(globalDiscountLineMinor),
+      taxableAmount: fromMinorUnits(taxableMinor),
+      vatRate,
+      vatAmount: fromMinorUnits(vatMinor),
+      finalLineTotal: fromMinorUnits(finalLineMinor),
+      isVatConfigured: vatRate != null,
+    };
+  });
+
+  const totalVat = roundCurrency(lineDetails.reduce((sum, line) => sum + line.vatAmount, 0));
+  const finalInvoiceTotal = roundCurrency(netSubtotal + totalVat);
+  const unconfiguredVatServices = lineDetails.filter((line) => !line.isVatConfigured);
 
   return {
     originalSubtotal,
@@ -80,6 +210,10 @@ function summarizeCartPricing(services: PosPricingService[], discountInput: stri
     globalDiscountAmount,
     totalDiscount,
     netSubtotal,
+    totalVat,
+    finalInvoiceTotal,
+    lineDetails,
+    unconfiguredVatServices,
   };
 }
 
@@ -1124,13 +1258,22 @@ export default function ReceiptsPage() {
     setPatientFileNumberInput(resumedFileNo);
 
     if (hold.services && hold.services.length > 0) {
-      const svcs = hold.services.map((s: any) => ({
-        id: s.service_id || "",
-        name: s.service_name,
-        price: Number(s.price),
-        originalPrice: s.original_price != null ? Number(s.original_price) : undefined,
-        quantity: s.quantity || 1,
-      }));
+      const svcs = hold.services.map((s: any) => {
+        const serviceMeta = services.find((entry) => entry.id === s.service_id);
+        const isVariablePriced = serviceMeta?.pricing_type === "variable";
+        return {
+          ...serviceMeta,
+          id: s.service_id || serviceMeta?.id || "",
+          name: s.service_name || serviceMeta?.name || "Service",
+          price: Number(s.price),
+          originalPrice: s.original_price != null ? Number(s.original_price) : undefined,
+          quantity: s.quantity || 1,
+          vat_rate: serviceMeta?.vat_rate ?? null,
+          isVariablePriced,
+          minPrice: isVariablePriced ? Number(serviceMeta?.min_price ?? 0) : null,
+          maxPrice: isVariablePriced ? Number(serviceMeta?.max_price ?? 0) : null,
+        };
+      });
       setSelectedServices(svcs);
       setCartItemTeeth(hold.services.map((s: any) => s.teeth || []));
       setCartItemToothDrafts(hold.services.map(() => ""));
@@ -1164,10 +1307,14 @@ export default function ReceiptsPage() {
 
   const pricingSummary = summarizeCartPricing(selectedServices, discountInput, discountType);
   const subtotal = pricingSummary.originalSubtotal;
+  const manualDiscountAmount = pricingSummary.itemDiscountAmount;
+  const globalDiscountAmount = pricingSummary.globalDiscountAmount;
   const discountAmount = pricingSummary.totalDiscount;
   const preVatTotal = pricingSummary.netSubtotal;
-  const vat = activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? Math.round(preVatTotal * 0.05 * 100) / 100 : 0;
-  const total = preVatTotal + vat;
+  const vat = pricingSummary.totalVat;
+  const total = pricingSummary.finalInvoiceTotal;
+  const unconfiguredVatLines = pricingSummary.unconfiguredVatServices;
+  const hasUnconfiguredVatServices = unconfiguredVatLines.length > 0;
   const previewAllocations = buildPaymentAllocations(paymentAllocationDrafts, getAmountDueToday(), total, vat);
   const livePaymentValidation = validatePaymentAllocations(paymentAllocationDrafts, getAmountDueToday());
   const isAllocationBalanced = toMinorUnits(getAmountDueToday()) === previewAllocations.reduce((sum, row) => sum + toMinorUnits(row.invoiceAllocationAmount), 0);
@@ -3475,6 +3622,11 @@ export default function ReceiptsPage() {
       alert("Please fill in patient name and add at least one service.");
       return;
     }
+    if (hasUnconfiguredVatServices) {
+      const names = [...new Set(unconfiguredVatLines.map((line) => line.serviceName))].join(", ");
+      alert(`VAT not configured for: ${names}. Configure VAT in Backend > Services before checkout.`);
+      return;
+    }
     if (!validateTeethSelection()) return;
     if (!activeClinic?.id) {
       alert("Open the register for a clinic first.");
@@ -3788,6 +3940,11 @@ export default function ReceiptsPage() {
     const outstanding = getOutstandingAfterPayment();
     const validationMessages: string[] = [];
 
+    if (hasUnconfiguredVatServices) {
+      const names = [...new Set(unconfiguredVatLines.map((line) => line.serviceName))].join(", ");
+      validationMessages.push(`VAT not configured for: ${names}. Configure VAT in Backend > Services before checkout.`);
+    }
+
     // Fully covered by patient credit — no payment method needed.
     if (remainingAfterCredit > 0.0049) {
       if (!selectedPaymentMethod) {
@@ -3863,6 +4020,12 @@ export default function ReceiptsPage() {
     const isFullyCoveredByCredit = getRemainingAfterCredit() <= 0.0049;
     const dueToday = getAmountDueToday();
 
+    if (hasUnconfiguredVatServices) {
+      const names = [...new Set(unconfiguredVatLines.map((line) => line.serviceName))].join(", ");
+      alert(`VAT not configured for: ${names}. Configure VAT in Backend > Services before checkout.`);
+      return false;
+    }
+
     if (!selectedPaymentMethod && !isFullyCoveredByCredit) {
       alert("Please select a payment method first.");
       return false;
@@ -3906,6 +4069,83 @@ export default function ReceiptsPage() {
       .map((row) => (row.methodGroup === "tabby" ? "Tabby" : row.methodGroup === "tamara" ? "Tamara" : ""))
       .filter(Boolean))];
     const gatewayFeeProvider = feeProviders.length === 1 ? feeProviders[0] : feeProviders.length > 1 ? "Mixed" : null;
+    const receiptItemLineSummaries = pricingSummary.lineDetails;
+
+    if (receiptItemLineSummaries.length !== selectedServices.length) {
+      alert("Receipt pricing summary is out of sync with the selected services. Please review the cart and try again.");
+      setIsSavingReceipt(false);
+      return false;
+    }
+
+    const receiptItemDrafts = selectedServices.map((service, index) => {
+      const lineSummary = receiptItemLineSummaries[index];
+      const serviceId = String(service.id || "");
+      if (!lineSummary || !serviceId) {
+        return null;
+      }
+
+      const currentUnitPrice = roundCurrency(Number(service.price ?? 0));
+      const originalUnitPrice = roundCurrency(
+        lineSummary.originalUnitPrice != null ? Number(lineSummary.originalUnitPrice) : currentUnitPrice
+      );
+
+      return {
+        service_id: serviceId,
+        quantity: lineSummary.quantity,
+        price: currentUnitPrice,
+        total: lineSummary.discountedLineTotal,
+        original_price: originalUnitPrice,
+        teeth: normalizeTeethForItem(service, index),
+        service_name_snapshot: lineSummary.serviceName,
+        allocated_global_discount_amount: lineSummary.globalDiscountAmount,
+        taxable_amount: lineSummary.taxableAmount,
+        vat_rate: lineSummary.vatRate,
+        vat_amount: lineSummary.vatAmount,
+        final_line_total: lineSummary.finalLineTotal,
+      };
+    });
+
+    if (receiptItemDrafts.some((item) => item == null)) {
+      alert("One or more receipt items could not be prepared for saving. Please review the cart and try again.");
+      setIsSavingReceipt(false);
+      return false;
+    }
+
+    const preparedReceiptItemDrafts = receiptItemDrafts.filter((item): item is NonNullable<typeof item> => item != null);
+    const totalGlobalDiscountMinor = preparedReceiptItemDrafts.reduce(
+      (sum, item) => sum + toMinorUnits(item.allocated_global_discount_amount),
+      0
+    );
+    const totalManualDiscountMinor = receiptItemLineSummaries.reduce(
+      (sum, line) => sum + toMinorUnits(line.manualDiscountAmount),
+      0
+    );
+    const totalVatMinor = preparedReceiptItemDrafts.reduce((sum, item) => sum + toMinorUnits(item.vat_amount), 0);
+    const totalFinalLineMinor = preparedReceiptItemDrafts.reduce((sum, item) => sum + toMinorUnits(item.final_line_total), 0);
+
+    if (totalGlobalDiscountMinor !== toMinorUnits(globalDiscountAmount)) {
+      alert("Allocated global discount does not match the receipt discount. Please review the cart and try again.");
+      setIsSavingReceipt(false);
+      return false;
+    }
+
+    if (totalManualDiscountMinor + totalGlobalDiscountMinor !== toMinorUnits(discountAmount)) {
+      alert("Receipt discount totals are out of sync. Please review the cart and try again.");
+      setIsSavingReceipt(false);
+      return false;
+    }
+
+    if (totalVatMinor !== toMinorUnits(vat)) {
+      alert("VAT totals are out of sync. Please review the cart and try again.");
+      setIsSavingReceipt(false);
+      return false;
+    }
+
+    if (totalFinalLineMinor !== toMinorUnits(total)) {
+      alert("Receipt line totals are out of sync. Please review the cart and try again.");
+      setIsSavingReceipt(false);
+      return false;
+    }
 
     if ((isPartialPayment || creditApplied > 0.0049) && !activeClinic?.id) {
       alert("Partial payments and patient credit need an active clinic. Open the register for a clinic first.");
@@ -3960,18 +4200,21 @@ export default function ReceiptsPage() {
       return false;
     }
 
-    const items = selectedServices.map((service, i) => {
-      const qty = service.quantity ?? 1;
-      const currentPrice = Number(service.price ?? 0);
-      const originalPrice = service.originalPrice != null ? Number(service.originalPrice) : currentPrice;
+    const items = preparedReceiptItemDrafts.map((item) => {
       return {
         receipt_id: receiptData.id,
-        service_id: service.id,
-        quantity: qty,
-        price: currentPrice,
-        total: currentPrice * qty,
-        original_price: originalPrice,
-        teeth: normalizeTeethForItem(service, i),
+        service_id: item.service_id,
+        quantity: item.quantity,
+        price: item.price,
+        total: item.total,
+        original_price: item.original_price,
+        teeth: item.teeth,
+        service_name_snapshot: item.service_name_snapshot,
+        allocated_global_discount_amount: item.allocated_global_discount_amount,
+        taxable_amount: item.taxable_amount,
+        vat_rate: item.vat_rate,
+        vat_amount: item.vat_amount,
+        final_line_total: item.final_line_total,
       };
     });
 
@@ -4201,14 +4444,35 @@ export default function ReceiptsPage() {
         patientNumber: selectedPatient?.patient_number ?? null,
       },
       doctorName: doctorForInvoice?.name || null,
-      items: selectedServices.map((svc, i) => ({
-        description: svc.name,
-        quantity: svc.quantity ?? 1,
-        originalUnitPrice: svc.originalPrice != null ? Number(svc.originalPrice) : null,
-        unitPrice: Number(svc.price),
-        discountAmount: svc.originalPrice != null ? Math.max(0, Number(svc.originalPrice) - Number(svc.price)) * (svc.quantity ?? 1) : 0,
-        teeth: cartItemTeeth[i] || [],
-      })),
+      items: selectedServices.map((svc, i) => {
+        const lineSummary = pricingSummary.lineDetails[i];
+        const renderLine = mapRegularReceiptRenderLine({
+          service_name_snapshot: svc.name,
+          quantity: svc.quantity ?? 1,
+          price: Number(svc.price),
+          total: lineSummary?.discountedLineTotal ?? Number(svc.price) * Number(svc.quantity ?? 1),
+          original_price: svc.originalPrice != null ? Number(svc.originalPrice) : null,
+          allocated_global_discount_amount: lineSummary?.globalDiscountAmount ?? 0,
+          taxable_amount: lineSummary?.taxableAmount ?? null,
+          vat_rate: lineSummary?.vatRate ?? null,
+          vat_amount: lineSummary?.vatAmount ?? null,
+          final_line_total: lineSummary?.finalLineTotal ?? null,
+          teeth: cartItemTeeth[i] || [],
+        });
+        return {
+          description: renderLine.name,
+          quantity: renderLine.quantity,
+          originalUnitPrice: renderLine.originalUnitPrice,
+          unitPrice: renderLine.soldUnitPrice,
+          discountAmount: renderLine.totalDiscountAmount,
+          allocatedGlobalDiscountAmount: renderLine.allocatedGlobalDiscountAmount,
+          taxableAmount: renderLine.taxableAmount ?? undefined,
+          vatRate: renderLine.vatRate ?? undefined,
+          vatAmount: renderLine.vatAmount ?? undefined,
+          finalLineTotal: renderLine.finalLineTotal ?? undefined,
+          teeth: renderLine.teeth,
+        };
+      }),
       totalDiscount: discountAmount,
       vatAmount: vat,
       paymentFeeAmount: computedAllocs.reduce((s, r) => s + r.feeAmount, 0),
@@ -4302,12 +4566,35 @@ export default function ReceiptsPage() {
       patientPhone: patientMobileForReceipt,
       patientFileNumber: String(patientIdForReceipt),
       doctorField: activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب",
-      items: selectedServices.map((service) => ({
-        name: service.name,
-        quantity: service.quantity ?? 1,
-        price: Number(service.price),
-        originalPrice: service.originalPrice != null ? Number(service.originalPrice) : undefined,
-        teeth: normalizeTeethForItem(service, selectedServices.indexOf(service)).map(String),
+      items: selectedServices.map((service, index) => ({
+        ...(() => {
+          const lineSummary = pricingSummary.lineDetails[index];
+          const renderLine = mapRegularReceiptRenderLine({
+            service_name_snapshot: service.name,
+            quantity: service.quantity ?? 1,
+            price: Number(service.price),
+            total: lineSummary?.discountedLineTotal ?? Number(service.price) * Number(service.quantity ?? 1),
+            original_price: service.originalPrice != null ? Number(service.originalPrice) : null,
+            allocated_global_discount_amount: lineSummary?.globalDiscountAmount ?? 0,
+            taxable_amount: lineSummary?.taxableAmount ?? null,
+            vat_rate: lineSummary?.vatRate ?? null,
+            vat_amount: lineSummary?.vatAmount ?? null,
+            final_line_total: lineSummary?.finalLineTotal ?? null,
+            teeth: normalizeTeethForItem(service, index).map(String),
+          });
+          return {
+            name: renderLine.name,
+            quantity: renderLine.quantity,
+            price: renderLine.soldUnitPrice,
+            originalPrice: renderLine.originalUnitPrice ?? undefined,
+            allocatedGlobalDiscountAmount: renderLine.allocatedGlobalDiscountAmount,
+            taxableAmount: renderLine.taxableAmount ?? undefined,
+            vatRate: renderLine.vatRate ?? undefined,
+            vatAmount: renderLine.vatAmount ?? undefined,
+            finalLineTotal: renderLine.finalLineTotal ?? undefined,
+            teeth: renderLine.teeth,
+          };
+        })(),
       })),
       subtotal,
       discountAmount,
@@ -4316,6 +4603,8 @@ export default function ReceiptsPage() {
       vat,
       total,
       allocations: receiptAllocations,
+      manualDiscountAmount,
+      globalDiscountAmount,
       creditUsed: creditUsedForReceipt,
       outstandingBalance: outstandingForReceipt,
       notes: notes.trim(),
@@ -5245,10 +5534,16 @@ export default function ReceiptsPage() {
                   Add services to build the receipt.
                 </div>
               ) : (
-                selectedServices.map((service, index) => (
+                selectedServices.map((service, index) => {
+                  const lineSummary = pricingSummary.lineDetails[index];
+                  const vatConfigured = lineSummary?.isVatConfigured ?? false;
+                  const vatLabel = lineSummary ? getServiceVatLabel(lineSummary.vatRate) : "VAT not configured";
+                  return (
                   <div
                     key={`${service.id}-${index}`}
-                    className="flex items-center justify-between rounded-2xl border border-teal-200 bg-white p-4 shadow-sm"
+                    className={`flex items-center justify-between rounded-2xl border bg-white p-4 shadow-sm ${
+                      vatConfigured ? "border-teal-200" : "border-rose-300"
+                    }`}
                   >
                     <div className="flex min-w-0 flex-1 items-start gap-3">
                       <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-teal-500 text-xs font-bold text-white">
@@ -5277,6 +5572,22 @@ export default function ReceiptsPage() {
                             {service.isVariablePriced && service.minPrice != null && service.maxPrice != null && (
                               <p className="text-[10px] text-violet-500">Range: AED {Number(service.minPrice).toFixed(0)}–{Number(service.maxPrice).toFixed(0)}</p>
                             )}
+                            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                              <span className={`rounded-full px-2 py-0.5 font-semibold ${
+                                vatConfigured
+                                  ? lineSummary?.vatRate === 0.05
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : "bg-slate-100 text-slate-700"
+                                  : "bg-rose-100 text-rose-700"
+                              }`}>
+                                {vatLabel}
+                              </span>
+                              {lineSummary && vatConfigured && (
+                                <span className="text-slate-500">
+                                  Taxable AED {lineSummary.taxableAmount.toFixed(2)} + VAT AED {lineSummary.vatAmount.toFixed(2)} = AED {lineSummary.finalLineTotal.toFixed(2)}
+                                </span>
+                              )}
+                            </div>
                             <div className="flex items-center gap-2">
                               <button
                                 onClick={() => updateCartItemQuantity(index, (service.quantity ?? 1) - 1)}
@@ -5325,6 +5636,22 @@ export default function ReceiptsPage() {
                             {service.isVariablePriced && service.minPrice != null && service.maxPrice != null && (
                               <p className="text-[10px] text-violet-500">Range: AED {Number(service.minPrice).toFixed(0)}–{Number(service.maxPrice).toFixed(0)}</p>
                             )}
+                            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                              <span className={`rounded-full px-2 py-0.5 font-semibold ${
+                                vatConfigured
+                                  ? lineSummary?.vatRate === 0.05
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : "bg-slate-100 text-slate-700"
+                                  : "bg-rose-100 text-rose-700"
+                              }`}>
+                                {vatLabel}
+                              </span>
+                              {lineSummary && vatConfigured && (
+                                <span className="text-slate-500">
+                                  Taxable AED {lineSummary.taxableAmount.toFixed(2)} + VAT AED {lineSummary.vatAmount.toFixed(2)} = AED {lineSummary.finalLineTotal.toFixed(2)}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         )}
                         {shouldShowTeethInput(service) && (
@@ -5379,26 +5706,47 @@ export default function ReceiptsPage() {
                       Remove
                     </button>
                   </div>
-                ))
+                )})
               )}
             </div>
           </div>
 
           <div className="rounded-3xl bg-slate-950 p-5 text-white shadow-lg">
             <div className="space-y-3 text-sm text-slate-300">
+              {hasUnconfiguredVatServices && (
+                <div className="rounded-2xl border border-rose-300 bg-rose-500/10 px-3 py-2 text-rose-200">
+                  VAT not configured for {unconfiguredVatLines.map((line) => line.serviceName).join(", ")}. Configure VAT in Backend &gt; Services before checkout.
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <span>Subtotal</span>
                 <span>AED {subtotal.toFixed(2)}</span>
               </div>
-              {discountAmount > 0 && (
+              {manualDiscountAmount > 0 && (
+                <div className="flex items-center justify-between text-amber-300">
+                  <span>Promo / Price Adjustments</span>
+                  <span>- AED {manualDiscountAmount.toFixed(2)}</span>
+                </div>
+              )}
+              {globalDiscountAmount > 0 && (
                 <div className="flex items-center justify-between text-rose-400">
-                  <span>Discount {discountType === "%" ? `(${discountInput}%)` : ""}</span>
-                  <span>- AED {discountAmount.toFixed(2)}</span>
+                  <span>Global Discount {discountType === "%" ? `(${discountInput}%)` : ""}</span>
+                  <span>- AED {globalDiscountAmount.toFixed(2)}</span>
                 </div>
               )}
               <div className="flex items-center justify-between">
+                <span>Taxable Subtotal</span>
+                <span>AED {preVatTotal.toFixed(2)}</span>
+              </div>
+              <div className="flex items-center justify-between">
                 <span>VAT</span>
                 <span>AED {vat.toFixed(2)}</span>
+              </div>
+              <div className="border-t border-white/10 pt-4 text-base font-semibold text-white">
+                <div className="flex items-center justify-between">
+                  <span>Final Invoice Amount</span>
+                  <span>AED {total.toFixed(2)}</span>
+                </div>
               </div>
               {paymentFeeTotalRounded > 0 && (
                 <div className="flex items-center justify-between text-cyan-300">
@@ -5406,7 +5754,7 @@ export default function ReceiptsPage() {
                   <span>AED {paymentFeeTotalRounded.toFixed(2)}</span>
                 </div>
               )}
-              <div className="border-t border-white/10 pt-4 text-base font-semibold text-white">
+              <div className="pt-1 text-base font-semibold text-white">
                 <div className="flex items-center justify-between">
                   <span>Total Customer Charge</span>
                   <span>AED {Math.max(totalCustomerChargedToday, total).toFixed(2)}</span>
@@ -5425,7 +5773,7 @@ export default function ReceiptsPage() {
               </button>
               <button
                 onClick={proceedToPayment}
-                disabled={isProceeding}
+                disabled={isProceeding || hasUnconfiguredVatServices}
                 className="inline-flex items-center justify-center rounded-3xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-400 disabled:opacity-50"
               >
                 {isProceeding ? "Processing..." : "Proceed to Payment"}
@@ -5439,7 +5787,23 @@ export default function ReceiptsPage() {
 
                   <div className="mb-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
                     <div className="flex items-center justify-between text-sm text-slate-700">
-                      <span>Treatment Subtotal</span>
+                      <span>Subtotal</span>
+                      <span className="font-semibold">AED {subtotal.toFixed(2)}</span>
+                    </div>
+                    {manualDiscountAmount > 0 && (
+                      <div className="flex items-center justify-between text-sm text-amber-700">
+                        <span>Promo / Price Adjustments</span>
+                        <span className="font-semibold">- AED {manualDiscountAmount.toFixed(2)}</span>
+                      </div>
+                    )}
+                    {globalDiscountAmount > 0 && (
+                      <div className="flex items-center justify-between text-sm text-rose-700">
+                        <span>Global Discount</span>
+                        <span className="font-semibold">- AED {globalDiscountAmount.toFixed(2)}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between text-sm text-slate-700">
+                      <span>Taxable Subtotal</span>
                       <span className="font-semibold">AED {preVatTotal.toFixed(2)}</span>
                     </div>
                     <div className="flex items-center justify-between text-sm text-slate-700">

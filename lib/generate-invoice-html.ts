@@ -24,6 +24,10 @@ export interface InvoiceItem {
   /** Reduction from the list price for this single line */
   discountAmount?: number;
   vatRate?: number;
+  allocatedGlobalDiscountAmount?: number;
+  taxableAmount?: number;
+  vatAmount?: number;
+  finalLineTotal?: number;
   teeth?: string[];
 }
 
@@ -253,27 +257,43 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
   // ── services table rows ────────────────────────────────────────────────────
   const itemsRows = opts.items.map((item, idx) => {
     const originalUnitPrice = item.originalUnitPrice != null ? Number(item.originalUnitPrice) : null;
-    const priceWasEdited = originalUnitPrice != null && originalUnitPrice > Number(item.unitPrice) + 0.0049;
-    const displayUnitPrice = priceWasEdited ? originalUnitPrice : Number(item.unitPrice);
-    const lineBasePrice = priceWasEdited ? originalUnitPrice : Number(item.unitPrice);
+    const soldUnitPrice = Number(item.unitPrice);
+    const soldLineTotal = soldUnitPrice * item.quantity;
+    const hasTruePromo = originalUnitPrice != null && originalUnitPrice > soldUnitPrice + 0.0049;
+    const hasPriceIncrease = originalUnitPrice != null && soldUnitPrice > originalUnitPrice + 0.0049;
+    const lineBasePrice = hasTruePromo && originalUnitPrice != null ? originalUnitPrice : soldUnitPrice;
     const lineNet = lineBasePrice * item.quantity;
+    const hasSnapshotValues = item.taxableAmount != null
+      && item.vatRate != null
+      && item.vatAmount != null
+      && item.finalLineTotal != null;
     const disc = item.discountAmount ?? 0;
-    const taxable = Math.max(0, lineNet - disc);
-    const vatRate = item.vatRate ?? (vatAmount > 0 ? 0.05 : 0);
-    const vatLine = truncateCurrency(taxable * vatRate);
-    const lineTotal = truncateCurrency(taxable + vatLine);
+    const taxable = hasSnapshotValues ? Number(item.taxableAmount) : Math.max(0, lineNet - disc);
+    const vatRate = hasSnapshotValues
+      ? Number(item.vatRate ?? 0)
+      : item.vatRate ?? (vatAmount > 0 ? 0.05 : 0);
+    const vatLine = hasSnapshotValues ? Number(item.vatAmount) : truncateCurrency(taxable * vatRate);
+    const lineTotal = hasSnapshotValues ? Number(item.finalLineTotal) : truncateCurrency(taxable + vatLine);
     const teethLabel = item.teeth && item.teeth.length > 0 ? ` <span style="font-size:8px;color:#888;">(Tooth #${item.teeth.join(", #")})</span>` : "";
-    const unitPriceHtml = fmt(displayUnitPrice);
+    const pricingDetailLines: string[] = [];
+    if (hasTruePromo && originalUnitPrice != null) {
+      pricingDetailLines.push(`<div style="margin-top:3px;font-size:8px;color:#666;">Original Price: ${fmt(originalUnitPrice * item.quantity)}</div>`);
+      pricingDetailLines.push(`<div style="font-size:8px;color:#666;">Promo Price: ${fmt(soldLineTotal)}</div>`);
+    } else if (hasPriceIncrease && originalUnitPrice != null) {
+      pricingDetailLines.push(`<div style="margin-top:3px;font-size:8px;color:#666;">Original Price: ${fmt(originalUnitPrice * item.quantity)}</div>`);
+      pricingDetailLines.push(`<div style="font-size:8px;color:#666;">Price Adjustment: ${fmt(soldLineTotal)}</div>`);
+    }
+    const unitPriceHtml = fmt(soldUnitPrice);
     return `
       <tr>
         <td style="text-align:center;">${idx + 1}</td>
-        <td>${escHtml(item.description)}${teethLabel}</td>
+        <td>${escHtml(item.description)}${teethLabel}${pricingDetailLines.join("")}</td>
         <td>${escHtml(item.providerName || "-")}</td>
         <td style="text-align:center;">${item.quantity}</td>
         <td style="text-align:right;">${unitPriceHtml}</td>
         <td style="text-align:right;">${disc > 0 ? fmt(disc) : "-"}</td>
         <td style="text-align:right;">${fmt(taxable)}</td>
-        <td style="text-align:center;">${vatRate > 0 ? `${(vatRate * 100).toFixed(0)}%` : "0%"}</td>
+        <td style="text-align:center;">${vatRate > 0 ? `${(vatRate * 100).toFixed(0)}%` : "-"}</td>
         <td style="text-align:right;">${vatRate > 0 ? fmt(vatLine) : "-"}</td>
         <td style="text-align:right;font-weight:600;">${fmt(lineTotal)}</td>
       </tr>`;

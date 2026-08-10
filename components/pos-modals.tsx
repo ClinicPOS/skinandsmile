@@ -44,6 +44,7 @@ import {
 } from "../lib/receipt-refunds";
 import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 import { computeTreatmentPlanRollup } from "../lib/treatment-plan-rollup";
+import { mapRegularReceiptRenderLine, summarizeRegularReceiptForRender } from "../lib/regular-receipt-rendering";
 
 type Patient = {
   id: string;
@@ -162,6 +163,8 @@ type LookupItem = {
   id: string;
   name: string;
   price?: number | null;
+  standard_price?: number | null;
+  pricing_type?: string | null;
   clinic_id?: string | null;
 };
 
@@ -239,6 +242,14 @@ type ReceiptItem = {
   quantity: number;
   price: number;
   total: number;
+  original_price?: number | null;
+  service_name_snapshot?: string | null;
+  teeth?: string[] | null;
+  allocated_global_discount_amount?: number | null;
+  taxable_amount?: number | null;
+  vat_rate?: number | null;
+  vat_amount?: number | null;
+  final_line_total?: number | null;
 };
 
 // Modal Overlay Wrapper
@@ -2971,43 +2982,32 @@ export function ReceiptHistoryModal({
       ? `#${String(patient.patient_number).padStart(5, "0")}`
       : "-";
     
-    // Map saved receipt items to thermal receipt format with original prices
-    const thermalItems = receiptItems.map((item) => {
-      const quantity = Number(item.quantity ?? 1);
-      const finalUnitPrice = Number(item.price ?? 0);
-      // For original price: use saved original_price if available, otherwise final price
-      const originalUnitPrice = Number(
-        item.original_price ?? item.price ?? 0
-      );
-      
-      return {
-        name: services.find((s) => s.id === item.service_id)?.name || "Service",
-        quantity,
-        price: finalUnitPrice,
-        originalPrice: originalUnitPrice,
-        teeth: item.teeth || undefined,
-      };
+    const renderLines = receiptItems.map((item) => {
+      const service = services.find((s) => s.id === item.service_id);
+      return mapRegularReceiptRenderLine(item, {
+        serviceName: service?.name || "Service",
+        fallbackOriginalUnitPrice: item.original_price != null
+          ? Number(item.original_price)
+          : service?.standard_price != null
+            ? Number(service.standard_price)
+            : service?.price != null
+              ? Number(service.price)
+              : null,
+      });
     });
-
-    // Recalculate subtotal and discount from items to ensure correct values for reprints
-    // This is needed because old receipts may have incorrect summary values saved
-    let recalculatedSubtotal = 0;
-    let recalculatedDiscount = 0;
-    
-    receiptItems.forEach((item) => {
-      const quantity = Number(item.quantity ?? 1);
-      const finalUnitPrice = Number(item.price ?? 0);
-      const originalUnitPrice = Number(
-        item.original_price ?? item.price ?? 0
-      );
-      
-      const originalLineTotal = originalUnitPrice * quantity;
-      const finalLineTotal = finalUnitPrice * quantity;
-      const lineDiscount = Math.max(0, originalLineTotal - finalLineTotal);
-      
-      recalculatedSubtotal += originalLineTotal;
-      recalculatedDiscount += lineDiscount;
-    });
+    const thermalItems = renderLines.map((line) => ({
+      name: line.name,
+      quantity: line.quantity,
+      price: line.soldUnitPrice,
+      originalPrice: line.originalUnitPrice ?? undefined,
+      allocatedGlobalDiscountAmount: line.allocatedGlobalDiscountAmount,
+      taxableAmount: line.taxableAmount ?? undefined,
+      vatRate: line.vatRate ?? undefined,
+      vatAmount: line.vatAmount ?? undefined,
+      finalLineTotal: line.finalLineTotal ?? undefined,
+      teeth: line.teeth,
+    }));
+    const summary = summarizeRegularReceiptForRender(receipt as any, renderLines);
 
     const options: BuildThermalReceiptHtmlOptions = {
       title: "REPRINT",
@@ -3024,11 +3024,14 @@ export function ReceiptHistoryModal({
       patientFileNumber: patientFileNo,
       doctorField: doctors.find((d) => d.id === receipt.doctor_id)?.name || "-",
       items: thermalItems,
-      subtotal: recalculatedSubtotal,
-      discountAmount: recalculatedDiscount,
-      vat: Number(receipt.vat || 0),
-      total: Number(receipt.total || 0),
+      subtotal: summary.subtotal,
+      discountAmount: summary.discountAmount,
+      vat: summary.vat,
+      total: summary.invoiceTotalBeforeGatewayFee,
+      paymentFeeAmount: summary.paymentFeeAmount,
       allocations: [],
+      manualDiscountAmount: summary.useSnapshotSummary ? summary.manualDiscountAmount : undefined,
+      globalDiscountAmount: summary.useSnapshotSummary ? summary.globalDiscountAmount : undefined,
       creditUsed: Number(receipt.credit_applied || 0),
       outstandingBalance: receipt.amount_paid != null 
         ? Math.max(0, Number(receipt.total || 0) - Number(receipt.amount_paid))
@@ -3053,30 +3056,24 @@ export function ReceiptHistoryModal({
       receiptItems = data || [];
     }
 
-    const vatAmount = Number(receipt.vat || 0);
-    const total = Number(receipt.total || 0);
+    const renderLines = receiptItems.map((item: any) => {
+      const service = services.find((s) => s.id === item.service_id);
+      return mapRegularReceiptRenderLine(item, {
+        serviceName: service?.name || "Service",
+        fallbackOriginalUnitPrice: item.original_price != null
+          ? Number(item.original_price)
+          : service?.standard_price != null
+            ? Number(service.standard_price)
+            : service?.price != null
+              ? Number(service.price)
+              : null,
+      });
+    });
+    const summary = summarizeRegularReceiptForRender(receipt as any, renderLines);
+    const total = summary.finalTotal;
     const paidAtSale = receipt.amount_paid != null ? Number(receipt.amount_paid) : total;
     const creditAtSale = Number(receipt.credit_applied || 0);
     const outstandingBalance = Math.max(0, total - paidAtSale - creditAtSale);
-
-    // Recalculate subtotal and discount from items to ensure correct values for reprints
-    let recalculatedSubtotal = 0;
-    let recalculatedDiscount = 0;
-    
-    receiptItems.forEach((item: any) => {
-      const quantity = Number(item.quantity ?? 1);
-      const finalUnitPrice = Number(item.price ?? 0);
-      const originalUnitPrice = Number(
-        item.original_price ?? item.price ?? 0
-      );
-      
-      const originalLineTotal = originalUnitPrice * quantity;
-      const finalLineTotal = finalUnitPrice * quantity;
-      const lineDiscount = Math.max(0, originalLineTotal - finalLineTotal);
-      
-      recalculatedSubtotal += originalLineTotal;
-      recalculatedDiscount += lineDiscount;
-    });
 
     const html = generateInvoiceHtml({
       clinic: clinicForReceipt,
@@ -3091,24 +3088,21 @@ export function ReceiptHistoryModal({
         fileNumber: patient?.clinic_file_no || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
       },
       doctorName,
-      items: (receiptItems || []).map((item: any) => {
-        const quantity = Number(item.quantity ?? 1);
-        const finalUnitPrice = Number(item.price ?? 0);
-        // For original price: use saved original_price if available, otherwise final price
-        const originalUnitPrice = Number(
-          item.original_price ?? item.price ?? 0
-        );
-        return {
-          description: services.find((s) => s.id === item.service_id)?.name || "Service",
-          quantity,
-          unitPrice: originalUnitPrice,
-          discount: Math.max(0, originalUnitPrice - finalUnitPrice),
-          taxableAmount: finalUnitPrice,
-        };
-      }),
-      totalDiscount: recalculatedDiscount,
-      vatAmount,
-      paymentFeeAmount: Number(receipt.gateway_fee || 0),
+      items: renderLines.map((line) => ({
+        description: line.name,
+        quantity: line.quantity,
+        originalUnitPrice: line.originalUnitPrice,
+        unitPrice: line.soldUnitPrice,
+        discountAmount: line.totalDiscountAmount,
+        allocatedGlobalDiscountAmount: line.allocatedGlobalDiscountAmount,
+        taxableAmount: line.taxableAmount ?? undefined,
+        vatRate: line.vatRate ?? undefined,
+        vatAmount: line.vatAmount ?? undefined,
+        finalLineTotal: line.finalLineTotal ?? undefined,
+      })),
+      totalDiscount: summary.discountAmount,
+      vatAmount: summary.vat,
+      paymentFeeAmount: summary.paymentFeeAmount,
       grandTotal: total,
       amountPaid: paidAtSale,
       outstandingBalance,
