@@ -282,38 +282,6 @@ export type TreatmentPlanPaymentAllocation = {
   updated_at: string;
 };
 
-export type PosHold = {
-  id: string;
-  clinic_id: string;
-  patient_id: string | null;
-  patient_name: string;
-  patient_phone: string | null;
-  doctor_id: string | null;
-  receptionist_id: string;
-  register_session_id: string | null;
-  clinic_patient_file_id: string | null;
-  patient_file_no: string | null;
-  status: 'Waiting' | 'In Treatment' | 'Ready to Pay' | 'Cancelled';
-  notes: string | null;
-  discount_input: string | null;
-  discount_type: 'AED' | '%' | null;
-  cancel_reason: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export type PosHoldService = {
-  id: string;
-  hold_id: string;
-  service_id: string | null;
-  service_name: string;
-  price: number;
-  original_price: number | null;
-  quantity: number;
-  teeth: string[];
-  created_at: string;
-};
-
 export type PaymentRecord = {
   id: string;
   receipt_id: string;

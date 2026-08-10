@@ -149,23 +149,10 @@ export async function PATCH(
     return Response.json({ error: "Paid To is required for expenses." }, { status: 400 });
   }
 
-  const entriesBefore = await listCashDeductions(supabase, registerContext.id);
-  const cashCollected = await computeRegisterSessionCashCollected(supabase, registerContext);
-  const activeOtherDeductions = roundCurrency(entriesBefore
-    .filter((row) => row.status === "active" && row.id !== deductionId)
-    .reduce((sum, row) => sum + Number(row.amount || 0), 0));
-  const availableForThisUpdate = roundCurrency(Math.max(0, cashCollected - activeOtherDeductions));
-  if (amount - availableForThisUpdate > 0.0049) {
-    return Response.json({
-      error: `Insufficient cash collected during this shift. Available cash for deductions: AED ${availableForThisUpdate.toFixed(2)}.`,
-      availableCash: availableForThisUpdate,
-    }, { status: 409 });
-  }
-
   const updatePayload = {
     type: nextType,
     staff_id: nextType === "commission" ? staffId : null,
-    paid_to_name: paidToName,
+    paid_to_name: nextType === "expense" ? (paidToName || description) : paidToName,
     description,
     reference_number: referenceNumber,
     amount,

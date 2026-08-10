@@ -282,6 +282,7 @@ export function SearchPatientModal({
   isOpen,
   onClose,
   onSelect,
+  initialProfilePatientId = null,
   patients,
   clinicId,
   outstandingBalances = [],
@@ -299,6 +300,7 @@ export function SearchPatientModal({
   isOpen: boolean;
   onClose: () => void;
   onSelect: (patient: FullPatient) => void;
+  initialProfilePatientId?: string | null;
   patients: FullPatient[];
   clinicId?: string | null;
   outstandingBalances?: OutstandingBalance[];
@@ -376,17 +378,26 @@ export function SearchPatientModal({
 
   useEffect(() => {
     if (isOpen) {
-      setView("search");
       setQuery("");
-      setSelectedPatient(null);
       setExpandedNoteIds(new Set());
       setShowAddNote(false);
       setNewNoteText("");
       setShowEditModal(false);
       setExpandedProfileSections(new Set());
       resetTreatmentPlanForms();
+
+      if (initialProfilePatientId) {
+        const patient = patients.find((row) => row.id === initialProfilePatientId);
+        if (patient) {
+          void openProfile(patient);
+          return;
+        }
+      }
+
+      setView("search");
+      setSelectedPatient(null);
     }
-  }, [isOpen]);
+  }, [isOpen, initialProfilePatientId, patients]);
 
   const filteredPatients = useMemo(() => {
     const search = query.trim().toLowerCase();

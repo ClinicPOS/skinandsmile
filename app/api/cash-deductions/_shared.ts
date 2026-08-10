@@ -40,6 +40,8 @@ type PaymentAllocationRow = {
   payment_id: string;
   method_group: string;
   customer_charged_amount: number | null;
+  refunded_treatment_amount: number | null;
+  refunded_fee_amount: number | null;
 };
 
 type TreatmentPlanPaymentRecordRow = {
@@ -138,14 +140,23 @@ export async function loadRegisterSessionContext(
 
 function sumCashAllocations(
   paymentIds: string[],
-  allocations: Array<{ payment_id: string; method_group: string; customer_charged_amount: number | null }>
+  allocations: Array<{
+    payment_id: string;
+    method_group: string;
+    customer_charged_amount: number | null;
+    refunded_treatment_amount?: number | null;
+    refunded_fee_amount?: number | null;
+  }>
 ): number {
   const allowedIds = new Set(paymentIds);
   return roundCurrency(
     allocations.reduce((sum, row) => {
       if (!allowedIds.has(String(row.payment_id || ""))) return sum;
       if (String(row.method_group || "").toLowerCase() !== "cash") return sum;
-      return sum + Number(row.customer_charged_amount || 0);
+      const charged = Number(row.customer_charged_amount || 0);
+      const refundedTreatment = Number(row.refunded_treatment_amount || 0);
+      const refundedFee = Number(row.refunded_fee_amount || 0);
+      return sum + Math.max(0, charged - refundedTreatment - refundedFee);
     }, 0)
   );
 }
@@ -205,7 +216,7 @@ export async function computeRegisterSessionCashCollected(
     paymentRecordIds.length > 0
       ? supabase
           .from("payment_allocations")
-          .select("payment_id, method_group, customer_charged_amount")
+          .select("payment_id, method_group, customer_charged_amount, refunded_treatment_amount, refunded_fee_amount")
           .in("payment_id", paymentRecordIds)
       : Promise.resolve({ data: [], error: null }),
     treatmentPlanRecordIds.length > 0

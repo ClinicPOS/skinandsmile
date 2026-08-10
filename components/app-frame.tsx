@@ -19,15 +19,18 @@ type AppFrameProps = {
   children: ReactNode;
   actionLabel?: string;
   actionHref?: string;
+  workspaceType?: "default" | "pos";
 };
 
 export function AppFrame({
   children,
+  workspaceType = "default",
 }: AppFrameProps) {
   const router = useRouter();
   const pathname = usePathname();
   const { accessSession, isLoaded } = useClinicAccess();
   const isManager = accessSession?.mode === "manager";
+  const isPosWorkspace = workspaceType === "pos";
   const visibleNavigation = isManager
     ? navigation
     : navigation.filter((item) => item.href !== "/backend" && item.href !== "/reports");
@@ -69,7 +72,7 @@ export function AppFrame({
           backgroundPosition: "center",
         }}
       />
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
+      <div className={`mx-auto flex w-full flex-col gap-6 py-6 ${isPosWorkspace ? "max-w-[1720px] px-3 sm:px-4 lg:px-5" : "max-w-6xl px-4 sm:px-6 lg:px-8"}`}>
         <header className="rounded-3xl border border-teal-100/80 bg-white/88 px-5 py-3 shadow-[0_20px_80px_-30px_rgba(14,116,144,0.22)] backdrop-blur xl:px-6">
           <div className="flex items-center justify-between gap-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
@@ -105,7 +108,13 @@ export function AppFrame({
           </div>
         </header>
 
-        <section className="rounded-3xl border border-teal-100/80 bg-white/92 p-5 shadow-[0_20px_80px_-35px_rgba(14,116,144,0.22)] backdrop-blur sm:p-6 lg:p-8">
+        <section
+          className={
+            isPosWorkspace
+              ? "p-0"
+              : "rounded-3xl border border-teal-100/80 bg-white/92 p-5 shadow-[0_20px_80px_-35px_rgba(14,116,144,0.22)] backdrop-blur sm:p-6 lg:p-8"
+          }
+        >
           {children}
         </section>
       </div>

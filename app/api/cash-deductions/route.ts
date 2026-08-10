@@ -125,23 +125,13 @@ export async function POST(request: Request) {
     return Response.json({ error: "Paid To is required for expenses." }, { status: 400 });
   }
 
-  const currentEntries = await listCashDeductions(supabase, registerSessionId);
-  const cashCollected = await computeRegisterSessionCashCollected(supabase, context);
-  const summary = buildCashDeductionSummary(context, currentEntries, cashCollected);
-  if (amount - summary.availableCash > 0.0049) {
-    return Response.json({
-      error: `Insufficient cash collected during this shift. Available cash for deductions: AED ${summary.availableCash.toFixed(2)}.`,
-      availableCash: summary.availableCash,
-    }, { status: 409 });
-  }
-
   const payload = {
     clinic_id: context.clinicId,
     register_session_id: context.id,
     business_date: getDubaiBusinessDate(new Date()),
     type,
     staff_id: type === "commission" ? staffId : null,
-    paid_to_name: paidToName,
+    paid_to_name: type === "expense" ? (paidToName || description) : paidToName,
     description,
     reference_number: referenceNumber,
     amount,

@@ -8,8 +8,8 @@ import { supabase } from "../../lib/supabase";
 import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service, PaymentAllocation, PaymentAllocationRefund, PaymentRecord, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, CashDeduction, CashDeductionType } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
 import { SearchPatientModal, ReceiptHistoryModal } from "../../components/pos-modals";
+import { PosRegisterPatientModal } from "../../components/pos-register-patient-modal";
 import { CollectBalancePaymentModal } from "../../components/outstanding-balance-modals";
-import { PosHoldsModal } from "../../components/pos-holds-modal";
 import { PosPlanCheckoutModal } from "../../components/pos-plan-checkout-modal";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { printPaymentReceipt } from "../../lib/print-payment-receipt";
@@ -31,7 +31,6 @@ import { getInstallmentFeeProvider } from "../../lib/tabby-tamara-fees";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { generateInvoiceHtml as buildInvoiceHtml, type InvoiceAllocationRow, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { buildThermalReceiptHtml as buildThermalReceiptHtmlShared, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
-import { createClinicPatientFile, getClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
 import { clinicAccessAllowsClinic, filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 import { extractLegacyCashAmount, getCashDeductionTypeLabel, getDubaiBusinessDate } from "../../lib/cash-deductions";
 import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
@@ -407,6 +406,7 @@ export default function ReceiptsPage() {
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("");
   const [paymentAllocationDrafts, setPaymentAllocationDrafts] = useState<PaymentAllocationDraft[]>([]);
   const [paymentValidationErrors, setPaymentValidationErrors] = useState<string[]>([]);
+  const [cashReceivedByRow, setCashReceivedByRow] = useState<Record<string, string>>({});
   const [applyCreditChecked, setApplyCreditChecked] = useState(false);
   const [discountInput, setDiscountInput] = useState("");
   const [discountType, setDiscountType] = useState<"AED" | "%">("AED");
@@ -437,13 +437,11 @@ export default function ReceiptsPage() {
   const [isLoadingCashSummary, setIsLoadingCashSummary] = useState(false);
   const [cashDeductions, setCashDeductions] = useState<CashDeduction[]>([]);
   const [isLoadingCashDeductions, setIsLoadingCashDeductions] = useState(false);
-  const [isCashDeductionPanelExpanded, setIsCashDeductionPanelExpanded] = useState(false);
   const [showCashDeductionModal, setShowCashDeductionModal] = useState(false);
   const [cashDeductionModalMode, setCashDeductionModalMode] = useState<"create" | "edit">("create");
   const [editingCashDeductionId, setEditingCashDeductionId] = useState("");
   const [cashDeductionType, setCashDeductionType] = useState<CashDeductionType>("expense");
   const [cashDeductionStaffId, setCashDeductionStaffId] = useState("");
-  const [cashDeductionPaidTo, setCashDeductionPaidTo] = useState("");
   const [cashDeductionAmountInput, setCashDeductionAmountInput] = useState("");
   const [cashDeductionDescription, setCashDeductionDescription] = useState("");
   const [cashDeductionReferenceInput, setCashDeductionReferenceInput] = useState("");
@@ -471,6 +469,8 @@ export default function ReceiptsPage() {
   });
   const [currentReceipt, setCurrentReceipt] = useState<any | null>(null);
   const [showSearchPatientModal, setShowSearchPatientModal] = useState(false);
+  const [searchPatientModalInitialProfileId, setSearchPatientModalInitialProfileId] = useState<string | null>(null);
+  const [showRegisterPatientModal, setShowRegisterPatientModal] = useState(false);
   const [showReceiptHistoryModal, setShowReceiptHistoryModal] = useState(false);
   const [outstandingBalances, setOutstandingBalances] = useState<OutstandingBalance[]>([]);
   const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
@@ -489,11 +489,6 @@ export default function ReceiptsPage() {
   const [showTransactionTypeModal, setShowTransactionTypeModal] = useState(false);
   // Treatment plan checkout
   const [showPlanCheckoutModal, setShowPlanCheckoutModal] = useState(false);
-  // Holds
-  const [showHoldsModal, setShowHoldsModal] = useState(false);
-  const [activeHoldId, setActiveHoldId] = useState("");
-  const [holdCount, setHoldCount] = useState(0);
-  const [isSavingHold, setIsSavingHold] = useState(false);
   // Active plans for selected patient
   const [patientActivePlans, setPatientActivePlans] = useState<any[]>([]);
   const [patientActivePlanPayments, setPatientActivePlanPayments] = useState<any[]>([]);
@@ -515,7 +510,6 @@ export default function ReceiptsPage() {
   const expenseFeatureEnabled = !!activeClinic?.enable_expenses;
   const commissionFeatureEnabled = !!activeClinic?.enable_commissions;
   const deductionFeatureEnabled = expenseFeatureEnabled || commissionFeatureEnabled;
-  const showCashDeductionPanel = deductionFeatureEnabled || cashDeductions.length > 0;
 
   function resetCashDeductionForm(nextType?: CashDeductionType) {
     const resolvedType = nextType
@@ -524,7 +518,6 @@ export default function ReceiptsPage() {
     setEditingCashDeductionId("");
     setCashDeductionType(resolvedType);
     setCashDeductionStaffId("");
-    setCashDeductionPaidTo("");
     setCashDeductionAmountInput("");
     setCashDeductionDescription("");
     setCashDeductionReferenceInput("");
@@ -596,13 +589,11 @@ export default function ReceiptsPage() {
   }
 
   function openCashDeductionEntry(entry?: CashDeduction) {
-    setIsCashDeductionPanelExpanded(true);
     if (entry) {
       setCashDeductionModalMode("edit");
       setEditingCashDeductionId(entry.id);
       setCashDeductionType(entry.type);
       setCashDeductionStaffId(entry.staff_id || "");
-      setCashDeductionPaidTo(entry.paid_to_name || "");
       setCashDeductionAmountInput(Number(entry.amount || 0).toFixed(2));
       setCashDeductionDescription(entry.description || "");
       setCashDeductionReferenceInput(entry.reference_number || "");
@@ -666,11 +657,6 @@ export default function ReceiptsPage() {
       // ignore
     }
   }, [receptionistId, clinics, accessSession]);
-
-  useEffect(() => {
-    if (!activeClinic?.id) return;
-    loadHoldCount();
-  }, [activeClinic?.id]);
 
   useEffect(() => {
     if (!isPosUnlocked || !registerSessionId || !activeClinic?.id) {
@@ -1096,70 +1082,6 @@ export default function ReceiptsPage() {
     return `Tooth #${teeth.join(", #")}`;
   }
 
-  async function loadHoldCount() {
-    if (!activeClinic?.id) return;
-    const { count } = await supabase
-      .from("pos_holds")
-      .select("id", { count: "exact", head: true })
-      .eq("clinic_id", activeClinic.id)
-      .in("status", ["Waiting", "In Treatment", "Ready to Pay"]);
-    setHoldCount(count || 0);
-  }
-
-  async function holdAndStartNew() {
-    if (!isPosUnlocked) { alert("Open the register first."); return; }
-    if (!patientName.trim()) { alert("Enter a patient name before holding."); return; }
-    if (!activeClinic?.id) { alert("Open the register for a clinic first."); return; }
-    if (!validateTeethSelection()) return;
-
-    setIsSavingHold(true);
-    try {
-      const { data: holdData, error: holdError } = await supabase
-        .from("pos_holds")
-        .insert([{
-          clinic_id: activeClinic.id,
-          patient_id: transactionPatientId || null,
-          patient_name: patientName.trim(),
-          patient_phone: patientPhoneInput.trim() || null,
-          doctor_id: doctorId || null,
-          receptionist_id: receptionistId || loginReceptionistId,
-          register_session_id: registerSessionId || null,
-          clinic_patient_file_id: transactionPatientFileId || null,
-          patient_file_no: patientFileNumberInput.trim() || null,
-          status: "Waiting",
-          notes: notes.trim() || null,
-          discount_input: discountInput || null,
-          discount_type: discountType,
-        }])
-        .select()
-        .single();
-
-      if (holdError || !holdData) {
-        alert(`Could not save hold: ${holdError?.message || "Unknown error"}`);
-        return;
-      }
-
-      if (selectedServices.length > 0) {
-        const holdServices = selectedServices.map((s, i) => ({
-          hold_id: holdData.id,
-          service_id: s.id,
-          service_name: s.name,
-          price: Number(s.price),
-          original_price: s.originalPrice != null ? Number(s.originalPrice) : null,
-          quantity: s.quantity ?? 1,
-          teeth: normalizeTeethForItem(s, i),
-        }));
-        await supabase.from("pos_hold_services").insert(holdServices);
-      }
-
-      clearPosForm();
-      setHoldCount((c) => c + 1);
-      alert(`Hold saved for ${patientName.trim()}. POS is ready for the next patient.`);
-    } finally {
-      setIsSavingHold(false);
-    }
-  }
-
   function clearPosForm() {
     setPatientId("");
     setPatientName("");
@@ -1183,7 +1105,6 @@ export default function ReceiptsPage() {
     setTransactionPatientId("");
     setTransactionPatientFileId("");
     setSelectedPatientInfo(null);
-    setActiveHoldId("");
     setPatientActivePlans([]);
     setPatientActivePlanPayments([]);
     setPatientActivePlanPaymentRecords([]);
@@ -1224,87 +1145,6 @@ export default function ReceiptsPage() {
     }
   }
 
-  async function resumeHold(hold: any) {
-    setShowHoldsModal(false);
-    setActiveHoldId(String(hold.id || ""));
-    setPatientName(hold.patient_name || "");
-    setPatientPhoneInput(hold.patient_phone || "");
-    setDoctorId(hold.doctor_id || "");
-    setNotes(hold.notes || "");
-    setDiscountInput(hold.discount_input || "");
-    setDiscountType(hold.discount_type === "%" ? "%" : "AED");
-
-    let resumedPatientId = hold.patient_id || "";
-    let resumedClinicPatientFileId = hold.clinic_patient_file_id || "";
-    let resumedFileNo = hold.patient_file_no || "";
-
-    if (hold.clinic_patient_file_id) {
-      const { data: clinicFile } = await supabase
-        .from("clinic_patient_files")
-        .select("id, patient_id, file_no")
-        .eq("id", hold.clinic_patient_file_id)
-        .maybeSingle();
-
-      if (clinicFile) {
-        resumedClinicPatientFileId = String(clinicFile.id || resumedClinicPatientFileId);
-        resumedFileNo = String(clinicFile.file_no || resumedFileNo);
-        resumedPatientId = String(clinicFile.patient_id || resumedPatientId);
-      }
-    }
-
-    setPatientId(resumedPatientId);
-    setTransactionPatientId(resumedPatientId);
-    setTransactionPatientFileId(resumedClinicPatientFileId);
-    setPatientFileNumberInput(resumedFileNo);
-
-    if (hold.services && hold.services.length > 0) {
-      const svcs = hold.services.map((s: any) => {
-        const serviceMeta = services.find((entry) => entry.id === s.service_id);
-        const isVariablePriced = serviceMeta?.pricing_type === "variable";
-        return {
-          ...serviceMeta,
-          id: s.service_id || serviceMeta?.id || "",
-          name: s.service_name || serviceMeta?.name || "Service",
-          price: Number(s.price),
-          originalPrice: s.original_price != null ? Number(s.original_price) : undefined,
-          quantity: s.quantity || 1,
-          vat_rate: serviceMeta?.vat_rate ?? null,
-          isVariablePriced,
-          minPrice: isVariablePriced ? Number(serviceMeta?.min_price ?? 0) : null,
-          maxPrice: isVariablePriced ? Number(serviceMeta?.max_price ?? 0) : null,
-        };
-      });
-      setSelectedServices(svcs);
-      setCartItemTeeth(hold.services.map((s: any) => s.teeth || []));
-      setCartItemToothDrafts(hold.services.map(() => ""));
-    }
-  }
-
-  async function clearActiveHold(holdId: string) {
-    if (!holdId) return;
-
-    const { error: holdDeleteError } = await supabase.from("pos_holds").delete().eq("id", holdId);
-    if (holdDeleteError) {
-      console.error("Hold cleanup error", holdDeleteError);
-      const { error: fallbackError } = await supabase
-        .from("pos_holds")
-        .update({
-          status: "Cancelled",
-          cancel_reason: "Completed at checkout",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", holdId);
-      if (fallbackError) {
-        console.error("Hold fallback cleanup error", fallbackError);
-        return;
-      }
-    }
-
-    await supabase.from("pos_hold_services").delete().eq("hold_id", holdId);
-    setActiveHoldId("");
-    await loadHoldCount();
-  }
-
   const pricingSummary = summarizeCartPricing(selectedServices, discountInput, discountType);
   const subtotal = pricingSummary.originalSubtotal;
   const manualDiscountAmount = pricingSummary.itemDiscountAmount;
@@ -1318,9 +1158,6 @@ export default function ReceiptsPage() {
   const previewAllocations = buildPaymentAllocations(paymentAllocationDrafts, getAmountDueToday(), total, vat);
   const livePaymentValidation = validatePaymentAllocations(paymentAllocationDrafts, getAmountDueToday());
   const isAllocationBalanced = toMinorUnits(getAmountDueToday()) === previewAllocations.reduce((sum, row) => sum + toMinorUnits(row.invoiceAllocationAmount), 0);
-  const paymentFeeTotal = previewAllocations.reduce((sum, row) => sum + row.feeAmount, 0);
-  const paymentFeeTotalRounded = Math.round(paymentFeeTotal * 100) / 100;
-  const totalCustomerChargedToday = Math.round((getAmountDueToday() + paymentFeeTotalRounded) * 100) / 100;
 
   const clinicServices = useMemo(() => {
     if (!activeClinic) return [] as Service[];
@@ -1506,33 +1343,6 @@ export default function ReceiptsPage() {
     [transactionPatientCredits]
   );
 
-  function handlePatientNameChange(e: string) {
-    setPatientName(e);
-    if (patientId) {
-      setPatientPhoneInput("");
-      setPatientEmailInput("");
-      setPatientDobInput("");
-      setPatientSexInput("");
-      setPatientNationalityInput("");
-      setPatientFileNumberInput("");
-      setNationalitySearch("");
-      setShowNationalitySuggestions(false);
-      setPatientEmiratesIdInput("");
-      setPatientPassportInput("");
-      setPatientMrnInput("");
-      setSelectedPatientInfo(null);
-    }
-    if (e.trim()) {
-      const filtered = clinicScopedPatients.filter((patient) => patient.name.toLowerCase().includes(e.toLowerCase()));
-      setFilteredPatients(filtered);
-      setShowPatientSuggestions(true);
-    } else {
-      setFilteredPatients([]);
-      setShowPatientSuggestions(false);
-    }
-    setPatientId("");
-  }
-
   function selectPatient(patient: any) {
     setPatientId(patient.id);
     setPatientName(patient.name);
@@ -1561,6 +1371,17 @@ export default function ReceiptsPage() {
     if (patient.id && activeClinic?.id) {
       loadPatientActivePlans(patient.id, activeClinic.id);
     }
+  }
+
+  function openSearchPatientPicker() {
+    setSearchPatientModalInitialProfileId(null);
+    setShowSearchPatientModal(true);
+  }
+
+  function openViewPatientProfile() {
+    if (!patientId) return;
+    setSearchPatientModalInitialProfileId(patientId);
+    setShowSearchPatientModal(true);
   }
 
   function parseMoneyInput(value: string) {
@@ -1715,13 +1536,6 @@ export default function ReceiptsPage() {
     setPinInput("");
     setOpeningCashInput("");
 
-    // Load active hold count for the new clinic
-    const { count: hc } = await supabase
-      .from("pos_holds")
-      .select("id", { count: "exact", head: true })
-      .eq("clinic_id", clinicForReceptionist.id)
-      .in("status", ["Waiting", "In Treatment", "Ready to Pay"]);
-    setHoldCount(hc || 0);
   }
 
   async function closeRegister() {
@@ -1800,11 +1614,11 @@ export default function ReceiptsPage() {
     setSelectedPatientInfo(null);
     setTransactionPatientId("");
     setTransactionPatientFileId("");
-    setActiveHoldId("");
     setDoctorId("");
     setSelectedPaymentMethod("");
     setPaymentAllocationDrafts([]);
     setPaymentValidationErrors([]);
+    setCashReceivedByRow({});
     setApplyCreditChecked(false);
     setNotes("");
     setSelectedServices([]);
@@ -1908,11 +1722,6 @@ export default function ReceiptsPage() {
       alert("Select the staff member receiving this commission.");
       return;
     }
-    if (cashDeductionType === "expense" && !cashDeductionPaidTo.trim()) {
-      alert("Enter who was paid.");
-      return;
-    }
-
     setIsSavingCashDeduction(true);
     try {
       const url = cashDeductionModalMode === "edit" && editingCashDeductionId
@@ -1930,7 +1739,7 @@ export default function ReceiptsPage() {
           staffId: cashDeductionType === "commission" ? cashDeductionStaffId : null,
           paidToName: cashDeductionType === "commission"
             ? clinicCommissionStaff.find((doctor) => doctor.id === cashDeductionStaffId)?.name || ""
-            : cashDeductionPaidTo.trim(),
+            : cashDeductionDescription.trim(),
           amount: parsedAmount,
           description: cashDeductionDescription.trim(),
           referenceNumber: cashDeductionReferenceInput.trim(),
@@ -3618,8 +3427,12 @@ export default function ReceiptsPage() {
       alert("Open the register first to use POS.");
       return;
     }
-    if (!patientName.trim() || !receptionistId || selectedServices.length === 0) {
-      alert("Please fill in patient name and add at least one service.");
+    if (!receptionistId || selectedServices.length === 0) {
+      alert("Please add at least one service.");
+      return;
+    }
+    if (!patientId) {
+      alert("Select or register a patient before continuing.");
       return;
     }
     if (hasUnconfiguredVatServices) {
@@ -3636,26 +3449,9 @@ export default function ReceiptsPage() {
     isProceedingRef.current = true;
     setIsProceeding(true);
     try {
-    let finalPatientId = patientId;
-    let finalPatientFileId = transactionPatientFileId || "";
-    let finalClinicFileNo = patientFileNumberInput.trim();
-
-    // File numbers are official physical file labels — verify a manual entry
-    // is unique before writing (covers both the update and create paths below).
-    if (patientFileNumberInput.trim()) {
-      const fileNo = patientFileNumberInput.trim();
-      const { data: fileNoDupes } = await supabase
-        .from("clinic_patient_files")
-        .select("id, patient_id")
-        .eq("clinic_id", activeClinic.id)
-        .eq("file_no", fileNo)
-        .limit(1);
-      const takenByOther = (fileNoDupes || []).some((row) => String(row.id) !== finalPatientFileId);
-      if (takenByOther) {
-        alert("This File Number already exists in this clinic. Please use another File Number.");
-        return;
-      }
-    }
+    const finalPatientId = patientId;
+    const finalPatientFileId = transactionPatientFileId || "";
+    const finalClinicFileNo = patientFileNumberInput.trim();
 
     // Persist the patient details for the selected or newly created patient.
     if (patientId) {
@@ -3665,122 +3461,9 @@ export default function ReceiptsPage() {
       }
     }
 
-    // NEW PATIENT — use the atomic RPC so patients + clinic_patient_files
-    // are always created together in a single transaction. If either insert
-    // fails the whole operation rolls back; no orphaned patient records.
-    if (!patientId && patientName.trim()) {
-      const { data: rpcData, error: rpcError } = await supabase.rpc(
-        "create_patient_with_clinic_file",
-        {
-          p_name:            patientName.trim(),
-          p_phone:           patientPhoneInput.trim() || "",
-          p_email:           patientEmailInput.trim() || "",
-          p_date_of_birth:   patientDobInput || "",
-          p_sex:             patientSexInput || "",
-          p_nationality:     patientNationalityInput.trim() || "",
-          p_emirates_id:     patientEmiratesIdInput.trim() || "",
-          p_passport_number: patientPassportInput.trim() || "",
-          p_mrn_input:       patientMrnInput.trim() || "",
-          p_clinic_id:       activeClinic.id,
-          p_file_no:         finalClinicFileNo || "",
-        }
-      );
-
-      if (rpcError || !rpcData) {
-        const msg = rpcError?.message || "Could not create patient. Please try again.";
-        console.error("create_patient_with_clinic_file error:", rpcError);
-        alert(`Error creating patient: ${msg}`);
-        return;
-      }
-
-      const result = rpcData as { patient_id: string; clinic_patient_file_id: string; file_no: string };
-      finalPatientId = result.patient_id;
-      finalPatientFileId = result.clinic_patient_file_id;
-      finalClinicFileNo = result.file_no;
-
-      const patientSaveResult = await savePatientDetails(result.patient_id);
-      if (!patientSaveResult.ok) {
-        console.warn("New patient details could not be fully saved.");
-      }
-
-      // Update local state so the new patient is immediately searchable
-      setPatients((prev) => [
-        ...prev,
-        {
-          id: result.patient_id,
-          name: patientName.trim(),
-          phone: patientPhoneInput.trim() || null,
-          email: patientEmailInput.trim() || null,
-          date_of_birth: patientDobInput || null,
-          sex: patientSexInput || null,
-          nationality: patientNationalityInput.trim() || null,
-          emirates_id: patientEmiratesIdInput.trim() || null,
-          passport_number: patientPassportInput.trim() || null,
-          notes: null,
-          patient_number: null,
-          mrn: patientMrnInput.trim() || null,
-        },
-      ]);
-      setClinicPatientFiles((prev) => [
-        ...prev,
-        {
-          id: result.clinic_patient_file_id,
-          clinic_id: activeClinic.id,
-          patient_id: result.patient_id,
-          file_no: result.file_no,
-          mrn: patientMrnInput.trim() || null,
-        },
-      ]);
-    }
-
     if (!finalPatientId) {
       alert("Missing patient. Please select or create a patient first.");
       return;
-    }
-
-    // EXISTING PATIENT — ensure they have a clinic file record at this clinic
-    if (!finalPatientFileId) {
-      const existingClinicFile = await getClinicPatientFile(activeClinic.id, finalPatientId);
-      if (existingClinicFile) {
-        finalPatientFileId = existingClinicFile.id;
-        finalClinicFileNo = existingClinicFile.file_no || finalClinicFileNo;
-      }
-    }
-
-    if (!finalPatientFileId) {
-      const clinicFileNo = finalClinicFileNo || (await nextClinicFileNumber(activeClinic.id));
-      try {
-        const createdFile = await createClinicPatientFile({
-          clinicId: activeClinic.id,
-          patientId: finalPatientId,
-          fileNo: clinicFileNo,
-          mrn: patientMrnInput.trim() || null,
-        });
-        finalPatientFileId = createdFile.id;
-        finalClinicFileNo = createdFile.file_no;
-        setClinicPatientFiles((prev) => [...prev, createdFile]);
-      } catch (error: any) {
-        alert(`Could not assign clinic file number: ${error?.message || "unknown error"}`);
-        return;
-      }
-    }
-
-    if (finalPatientFileId) {
-      const updatePayload: Record<string, string | null> = {};
-      if (finalClinicFileNo) {
-        updatePayload.file_no = finalClinicFileNo;
-      }
-      updatePayload.mrn = patientMrnInput.trim() || null;
-      if (Object.keys(updatePayload).length > 0) {
-        const { error: clinicFileUpdateError } = await supabase
-          .from("clinic_patient_files")
-          .update(updatePayload)
-          .eq("id", finalPatientFileId);
-
-        if (clinicFileUpdateError) {
-          console.warn("Clinic patient file update warning", clinicFileUpdateError);
-        }
-      }
     }
 
     // Set the transaction patient ID to use throughout the payment/print flow
@@ -3790,6 +3473,7 @@ export default function ReceiptsPage() {
     setSelectedPaymentMethod("");
     setPaymentAllocationDrafts([]);
     setPaymentValidationErrors([]);
+    setCashReceivedByRow({});
     setApplyCreditChecked(false);
     setShowTransactionTypeModal(true);
     } finally {
@@ -3807,34 +3491,69 @@ export default function ReceiptsPage() {
       const halfMinor = Math.floor(toMinorUnits(amountDue) / 2);
       const firstAmount = fromMinorUnits(halfMinor);
       const secondAmount = fromMinorUnits(Math.max(0, toMinorUnits(amountDue) - halfMinor));
-      setPaymentAllocationDrafts([
-        createAllocationDraftRow("cash", firstAmount.toFixed(2)),
-        createAllocationDraftRow("card", secondAmount.toFixed(2)),
-      ]);
+      const cashDraft = createAllocationDraftRow("cash", firstAmount.toFixed(2));
+      const cardDraft = createAllocationDraftRow("card", secondAmount.toFixed(2));
+      setPaymentAllocationDrafts([cashDraft, cardDraft]);
+      setCashReceivedByRow({ [cashDraft.id]: firstAmount.toFixed(2) });
       return;
     }
     if (method === "Cash") {
-      setPaymentAllocationDrafts([createAllocationDraftRow("cash", amountDueText)]);
+      const cashDraft = createAllocationDraftRow("cash", amountDueText);
+      setPaymentAllocationDrafts([cashDraft]);
+      setCashReceivedByRow({ [cashDraft.id]: amountDueText });
       return;
     }
     if (method === "Card") {
       setPaymentAllocationDrafts([createAllocationDraftRow("card", amountDueText)]);
+      setCashReceivedByRow({});
       return;
     }
     if (method === "Tabby") {
       setPaymentAllocationDrafts([createAllocationDraftRow("tabby_standard", amountDueText)]);
+      setCashReceivedByRow({});
       return;
     }
     if (method === "Tamara") {
       setPaymentAllocationDrafts([createAllocationDraftRow("tamara", amountDueText)]);
+      setCashReceivedByRow({});
       return;
     }
     setPaymentAllocationDrafts([]);
+    setCashReceivedByRow({});
   }
 
   function getNumericInput(value: string) {
     const num = parseMoneyInput(value);
     return Number.isFinite(num) ? num : 0;
+  }
+
+  function getCashReceivedAmount(rowId: string) {
+    return Math.max(0, getNumericInput(cashReceivedByRow[rowId] || ""));
+  }
+
+  function getInvoiceAllocationAmountFromDraft(row: PaymentAllocationDraft) {
+    return Math.max(0, getNumericInput(row.invoiceAllocationAmountInput));
+  }
+
+  function getCashChangeForDraft(row: PaymentAllocationDraft) {
+    if (row.methodVariant !== "cash") return 0;
+    const allocated = getInvoiceAllocationAmountFromDraft(row);
+    const received = getCashReceivedAmount(row.id);
+    return Math.max(0, received - allocated);
+  }
+
+  function getCashTenderValidationErrors() {
+    const errors: string[] = [];
+    const cashRows = paymentAllocationDrafts.filter((row) => row.methodVariant === "cash");
+    cashRows.forEach((row, index) => {
+      const allocated = getInvoiceAllocationAmountFromDraft(row);
+      const received = getCashReceivedAmount(row.id);
+      if (allocated > 0.0049 && received + 0.0049 < allocated) {
+        const rowLabel = selectedPaymentMethod === "Split Payment" ? `Cash allocation #${index + 1}` : "Cash received";
+        errors.push(`${rowLabel} must be at least AED ${allocated.toFixed(2)}.`);
+      }
+    });
+    return errors;
   }
 
   // Credit is a payment source, not a payment method: it reduces the amount
@@ -3959,6 +3678,8 @@ export default function ReceiptsPage() {
 
       const allocationErrors = validatePaymentAllocations(paymentAllocationDrafts, dueToday);
       allocationErrors.forEach((error) => validationMessages.push(error.message));
+      const cashTenderErrors = getCashTenderValidationErrors();
+      cashTenderErrors.forEach((error) => validationMessages.push(error));
       if (allocationErrors.length === 0) {
         const computed = buildComputedAllocationsForSave();
         const invoiceMinor = toMinorUnits(dueToday);
@@ -4035,6 +3756,12 @@ export default function ReceiptsPage() {
       if (allocationErrors.length > 0) {
         setPaymentValidationErrors(allocationErrors.map((error) => error.message));
         alert(allocationErrors[0].message);
+        return false;
+      }
+      const cashTenderErrors = getCashTenderValidationErrors();
+      if (cashTenderErrors.length > 0) {
+        setPaymentValidationErrors(cashTenderErrors);
+        alert(cashTenderErrors[0]);
         return false;
       }
       const allocatedMinor = buildComputedAllocationsForSave().reduce((sum, row) => sum + toMinorUnits(row.invoiceAllocationAmount), 0);
@@ -4350,8 +4077,6 @@ export default function ReceiptsPage() {
       }
     }
 
-    await clearActiveHold(activeHoldId);
-
     return receiptData;
     } finally {
       setIsSavingReceipt(false);
@@ -4383,6 +4108,7 @@ export default function ReceiptsPage() {
     setDoctorId("");
     setSelectedPaymentMethod("");
     setPaymentAllocationDrafts([]);
+    setCashReceivedByRow({});
     setPaymentValidationErrors([]);
     setApplyCreditChecked(false);
     setNotes("");
@@ -4391,7 +4117,6 @@ export default function ReceiptsPage() {
     setDiscountType("AED");
     setFilteredPatients([]);
     setShowPatientSuggestions(false);
-    setActiveHoldId("");
     router.refresh();
   }
 
@@ -4628,6 +4353,7 @@ export default function ReceiptsPage() {
     <AppFrame
       title="POS System"
       description="Process transactions with patient, doctor, and service details in one flow."
+      workspaceType="pos"
     >
       {!isPosUnlocked ? (
         <div className="mx-auto max-w-xl rounded-3xl border border-teal-200 bg-white p-6 shadow-sm">
@@ -4699,537 +4425,142 @@ export default function ReceiptsPage() {
           </div>
         </div>
       ) : (
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.95fr)]">
+      <div className="grid gap-5 lg:grid-cols-[200px_minmax(0,1fr)_minmax(340px,380px)] xl:gap-6">
+        <aside className="flex flex-col rounded-3xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5 lg:sticky lg:top-24 lg:self-start lg:max-h-[calc(100vh-8rem)] lg:overflow-y-auto">
+          <div className="rounded-2xl border border-teal-200 bg-teal-50/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-700">Register Open</p>
+            <p className="mt-2 text-sm font-semibold text-slate-800">{activeClinic?.name || ""}</p>
+            <p className="mt-1 text-xs text-slate-700">
+              Receptionist: {receptionists.find((person) => person.id === receptionistId)?.name || "-"}
+            </p>
+            <p className="mt-1 text-xs text-slate-700">Opening Cash: AED {Number(openingCash || 0).toFixed(2)}</p>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Opened at: {registerOpenedAt ? new Date(registerOpenedAt).toLocaleString() : "-"}
+            </p>
+          </div>
+
+          <div className="my-4 border-t border-slate-200" />
+
+          <div className="space-y-2">
+            <button
+              onClick={openPatientBackupModal}
+              disabled={isLoadingPatientBackupSummary || isDownloadingPatientBackup}
+              className="inline-flex w-full items-center justify-center rounded-2xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm font-semibold text-cyan-800 transition hover:bg-cyan-100 disabled:opacity-50"
+            >
+              {isLoadingPatientBackupSummary ? "Preparing Backup..." : "Download Patient Backup"}
+            </button>
+            <button
+              onClick={downloadDailyIncomeReport}
+              className="inline-flex w-full items-center justify-center rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100"
+            >
+              Print Report
+            </button>
+            <button
+              onClick={() => setShowReceiptHistoryModal(true)}
+              className="inline-flex w-full items-center justify-center rounded-2xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-semibold text-sky-800 transition hover:bg-sky-100"
+            >
+              Receipt History
+            </button>
+            {deductionFeatureEnabled && (
+              <button
+                onClick={() => openCashDeductionEntry()}
+                className="inline-flex w-full items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+              >
+                Expense / Commission
+              </button>
+            )}
+          </div>
+
+          <div className="mt-4 pt-1 lg:mt-auto">
+            <button
+              onClick={openCloseRegisterModal}
+              className="inline-flex w-full items-center justify-center rounded-2xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+            >
+              Close Register
+            </button>
+          </div>
+        </aside>
+
         <div className="min-w-0 space-y-6">
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-            <div className="mb-4 rounded-2xl border border-teal-200 bg-teal-50/70 p-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-700">Register Open</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-800">
-                    {activeClinic?.name || ""}
-                  </p>
-                  <p className="mt-0.5 text-sm text-slate-700">
-                    Receptionist: {receptionists.find((person) => person.id === receptionistId)?.name || "-"}
-                  </p>
-                  <p className="mt-1 text-sm text-slate-700">Opening Cash: AED {Number(openingCash || 0).toFixed(2)}</p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Opened at: {registerOpenedAt ? new Date(registerOpenedAt).toLocaleString() : "-"}
-                  </p>
-                </div>
-                <div className="flex flex-col gap-2">
-                  <button
-                    onClick={openPatientBackupModal}
-                    disabled={isLoadingPatientBackupSummary || isDownloadingPatientBackup}
-                    className="inline-flex items-center justify-center rounded-2xl bg-cyan-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-600 disabled:opacity-50"
-                  >
-                    {isLoadingPatientBackupSummary ? "Preparing Backup..." : "Download Patient Backup"}
-                  </button>
-                  <button
-                    onClick={downloadDailyIncomeReport}
-                    className="inline-flex items-center justify-center rounded-2xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
-                  >
-                    Print Report
-                  </button>
-                  {deductionFeatureEnabled && (
-                    <button
-                      onClick={() => openCashDeductionEntry()}
-                      className="inline-flex items-center justify-center rounded-2xl bg-violet-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600"
-                    >
-                      Expense / Commission
-                    </button>
-                  )}
-                  <button
-                    onClick={openCloseRegisterModal}
-                    className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
-                  >
-                    Close Register
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid gap-2 sm:grid-cols-2 mt-4">
+            <div className="mt-1 grid gap-2 sm:grid-cols-2">
               <button
-                onClick={() => setShowSearchPatientModal(true)}
+                onClick={openSearchPatientPicker}
                 className="rounded-2xl border border-teal-300 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-700 transition hover:bg-teal-100"
               >
                 Search Patient
               </button>
               <button
-                onClick={() => setShowReceiptHistoryModal(true)}
-                className="rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
+                onClick={() => setShowRegisterPatientModal(true)}
+                className="rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
               >
-                Receipt History
+                + Register Patient
               </button>
             </div>
-            <div className="mt-2">
-              <button
-                onClick={() => setShowHoldsModal(true)}
-                className="relative w-full rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 hover:bg-amber-100"
-              >
-                Held Transactions
-                {holdCount > 0 && (
-                  <span className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-amber-500 text-xs font-bold text-white">
-                    {holdCount}
-                  </span>
+            <div className="mt-4 space-y-4">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">Selected Patient</p>
+                {!patientId ? (
+                  <div className="mt-2">
+                    <p className="text-sm text-slate-700">No patient selected</p>
+                    <p className="mt-1 text-xs text-slate-500">Search or register a patient to continue.</p>
+                  </div>
+                ) : (
+                  <div className="mt-2 space-y-2">
+                    <p className="text-base font-semibold text-slate-900">{patientName || "—"}</p>
+                    {(patientFileNumberInput || patientPhoneInput) && (
+                      <div className="grid gap-1 text-sm text-slate-600 sm:grid-cols-2">
+                        {patientFileNumberInput && <p>File #{patientFileNumberInput}</p>}
+                        {patientPhoneInput && <p>{patientPhoneInput}</p>}
+                      </div>
+                    )}
+                    <div className="pt-1 flex flex-wrap gap-2">
+                      <button
+                        onClick={openSearchPatientPicker}
+                        className="rounded-xl border border-cyan-300 bg-white px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-50"
+                      >
+                        Change Patient
+                      </button>
+                      <button
+                        onClick={openViewPatientProfile}
+                        className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
+                      >
+                        View Patient
+                      </button>
+                    </div>
+                  </div>
                 )}
-              </button>
-            </div>
+              </div>
 
-            {showCashDeductionPanel && (
-              <div className="mt-4 rounded-3xl border border-violet-200 bg-violet-50/80 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <button
-                    type="button"
-                    onClick={() => setIsCashDeductionPanelExpanded((current) => !current)}
-                    aria-expanded={isCashDeductionPanelExpanded}
-                    className="flex flex-1 items-start justify-between gap-3 rounded-2xl text-left transition hover:bg-violet-100/60 focus:outline-none focus:ring-2 focus:ring-violet-300"
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="block text-sm font-semibold text-slate-700">
+                    {activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician" : "Doctor / Therapist"}{" "}
+                    <span className="font-normal text-slate-400">(Optional)</span>
+                  </label>
+                  <select
+                    value={doctorId}
+                    onChange={(e) => setDoctorId(e.target.value)}
+                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
                   >
-                    <div className="min-w-0 px-1 py-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-violet-700">Cash Deductions</p>
-                        <span className="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-violet-700">
-                          {cashDeductions.length} {cashDeductions.length === 1 ? "entry" : "entries"}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-sm text-slate-700">
-                        Available cash for deductions: <span className="font-semibold text-violet-900">AED {Number(cashDeductionSummary.availableCash || 0).toFixed(2)}</span>
-                      </p>
-                      <p className="mt-1 text-xs text-slate-500">
-                        Cash collected AED {Number(cashDeductionSummary.cashCollected || 0).toFixed(2)} • Deductions AED {Number(cashDeductionSummary.activeDeductionsTotal || 0).toFixed(2)} • {isCashDeductionPanelExpanded ? "Collapse" : "Expand"}
-                      </p>
-                    </div>
-                    <span className="shrink-0 rounded-full border border-violet-200 bg-white px-3 py-1 text-xs font-semibold text-violet-700">
-                      {isCashDeductionPanelExpanded ? "Hide" : "Show"}
-                    </span>
-                  </button>
-                  {deductionFeatureEnabled && (
-                    <button
-                      onClick={() => openCashDeductionEntry()}
-                      className="inline-flex items-center justify-center rounded-2xl border border-violet-300 bg-white px-4 py-2 text-sm font-semibold text-violet-700 transition hover:bg-violet-100"
-                    >
-                      Add Entry
-                    </button>
-                  )}
-                </div>
-
-                {isCashDeductionPanelExpanded && (
-                  <>
-                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                      <div className="rounded-2xl border border-white/80 bg-white px-3 py-2">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Commissions</p>
-                        <p className="mt-1 text-sm font-semibold text-slate-900">AED {Number(cashDeductionSummary.totalCommissions || 0).toFixed(2)}</p>
-                      </div>
-                      <div className="rounded-2xl border border-white/80 bg-white px-3 py-2">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Expenses</p>
-                        <p className="mt-1 text-sm font-semibold text-slate-900">AED {Number(cashDeductionSummary.totalExpenses || 0).toFixed(2)}</p>
-                      </div>
-                      <div className="rounded-2xl border border-white/80 bg-white px-3 py-2">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Cash After Deductions</p>
-                        <p className="mt-1 text-sm font-semibold text-slate-900">
-                          AED {Math.max(0, Number(cashDeductionSummary.cashCollected || 0) - Number(cashDeductionSummary.activeDeductionsTotal || 0)).toFixed(2)}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="mt-3 space-y-2">
-                      {isLoadingCashDeductions ? (
-                        <p className="text-sm text-slate-500">Loading cash deductions...</p>
-                      ) : cashDeductions.length === 0 ? (
-                        <p className="rounded-2xl border border-dashed border-violet-200 bg-white px-4 py-3 text-sm text-slate-500">
-                          No expense or commission entries recorded for this register session yet.
-                        </p>
-                      ) : (
-                        cashDeductions.map((entry) => (
-                          <div key={entry.id} className="rounded-2xl border border-white/80 bg-white px-4 py-3">
-                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                              <div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span className="rounded-full bg-violet-100 px-2.5 py-1 text-[11px] font-semibold text-violet-700">
-                                    {getCashDeductionTypeLabel(entry.type)}
-                                  </span>
-                                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${entry.status === "voided" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`}>
-                                    {entry.status === "voided" ? "Voided" : "Active"}
-                                  </span>
-                                </div>
-                                <p className="mt-2 text-sm font-semibold text-slate-900">{entry.paid_to_name}</p>
-                                <p className="mt-1 text-sm text-slate-600">{entry.description}</p>
-                                <p className="mt-1 text-xs text-slate-500">
-                                  {new Date(entry.created_at).toLocaleString()}
-                                  {entry.reference_number ? ` • Ref ${entry.reference_number}` : ""}
-                                  {entry.status === "voided" && entry.void_reason ? ` • Void reason: ${entry.void_reason}` : ""}
-                                </p>
-                              </div>
-                              <div className="flex flex-col items-start gap-2 sm:items-end">
-                                <p className="text-base font-semibold text-violet-900">(AED {Number(entry.amount || 0).toFixed(2)})</p>
-                                {entry.status === "active" && (
-                                  <div className="flex gap-2">
-                                    <button
-                                      onClick={() => openCashDeductionEntry(entry)}
-                                      className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      onClick={() => {
-                                        setVoidCashDeductionId(entry.id);
-                                        setVoidCashDeductionReason("");
-                                        setShowVoidCashDeductionModal(true);
-                                      }}
-                                      className="rounded-xl border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-50"
-                                    >
-                                      Void
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-2 mt-4">
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">Patient Name</label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={patientName}
-                    onChange={(e) => handlePatientNameChange(e.target.value)}
-                    onFocus={() => patientName && setShowPatientSuggestions(true)}
-                    placeholder="Type patient name or add new"
-                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-                  />
-                  {showPatientSuggestions && filteredPatients.length > 0 && (
-                    <div className="absolute top-full mt-1 w-full rounded-2xl border border-slate-200 bg-white shadow-lg z-10">
-                      {filteredPatients.map((patient) => (
-                        <button
-                          key={patient.id}
-                          onClick={() => selectPatient(patient)}
-                          className="w-full px-4 py-2 text-left text-sm text-slate-900 hover:bg-cyan-50 border-b border-slate-100 last:border-b-0 transition"
-                        >
-                          <span className="font-medium">{patient.name}</span>
-                          {patient.phone && (
-                            <span className="ml-2 text-xs text-slate-400">{patient.phone}</span>
-                          )}
-                          {calculateAge(patient.date_of_birth) !== null && (
-                            <span className="ml-2 text-xs text-slate-400">{calculateAge(patient.date_of_birth)} yrs</span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">
-                  Emirates ID
-                  {patientId && selectedPatientInfo?.emirates_id && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
-                </label>
-                <input
-                  type="text"
-                  value={patientEmiratesIdInput}
-                  onChange={(e) => !(patientId && selectedPatientInfo?.emirates_id) && setPatientEmiratesIdInput(e.target.value)}
-                  readOnly={!!(patientId && selectedPatientInfo?.emirates_id)}
-                  placeholder="Emirates ID (optional)"
-                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId && selectedPatientInfo?.emirates_id ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">
-                  Passport Number
-                  {patientId && selectedPatientInfo?.passport_number && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
-                </label>
-                <input
-                  type="text"
-                  value={patientPassportInput}
-                  onChange={(e) => !(patientId && selectedPatientInfo?.passport_number) && setPatientPassportInput(e.target.value)}
-                  readOnly={!!(patientId && selectedPatientInfo?.passport_number)}
-                  placeholder="Passport number (optional)"
-                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId && selectedPatientInfo?.passport_number ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">
-                  MRN <span className="font-normal text-slate-400">(Medical Record No. — optional)</span>
-                  {patientId && selectedPatientInfo?.mrn && <span className="ml-1 text-xs font-normal text-slate-400">(read-only)</span>}
-                </label>
-                <input
-                  type="text"
-                  value={patientMrnInput}
-                  onChange={(e) => !(patientId && selectedPatientInfo?.mrn) && setPatientMrnInput(e.target.value)}
-                  readOnly={!!(patientId && selectedPatientInfo?.mrn)}
-                  placeholder="e.g. H24-3164"
-                  className={`w-full rounded-2xl border px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 ${patientId && selectedPatientInfo?.mrn ? "border-slate-100 bg-slate-100 text-slate-500 cursor-default" : "border-slate-200 bg-slate-50"}`}
-                />
-              </div>
-
-              {patientId && selectedPatientInfo && (
-                <div className="rounded-xl border border-cyan-100 bg-cyan-50 px-3 py-2">
-                  <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-600">
-                    {selectedPatientInfo.sex && (
-                      <span><span className="font-medium">Sex:</span> {selectedPatientInfo.sex}</span>
-                    )}
-                    {calculateAge(selectedPatientInfo.date_of_birth) !== null && (
-                      <span><span className="font-medium">Age:</span> {calculateAge(selectedPatientInfo.date_of_birth)} yrs</span>
-                    )}
-                    {selectedPatientInfo.nationality && (
-                      <span><span className="font-medium">Nationality:</span> {selectedPatientInfo.nationality}</span>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {patientId && selectedPatientBalancesInClinic.length > 0 && (
-                <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-xs font-bold uppercase tracking-wide text-amber-800">
-                        Outstanding Balance
-                      </p>
-                      <p className="mt-1 text-sm text-amber-900">
-                        This patient has {selectedPatientBalancesInClinic.length} unpaid balance{selectedPatientBalancesInClinic.length > 1 ? "s" : ""} totalling{" "}
-                        <span className="font-bold">
-                          AED {selectedPatientBalancesInClinic.reduce((s, x) => s + x.rollup.remaining, 0).toFixed(2)}
-                        </span>
-                        .
-                      </p>
-                    </div>
-                  </div>
-                  <ul className="mt-2 space-y-1">
-                    {selectedPatientBalancesInClinic.map(({ balance, payments, rollup }) => (
-                      <li key={balance.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-xs">
-                        <span className="text-slate-700">
-                          {new Date(balance.original_date).toLocaleDateString("en-GB")} · {formatBalanceReference(balance)} · AED {rollup.remaining.toFixed(2)}
-                        </span>
-                        <button
-                          onClick={() => {
-                            if (!receptionistId) { alert("Open the register first."); return; }
-                            const patientRow = patients.find((p) => p.id === patientId);
-                            if (!patientRow) { alert("Patient not found — refresh the page and try again."); return; }
-                            setCollectBalanceContext({ balance, payments, patient: patientRow });
-                          }}
-                          className="rounded-xl bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500"
-                        >
-                          Collect Payment
-                        </button>
-                      </li>
+                    <option value="">{activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "No aesthetician" : "No doctor / therapist"}</option>
+                    {clinicDoctors.map((doctor) => (
+                      <option key={doctor.id} value={doctor.id}>
+                        {doctor.name}
+                      </option>
                     ))}
-                  </ul>
+                  </select>
                 </div>
-              )}
-
-              {patientId && patientActivePlans.length > 0 && (
-                <div className="col-span-2 rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-3">
-                  <p className="mb-2 text-xs font-bold uppercase tracking-wide text-cyan-800">
-                    Active Treatment Plans
-                  </p>
-                  {isLoadingActivePlans ? (
-                    <p className="text-xs text-cyan-600">Loading…</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {patientActivePlans.map((plan) => {
-                        const planPayments = patientActivePlanPayments.filter((p: any) => p.treatment_plan_id === plan.id);
-                        const planPaymentRecords = patientActivePlanPaymentRecords.filter((p: any) => p.treatment_plan_id === plan.id);
-                        const planVisits = patientActivePlanVisits.filter((v: any) => v.treatment_plan_id === plan.id);
-                        const rollup = computeTreatmentPlanRollup(plan, {
-                          structuredPayments: planPaymentRecords,
-                          legacyPayments: planPayments,
-                        });
-                        const remaining = rollup.remainingBalance;
-                        return (
-                          <div key={plan.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-xs">
-                            <div>
-                              <span className="font-semibold text-slate-800">{plan.title}</span>
-                              <span className="ml-2 text-slate-500">
-                                Visit {planVisits.length}/{plan.planned_visits} · AED {remaining.toFixed(2)} due
-                              </span>
-                            </div>
-                            <button
-                              onClick={() => setShowSearchPatientModal(true)}
-                              className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-500"
-                            >
-                              Continue Plan
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                <div className="space-y-2">
+                  <label className="block text-sm font-semibold text-slate-700">Notes (Optional)</label>
+                  <textarea
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Add visit/treatment notes for this transaction"
+                    className="min-h-[88px] w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
+                  />
                 </div>
-              )}
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">Patient Phone (Optional)</label>
-                <input
-                  type="text"
-                  value={patientPhoneInput}
-                  onChange={(e) => setPatientPhoneInput(e.target.value)}
-                  placeholder="e.g. +971..."
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-                />
               </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">
-                  Date of Birth
-                  {patientDobInput && (
-                    <span className="ml-2 font-normal text-cyan-600">
-                      ({calculateAge(patientDobInput)} yrs)
-                    </span>
-                  )}
-                </label>
-                <input
-                  type="date"
-                  value={patientDobInput}
-                  onChange={(e) => setPatientDobInput(e.target.value)}
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">Sex</label>
-                <select
-                  value={patientSexInput}
-                  onChange={(e) => setPatientSexInput(e.target.value)}
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-                >
-                  <option value="">Select</option>
-                  <option value="Male">Male</option>
-                  <option value="Female">Female</option>
-                </select>
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">
-                  File No. <span className="font-normal text-slate-400">(Optional — auto-assigned if empty)</span>
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  value={patientFileNumberInput}
-                  onChange={(e) => setPatientFileNumberInput(e.target.value)}
-                  placeholder="e.g. 1004"
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-                />
-              </div>
-
-              <div className="relative space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">
-                  Nationality <span className="font-normal text-slate-400">(Optional)</span>
-                </label>
-                <input
-                  type="text"
-                  value={nationalitySearch}
-                  onChange={(e) => {
-                    setNationalitySearch(e.target.value);
-                    setPatientNationalityInput("");
-                    setShowNationalitySuggestions(true);
-                    setNationalityHighlightIndex(-1);
-                  }}
-                  onKeyDown={(e) => {
-                    const filtered = COUNTRIES.filter((c) =>
-                      c.toLowerCase().includes(nationalitySearch.toLowerCase())
-                    );
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setNationalityHighlightIndex((i) => Math.min(i + 1, filtered.length - 1));
-                    } else if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setNationalityHighlightIndex((i) => Math.max(i - 1, 0));
-                    } else if (e.key === "Enter" && nationalityHighlightIndex >= 0) {
-                      e.preventDefault();
-                      const selected = filtered[nationalityHighlightIndex];
-                      setPatientNationalityInput(selected);
-                      setNationalitySearch(selected);
-                      setShowNationalitySuggestions(false);
-                      setNationalityHighlightIndex(-1);
-                    } else if (e.key === "Escape") {
-                      setShowNationalitySuggestions(false);
-                    }
-                  }}
-                  onFocus={() => setShowNationalitySuggestions(true)}
-                  onBlur={() => setTimeout(() => setShowNationalitySuggestions(false), 150)}
-                  placeholder="Search nationality..."
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-                />
-                {showNationalitySuggestions && nationalitySearch && (() => {
-                  const filtered = COUNTRIES.filter((c) =>
-                    c.toLowerCase().includes(nationalitySearch.toLowerCase())
-                  );
-                  return filtered.length > 0 ? (
-                    <ul className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
-                      {filtered.map((country, idx) => (
-                        <li
-                          key={country}
-                          onMouseDown={() => {
-                            setPatientNationalityInput(country);
-                            setNationalitySearch(country);
-                            setShowNationalitySuggestions(false);
-                            setNationalityHighlightIndex(-1);
-                          }}
-                          className={`cursor-pointer px-4 py-2 text-sm transition ${
-                            idx === nationalityHighlightIndex
-                              ? "bg-cyan-50 text-cyan-700"
-                              : "hover:bg-slate-50"
-                          }`}
-                        >
-                          {country}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null;
-                })()}
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">
-                  {activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician" : "Doctor / Therapist"}{" "}
-                  <span className="font-normal text-slate-400">(Optional)</span>
-                </label>
-                <select
-                  value={doctorId}
-                  onChange={(e) => setDoctorId(e.target.value)}
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-                >
-                  <option value="">{activeClinic?.name === "Skin & Smile Aesthetic Clinic" ? "No aesthetician" : "No doctor / therapist"}</option>
-                  {clinicDoctors.map((doctor) => (
-                    <option key={doctor.id} value={doctor.id}>
-                      {doctor.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-slate-700">Patient Email (Optional)</label>
-                <input
-                  type="email"
-                  value={patientEmailInput}
-                  onChange={(e) => setPatientEmailInput(e.target.value)}
-                  placeholder="patient@example.com"
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-                />
-              </div>
-            </div>
-
-            <div className="mt-5">
-              <label className="block text-sm font-semibold text-slate-700">Clinical Notes</label>
-              <textarea
-                placeholder="Saved to this patient's profile for the active clinic"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                className="mt-2 min-h-[120px] w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100"
-              />
             </div>
           </div>
 
@@ -5513,6 +4844,85 @@ export default function ReceiptsPage() {
                 </div>
               )}
             </div>
+
+            {patientId && selectedPatientBalancesInClinic.length > 0 && (
+              <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-wide text-amber-800">
+                      Outstanding Balance
+                    </p>
+                    <p className="mt-1 text-sm text-amber-900">
+                      This patient has {selectedPatientBalancesInClinic.length} unpaid balance{selectedPatientBalancesInClinic.length > 1 ? "s" : ""} totalling{" "}
+                      <span className="font-bold">
+                        AED {selectedPatientBalancesInClinic.reduce((s, x) => s + x.rollup.remaining, 0).toFixed(2)}
+                      </span>
+                      .
+                    </p>
+                  </div>
+                </div>
+                <ul className="mt-2 space-y-1">
+                  {selectedPatientBalancesInClinic.map(({ balance, payments, rollup }) => (
+                    <li key={balance.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-xs">
+                      <span className="text-slate-700">
+                        {new Date(balance.original_date).toLocaleDateString("en-GB")} · {formatBalanceReference(balance)} · AED {rollup.remaining.toFixed(2)}
+                      </span>
+                      <button
+                        onClick={() => {
+                          if (!receptionistId) { alert("Open the register first."); return; }
+                          const patientRow = patients.find((p) => p.id === patientId);
+                          if (!patientRow) { alert("Patient not found — refresh the page and try again."); return; }
+                          setCollectBalanceContext({ balance, payments, patient: patientRow });
+                        }}
+                        className="rounded-xl bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500"
+                      >
+                        Collect Payment
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {patientId && patientActivePlans.length > 0 && (
+              <div className="mt-4 rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-3">
+                <p className="mb-2 text-xs font-bold uppercase tracking-wide text-cyan-800">
+                  Active Treatment Plans
+                </p>
+                {isLoadingActivePlans ? (
+                  <p className="text-xs text-cyan-600">Loading…</p>
+                ) : (
+                  <div className="space-y-2">
+                    {patientActivePlans.map((plan) => {
+                      const planPayments = patientActivePlanPayments.filter((p: any) => p.treatment_plan_id === plan.id);
+                      const planPaymentRecords = patientActivePlanPaymentRecords.filter((p: any) => p.treatment_plan_id === plan.id);
+                      const planVisits = patientActivePlanVisits.filter((v: any) => v.treatment_plan_id === plan.id);
+                      const rollup = computeTreatmentPlanRollup(plan, {
+                        structuredPayments: planPaymentRecords,
+                        legacyPayments: planPayments,
+                      });
+                      const remaining = rollup.remainingBalance;
+                      return (
+                        <div key={plan.id} className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 text-xs">
+                          <div>
+                            <span className="font-semibold text-slate-800">{plan.title}</span>
+                            <span className="ml-2 text-slate-500">
+                              Visit {planVisits.length}/{plan.planned_visits} · AED {remaining.toFixed(2)} due
+                            </span>
+                          </div>
+                          <button
+                            onClick={openSearchPatientPicker}
+                            className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-500"
+                          >
+                            Continue Plan
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -5744,33 +5154,13 @@ export default function ReceiptsPage() {
               </div>
               <div className="border-t border-white/10 pt-4 text-base font-semibold text-white">
                 <div className="flex items-center justify-between">
-                  <span>Final Invoice Amount</span>
+                  <span>Total</span>
                   <span>AED {total.toFixed(2)}</span>
-                </div>
-              </div>
-              {paymentFeeTotalRounded > 0 && (
-                <div className="flex items-center justify-between text-cyan-300">
-                  <span>Payment Fee</span>
-                  <span>AED {paymentFeeTotalRounded.toFixed(2)}</span>
-                </div>
-              )}
-              <div className="pt-1 text-base font-semibold text-white">
-                <div className="flex items-center justify-between">
-                  <span>Total Customer Charge</span>
-                  <span>AED {Math.max(totalCustomerChargedToday, total).toFixed(2)}</span>
                 </div>
               </div>
             </div>
 
             <div className="mt-6 grid gap-3 sm:grid-cols-1">
-              <button
-                type="button"
-                onClick={holdAndStartNew}
-                disabled={isSavingHold || !isPosUnlocked}
-                className="w-full rounded-2xl border border-white/20 py-3 text-sm font-semibold text-slate-300 transition hover:border-white/40 hover:text-white disabled:opacity-40"
-              >
-                {isSavingHold ? "Saving Hold…" : "Hold & Start New"}
-              </button>
               <button
                 onClick={proceedToPayment}
                 disabled={isProceeding || hasUnconfiguredVatServices}
@@ -5783,39 +5173,13 @@ export default function ReceiptsPage() {
             {showPaymentModal && (
               <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50">
                 <div className="rounded-3xl bg-white p-5 shadow-2xl max-w-2xl w-full mx-4">
-                  <h3 className="text-lg font-semibold text-slate-900 mb-4">Select Payment Method</h3>
+                  <h3 className="text-lg font-semibold text-slate-900 mb-4">PAYMENT</h3>
 
-                  <div className="mb-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
-                    <div className="flex items-center justify-between text-sm text-slate-700">
-                      <span>Subtotal</span>
-                      <span className="font-semibold">AED {subtotal.toFixed(2)}</span>
-                    </div>
-                    {manualDiscountAmount > 0 && (
-                      <div className="flex items-center justify-between text-sm text-amber-700">
-                        <span>Promo / Price Adjustments</span>
-                        <span className="font-semibold">- AED {manualDiscountAmount.toFixed(2)}</span>
-                      </div>
-                    )}
-                    {globalDiscountAmount > 0 && (
-                      <div className="flex items-center justify-between text-sm text-rose-700">
-                        <span>Global Discount</span>
-                        <span className="font-semibold">- AED {globalDiscountAmount.toFixed(2)}</span>
-                      </div>
-                    )}
-                    <div className="flex items-center justify-between text-sm text-slate-700">
-                      <span>Taxable Subtotal</span>
-                      <span className="font-semibold">AED {preVatTotal.toFixed(2)}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm text-slate-700">
-                      <span>VAT</span>
-                      <span className="font-semibold">AED {vat.toFixed(2)}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm text-slate-700">
-                      <span>Invoice Total (before payment fees)</span>
-                      <span className="font-semibold">AED {total.toFixed(2)}</span>
-                    </div>
+                  <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Amount Due</p>
+                    <p className="mt-1 text-2xl font-bold text-slate-900">AED {getAmountDueToday().toFixed(2)}</p>
                     {checkoutAvailableCredit > 0.0049 && (
-                      <div className="space-y-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+                      <div className="mt-3 space-y-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
                         <div className="flex items-center justify-between text-sm text-emerald-800">
                           <span>Available Patient Credit</span>
                           <span className="font-semibold">AED {checkoutAvailableCredit.toFixed(2)}</span>
@@ -5843,19 +5207,17 @@ export default function ReceiptsPage() {
                         )}
                       </div>
                     )}
-                    {getRemainingAfterCredit() <= 0.0049 ? (
-                      <p className="text-xs font-semibold text-emerald-700">
+                    {getRemainingAfterCredit() <= 0.0049 && (
+                      <p className="mt-2 text-xs font-semibold text-emerald-700">
                         Fully covered by patient credit — no payment method needed.
                       </p>
-                    ) : (
-                      <p className="text-xs text-slate-500">Paying in full — no outstanding balance.</p>
                     )}
                   </div>
 
                   {getRemainingAfterCredit() > 0.0049 && (
                   <>
                   <p className="mb-2 text-xs text-slate-500">
-                    Allocate the invoice amount across methods. Tabby/Tamara fees are calculated separately.
+                    Choose how to collect this payment.
                   </p>
                   <div className="grid gap-3">
                     {paymentOptions.map((method) => (
@@ -5879,34 +5241,58 @@ export default function ReceiptsPage() {
                         const allowedVariants = allowedVariantsForSelectedMethod(selectedPaymentMethod);
                         const computedRow = previewAllocations.find((entry) => entry.id === row.id);
                         const methodVariant = row.methodVariant as PaymentMethodVariant;
+                        const isSplit = selectedPaymentMethod === "Split Payment";
+                        const isCashRow = methodVariant === "cash";
+                        const isTabbyRow = methodVariant === "tabby_standard" || methodVariant === "tabby_card";
+                        const isTamaraRow = methodVariant === "tamara";
+                        const cashChange = getCashChangeForDraft(row);
                         return (
                           <div key={row.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                            {isSplit && (
+                              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
+                                Payment {index + 1}
+                              </p>
+                            )}
                             <div className="grid gap-2 sm:grid-cols-2">
                               <div>
                                 <label className="block text-xs font-semibold text-slate-600">Payment Method</label>
-                                <select
-                                  value={row.methodVariant}
-                                  onChange={(e) => updateAllocationDraft(row.id, { methodVariant: e.target.value as PaymentMethodVariant })}
-                                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                                >
-                                  <option value="">Select</option>
-                                  {allocationMethodOptions.filter((opt) => allowedVariants.includes(opt.value)).map((opt) => (
-                                    <option key={opt.value} value={opt.value}>
-                                      {opt.label}
-                                    </option>
-                                  ))}
-                                </select>
+                                {isSplit ? (
+                                  <select
+                                    value={row.methodVariant}
+                                    onChange={(e) => updateAllocationDraft(row.id, { methodVariant: e.target.value as PaymentMethodVariant })}
+                                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                                  >
+                                    <option value="">Select</option>
+                                    {allocationMethodOptions.filter((opt) => allowedVariants.includes(opt.value)).map((opt) => (
+                                      <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <div className="mt-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-900">
+                                    {paymentVariantLabel(methodVariant)}
+                                  </div>
+                                )}
                               </div>
                               <div>
-                                <label className="block text-xs font-semibold text-slate-600">Invoice Amount Allocated (AED)</label>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={row.invoiceAllocationAmountInput}
-                                  onChange={(e) => updateAllocationDraft(row.id, { invoiceAllocationAmountInput: e.target.value })}
-                                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-                                />
+                                <label className="block text-xs font-semibold text-slate-600">
+                                  {isSplit ? "Invoice Amount Allocated (AED)" : "Invoice Amount (AED)"}
+                                </label>
+                                {isSplit ? (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={row.invoiceAllocationAmountInput}
+                                    onChange={(e) => updateAllocationDraft(row.id, { invoiceAllocationAmountInput: e.target.value })}
+                                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                                  />
+                                ) : (
+                                  <div className="mt-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-900">
+                                    AED {getInvoiceAllocationAmountFromDraft(row).toFixed(2)}
+                                  </div>
+                                )}
                               </div>
                               {referenceRequiredForVariant(methodVariant) && (
                                 <div>
@@ -5964,16 +5350,46 @@ export default function ReceiptsPage() {
                                 </div>
                               )}
                             </div>
-                            <div className="mt-2 grid gap-1 text-xs text-slate-600 sm:grid-cols-2">
-                              <p>VAT Portion: AED {(computedRow?.vatAmount || 0).toFixed(2)}</p>
-                              <p>Fee Rate: {computedRow ? `${(computedRow.feeRate * 100).toFixed(1)}%` : "0.0%"}</p>
-                              <p>Payment Fee: AED {(computedRow?.feeAmount || 0).toFixed(2)}</p>
-                              <p className="font-semibold text-slate-800">Amount to Collect: AED {(computedRow?.customerChargedAmount || 0).toFixed(2)}</p>
-                            </div>
+                            {isCashRow && (
+                              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                                <div>
+                                  <label className="block text-xs font-semibold text-slate-600">Cash Received (AED)</label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    value={cashReceivedByRow[row.id] || ""}
+                                    onChange={(e) => setCashReceivedByRow((current) => ({ ...current, [row.id]: e.target.value }))}
+                                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                                  />
+                                </div>
+                                <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+                                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Change</p>
+                                  <p className="mt-1 text-lg font-bold text-emerald-800">AED {cashChange.toFixed(2)}</p>
+                                </div>
+                              </div>
+                            )}
+                            {(isTabbyRow || isTamaraRow) && (
+                              <div className="mt-3 rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2">
+                                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-700">
+                                  Amount to Collect via {isTabbyRow ? "Tabby" : "Tamara"}
+                                </p>
+                                <p className="mt-1 text-lg font-bold text-cyan-900">
+                                  AED {(computedRow?.customerChargedAmount || 0).toFixed(2)}
+                                </p>
+                              </div>
+                            )}
                             {selectedPaymentMethod === "Split Payment" && paymentAllocationDrafts.length > 2 && index > 1 && (
                               <button
                                 type="button"
-                                onClick={() => setPaymentAllocationDrafts((rows) => rows.filter((draft) => draft.id !== row.id))}
+                                onClick={() => {
+                                  setPaymentAllocationDrafts((rows) => rows.filter((draft) => draft.id !== row.id));
+                                  setCashReceivedByRow((current) => {
+                                    const updated = { ...current };
+                                    delete updated[row.id];
+                                    return updated;
+                                  });
+                                }}
                                 className="mt-2 text-xs font-semibold text-rose-600 hover:text-rose-500"
                               >
                                 Remove this row
@@ -5989,29 +5405,31 @@ export default function ReceiptsPage() {
                           onClick={addAnotherPaymentMethodRow}
                           className="w-full rounded-xl border border-dashed border-cyan-300 bg-cyan-50 px-3 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-100"
                         >
-                          Add another payment method
+                          + Add Payment Method
                         </button>
                       )}
                     </div>
                   )}
 
-                  <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3 text-sm">
-                    <p className="font-semibold text-slate-900">Live Payment Summary</p>
-                    <p className="text-slate-700">Invoice amount being paid: AED {getAmountDueToday().toFixed(2)}</p>
-                    <p className="text-slate-700">Payment fee: AED {paymentFeeTotalRounded.toFixed(2)}</p>
-                    <p className="text-slate-900 font-semibold">Total customer pays: AED {totalCustomerChargedToday.toFixed(2)}</p>
-                    {previewAllocations.map((row) => (
-                      <p key={`summary-${row.id}`} className="text-slate-700">
-                        Collect AED {row.customerChargedAmount.toFixed(2)} in {paymentVariantLabel(row.methodVariant)}
-                      </p>
-                    ))}
-                  </div>
-
-                  {(paymentValidationErrors.length > 0 || livePaymentValidation.length > 0) && (
+                  {(paymentValidationErrors.length > 0 || livePaymentValidation.length > 0 || getCashTenderValidationErrors().length > 0) && (
                     <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                      {[...new Set([...paymentValidationErrors, ...livePaymentValidation.map((error) => error.message)])].map((message) => (
+                      {[...new Set([
+                        ...paymentValidationErrors,
+                        ...livePaymentValidation.map((error) => error.message),
+                        ...getCashTenderValidationErrors(),
+                      ])].map((message) => (
                         <p key={message}>• {message}</p>
                       ))}
+                    </div>
+                  )}
+                  {selectedPaymentMethod === "Split Payment" && (
+                    <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                      <div className="flex items-center justify-between">
+                        <span>Remaining Invoice Balance</span>
+                        <span className="font-semibold">
+                          AED {Math.max(0, getAmountDueToday() - previewAllocations.reduce((sum, row) => sum + row.invoiceAllocationAmount, 0)).toFixed(2)}
+                        </span>
+                      </div>
                     </div>
                   )}
                   </>
@@ -6019,13 +5437,21 @@ export default function ReceiptsPage() {
 
                   <button
                     onClick={continueFromPaymentModal}
-                    disabled={!isAllocationBalanced || livePaymentValidation.length > 0}
+                    disabled={
+                      isSavingReceipt
+                      || !isAllocationBalanced
+                      || livePaymentValidation.length > 0
+                      || getCashTenderValidationErrors().length > 0
+                    }
                     className="mt-4 w-full rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400 disabled:opacity-50"
                   >
-                    Continue
+                    Complete Payment
                   </button>
                   <button
-                    onClick={() => setShowPaymentModal(false)}
+                    onClick={() => {
+                      setShowPaymentModal(false);
+                      setCashReceivedByRow({});
+                    }}
                     className="mt-4 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
                   >
                     Cancel
@@ -6060,6 +5486,7 @@ export default function ReceiptsPage() {
                       onClick={() => {
                         setShowPrintModal(false);
                         setShowPaymentModal(false);
+                        setCashReceivedByRow({});
                       }}
                       className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
                     >
@@ -6075,12 +5502,7 @@ export default function ReceiptsPage() {
                 <div className="mx-4 w-full max-w-lg rounded-3xl bg-white p-6 text-slate-900 shadow-2xl">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <h3 className="text-lg font-semibold text-slate-900">
-                        {cashDeductionModalMode === "edit" ? "Edit Cash Deduction" : "Add Expense / Commission"}
-                      </h3>
-                      <p className="mt-1 text-sm text-slate-500">
-                        Available cash for deductions: AED {Number(cashDeductionSummary.availableCash || 0).toFixed(2)}
-                      </p>
+                      <h3 className="text-lg font-semibold text-slate-900">Expense / Commission</h3>
                     </div>
                     <button
                       onClick={() => {
@@ -6108,7 +5530,6 @@ export default function ReceiptsPage() {
                               onChange={() => {
                                 setCashDeductionType(type);
                                 setCashDeductionStaffId("");
-                                setCashDeductionPaidTo("");
                               }}
                               className="h-4 w-4 accent-violet-600"
                             />
@@ -6122,14 +5543,12 @@ export default function ReceiptsPage() {
                   <div className="mt-4 grid gap-4">
                     {cashDeductionType === "commission" ? (
                       <div className="space-y-2">
-                        <label className="block text-sm font-semibold text-slate-700">Paid To</label>
+                        <label className="block text-sm font-semibold text-slate-700">Commission For</label>
                         <select
                           value={cashDeductionStaffId}
                           onChange={(e) => {
                             const nextStaffId = e.target.value;
                             setCashDeductionStaffId(nextStaffId);
-                            const selectedStaff = clinicCommissionStaff.find((doctor) => doctor.id === nextStaffId);
-                            setCashDeductionPaidTo(selectedStaff?.name || "");
                           }}
                           className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
                         >
@@ -6141,45 +5560,22 @@ export default function ReceiptsPage() {
                           ))}
                         </select>
                       </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <label className="block text-sm font-semibold text-slate-700">Paid To</label>
-                        <input
-                          type="text"
-                          value={cashDeductionPaidTo}
-                          onChange={(e) => setCashDeductionPaidTo(e.target.value)}
-                          placeholder="Supplier, shop, or person paid"
-                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
-                        />
-                      </div>
-                    )}
+                    ) : null}
 
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <div className="space-y-2">
-                        <label className="block text-sm font-semibold text-slate-700">Amount (AED)</label>
-                        <input
-                          type="number"
-                          min="0.01"
-                          step="0.01"
-                          value={cashDeductionAmountInput}
-                          onChange={(e) => setCashDeductionAmountInput(e.target.value)}
-                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label className="block text-sm font-semibold text-slate-700">Receipt / Reference Number</label>
-                        <input
-                          type="text"
-                          value={cashDeductionReferenceInput}
-                          onChange={(e) => setCashDeductionReferenceInput(e.target.value)}
-                          placeholder="Optional"
-                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
-                        />
-                      </div>
+                    <div className="space-y-2">
+                      <label className="block text-sm font-semibold text-slate-700">Amount (AED)</label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={cashDeductionAmountInput}
+                        onChange={(e) => setCashDeductionAmountInput(e.target.value)}
+                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-violet-400 focus:bg-white focus:ring-4 focus:ring-violet-100"
+                      />
                     </div>
 
                     <div className="space-y-2">
-                      <label className="block text-sm font-semibold text-slate-700">Description / Reason</label>
+                      <label className="block text-sm font-semibold text-slate-700">Description</label>
                       <textarea
                         value={cashDeductionDescription}
                         onChange={(e) => setCashDeductionDescription(e.target.value)}
@@ -6191,13 +5587,6 @@ export default function ReceiptsPage() {
 
                   <div className="mt-5 grid gap-3 sm:grid-cols-2">
                     <button
-                      onClick={saveCashDeduction}
-                      disabled={isSavingCashDeduction}
-                      className="inline-flex items-center justify-center rounded-2xl bg-violet-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600 disabled:opacity-50"
-                    >
-                      {isSavingCashDeduction ? "Saving..." : "Save"}
-                    </button>
-                    <button
                       onClick={() => {
                         if (isSavingCashDeduction) return;
                         setShowCashDeductionModal(false);
@@ -6208,6 +5597,63 @@ export default function ReceiptsPage() {
                     >
                       Cancel
                     </button>
+                    <button
+                      onClick={saveCashDeduction}
+                      disabled={isSavingCashDeduction}
+                      className="inline-flex items-center justify-center rounded-2xl bg-violet-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600 disabled:opacity-50"
+                    >
+                      {isSavingCashDeduction ? "Saving..." : "Save"}
+                    </button>
+                  </div>
+
+                  <div className="mt-5 border-t border-slate-200 pt-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Recent Entries</p>
+                    <div className="mt-3 max-h-56 space-y-2 overflow-y-auto">
+                      {isLoadingCashDeductions ? (
+                        <p className="text-sm text-slate-500">Loading...</p>
+                      ) : cashDeductions.length === 0 ? (
+                        <p className="rounded-2xl border border-dashed border-slate-200 px-4 py-3 text-sm text-slate-500">
+                          No expense or commission entries in this register session.
+                        </p>
+                      ) : (
+                        cashDeductions.map((entry) => (
+                          <div key={entry.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold text-slate-700">
+                                  {getCashDeductionTypeLabel(entry.type)} · AED {Number(entry.amount || 0).toFixed(2)}
+                                </p>
+                                <p className="truncate text-sm text-slate-900">{entry.description}</p>
+                                <p className="text-[11px] text-slate-500">
+                                  {new Date(entry.created_at).toLocaleString()}
+                                  {entry.status === "voided" ? " · Voided" : ""}
+                                </p>
+                              </div>
+                              {entry.status === "active" && (
+                                <div className="flex shrink-0 gap-1">
+                                  <button
+                                    onClick={() => openCashDeductionEntry(entry)}
+                                    className="rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 transition hover:bg-white"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setVoidCashDeductionId(entry.id);
+                                      setVoidCashDeductionReason("");
+                                      setShowVoidCashDeductionModal(true);
+                                    }}
+                                    className="rounded-lg border border-rose-200 px-2 py-1 text-[11px] font-semibold text-rose-700 transition hover:bg-rose-50"
+                                  >
+                                    Void
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -6433,10 +5879,15 @@ export default function ReceiptsPage() {
 
       <SearchPatientModal
         isOpen={showSearchPatientModal}
-        onClose={() => setShowSearchPatientModal(false)}
+        initialProfilePatientId={searchPatientModalInitialProfileId}
+        onClose={() => {
+          setShowSearchPatientModal(false);
+          setSearchPatientModalInitialProfileId(null);
+        }}
         onSelect={(patient) => {
           selectPatient(patient);
           setShowSearchPatientModal(false);
+          setSearchPatientModalInitialProfileId(null);
         }}
         patients={clinicScopedPatients}
         clinicId={activeClinic?.id ?? null}
@@ -6458,7 +5909,41 @@ export default function ReceiptsPage() {
         onCollectBalance={({ balance, payments, patient }) => {
           if (!receptionistId) { alert("Open the register first."); return; }
           setShowSearchPatientModal(false);
+          setSearchPatientModalInitialProfileId(null);
           setCollectBalanceContext({ balance, payments, patient });
+        }}
+      />
+      <PosRegisterPatientModal
+        isOpen={showRegisterPatientModal}
+        clinicId={activeClinic?.id ?? null}
+        patients={patients}
+        clinicPatientFiles={clinicPatientFiles}
+        onClose={() => setShowRegisterPatientModal(false)}
+        onPatientRegistered={({ patient, successMessage }) => {
+          setPatients((prev) => {
+            const exists = prev.some((row) => String(row.id) === String(patient.id));
+            if (exists) {
+              return prev.map((row) => (String(row.id) === String(patient.id) ? { ...row, ...patient } : row));
+            }
+            return [...prev, patient];
+          });
+          setClinicPatientFiles((prev) => {
+            const exists = prev.some((row) => String(row.id) === String(patient.clinic_patient_file_id));
+            if (exists) return prev;
+            return [
+              ...prev,
+              {
+                id: String(patient.clinic_patient_file_id),
+                clinic_id: String(activeClinic?.id || ""),
+                patient_id: String(patient.id),
+                file_no: String(patient.clinic_file_no || ""),
+                mrn: patient.clinic_file_mrn || patient.mrn || null,
+              },
+            ];
+          });
+          selectPatient(patient);
+          setShowRegisterPatientModal(false);
+          alert(successMessage);
         }}
       />
       <ReceiptHistoryModal isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} clinicId={activeClinic?.id} clinic={activeClinic ?? null} />
@@ -6518,14 +6003,6 @@ export default function ReceiptsPage() {
           </div>
         </div>
       )}
-
-      {/* Holds Modal */}
-      <PosHoldsModal
-        isOpen={showHoldsModal}
-        onClose={() => setShowHoldsModal(false)}
-        clinicId={activeClinic?.id || null}
-        onResume={resumeHold}
-      />
 
       {/* Treatment Plan Checkout Modal */}
       {showPlanCheckoutModal && transactionPatientId && activeClinic && (
