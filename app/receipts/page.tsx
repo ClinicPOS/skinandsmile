@@ -67,6 +67,32 @@ type PosPricingLineSummary = {
   isVatConfigured: boolean;
 };
 
+type PosSuccessToast = {
+  id: string;
+  message: string;
+};
+
+type PaymentCompleteSnapshot = {
+  receipt: any;
+  receiptRef: string;
+  patientName: string;
+  completedAtLabel: string;
+  lineItems: Array<{
+    name: string;
+    quantity: number;
+    amount: number;
+  }>;
+  subtotal: number;
+  discount: number;
+  vat: number;
+  totalPaid: number;
+  paymentSummary: string;
+  paymentRows: Array<{
+    label: string;
+    amount: number;
+  }>;
+};
+
 function normalizeServiceVatRate(value: number | null | undefined): number | null {
   if (value === 0) return 0;
   if (value === 0.05) return 0.05;
@@ -407,10 +433,12 @@ export default function ReceiptsPage() {
   const [paymentAllocationDrafts, setPaymentAllocationDrafts] = useState<PaymentAllocationDraft[]>([]);
   const [paymentValidationErrors, setPaymentValidationErrors] = useState<string[]>([]);
   const [cashReceivedByRow, setCashReceivedByRow] = useState<Record<string, string>>({});
+  const [successToasts, setSuccessToasts] = useState<PosSuccessToast[]>([]);
+  const [paymentCompleteSnapshot, setPaymentCompleteSnapshot] = useState<PaymentCompleteSnapshot | null>(null);
   const [applyCreditChecked, setApplyCreditChecked] = useState(false);
   const [discountInput, setDiscountInput] = useState("");
   const [discountType, setDiscountType] = useState<"AED" | "%">("AED");
-  const [showPrintModal, setShowPrintModal] = useState(false);
+  const [, setShowPrintModal] = useState(false);
   const [isSavingReceipt, setIsSavingReceipt] = useState(false);
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
   const [isPosUnlocked, setIsPosUnlocked] = useState(false);
@@ -494,6 +522,17 @@ export default function ReceiptsPage() {
   const [patientActivePlanPayments, setPatientActivePlanPayments] = useState<any[]>([]);
   const [patientActivePlanPaymentRecords, setPatientActivePlanPaymentRecords] = useState<any[]>([]);
   const [patientActivePlanVisits, setPatientActivePlanVisits] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!paymentCompleteSnapshot) return;
+    const preventEscapeClose = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    window.addEventListener("keydown", preventEscapeClose, true);
+    return () => window.removeEventListener("keydown", preventEscapeClose, true);
+  }, [paymentCompleteSnapshot]);
   const [isLoadingActivePlans, setIsLoadingActivePlans] = useState(false);
   const router = useRouter();
 
@@ -1755,6 +1794,11 @@ export default function ReceiptsPage() {
         setCashDeductionSummary(payload.summary);
         setCashSalesTotal(Number(payload.summary.cashCollected || 0));
       }
+      pushSuccessToast(
+        cashDeductionType === "commission"
+          ? cashDeductionModalMode === "edit" ? "Commission updated" : "Commission saved"
+          : cashDeductionModalMode === "edit" ? "Expense updated" : "Expense saved"
+      );
       setShowCashDeductionModal(false);
       resetCashDeductionForm();
     } catch (error) {
@@ -3556,6 +3600,14 @@ export default function ReceiptsPage() {
     return errors;
   }
 
+  function pushSuccessToast(message: string) {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setSuccessToasts((current) => [...current, { id, message }]);
+    setTimeout(() => {
+      setSuccessToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 3500);
+  }
+
   // Credit is a payment source, not a payment method: it reduces the amount
   // due before the method is chosen, and never exceeds the treatment total —
   // any surplus stays on the patient's account for future visits.
@@ -3627,6 +3679,49 @@ export default function ReceiptsPage() {
       return selectedPaymentMethod;
     }
     return paymentSummaryLabel(rows, { includeAmounts: true, includeReferences: true });
+  }
+
+  function buildPaymentCompleteSnapshot(savedReceipt: any): PaymentCompleteSnapshot {
+    const computedAllocations = getRemainingAfterCredit() <= 0.0049 ? [] : buildComputedAllocationsForSave();
+    const paymentRows = computedAllocations.length > 0
+      ? computedAllocations.map((row) => ({
+          label: paymentVariantLabel(row.methodVariant),
+          amount: Number(row.customerChargedAmount || 0),
+        }))
+      : [{
+          label: savedReceipt?.payment_method || selectedPaymentMethod || "Payment",
+          amount: Number(savedReceipt?.total || total || 0),
+        }];
+    const receiptRef = savedReceipt?.receipt_number
+      ? `#${String(savedReceipt.receipt_number).padStart(5, "0")}`
+      : savedReceipt?.id
+        ? `#${String(savedReceipt.id).slice(0, 8).toUpperCase()}`
+        : "-";
+    const lineItems = pricingSummary.lineDetails.map((line) => ({
+      name: line.serviceName,
+      quantity: line.quantity,
+      amount: line.finalLineTotal,
+    }));
+    const patientLabel =
+      patients.find((p) => String(p.id) === String(transactionPatientId))?.name
+      || patientName
+      || "Patient";
+    const completedAtSource = savedReceipt?.created_at ? new Date(savedReceipt.created_at) : new Date();
+    const completedAtLabel = completedAtSource.toLocaleString();
+
+    return {
+      receipt: savedReceipt,
+      receiptRef,
+      patientName: patientLabel,
+      completedAtLabel,
+      lineItems,
+      subtotal,
+      discount: discountAmount,
+      vat,
+      totalPaid: Number(savedReceipt?.total ?? total),
+      paymentSummary: savedReceipt?.payment_method || getPaymentSummaryForSave() || selectedPaymentMethod || "-",
+      paymentRows,
+    };
   }
 
   function buildPaymentDetailsHtml() {
@@ -3732,8 +3827,14 @@ export default function ReceiptsPage() {
     }
 
     setPaymentValidationErrors([]);
+    const savedReceipt = await confirmPaymentAndSave();
+    if (!savedReceipt) {
+      return;
+    }
+    setPaymentCompleteSnapshot(buildPaymentCompleteSnapshot(savedReceipt));
     setShowPaymentModal(false);
-    setShowPrintModal(true);
+    setShowPrintModal(false);
+    pushSuccessToast("Payment completed");
   }
 
   async function confirmPaymentAndSave() {
@@ -4083,12 +4184,10 @@ export default function ReceiptsPage() {
     }
   }
 
-  // Save the transaction, optionally print, then reset the form for the next sale.
-  async function completeTransaction(shouldPrint: boolean) {
-    const savedReceipt = await confirmPaymentAndSave();
-    if (!savedReceipt) return;
-    if (shouldPrint) printReceipt(savedReceipt);
+  function finalizeSuccessfulTransaction() {
     setShowPrintModal(false);
+    setPaymentCompleteSnapshot(null);
+    setShowPaymentModal(false);
     setPatientId("");
     setPatientName("");
     setPatientPhoneInput("");
@@ -5445,7 +5544,7 @@ export default function ReceiptsPage() {
                     }
                     className="mt-4 w-full rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400 disabled:opacity-50"
                   >
-                    Complete Payment
+                    {isSavingReceipt ? "Completing Payment..." : "Complete Payment"}
                   </button>
                   <button
                     onClick={() => {
@@ -5460,37 +5559,81 @@ export default function ReceiptsPage() {
               </div>
             )}
 
-            {showPrintModal && (
+            {paymentCompleteSnapshot && (
               <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50">
-                <div className="rounded-3xl bg-white p-6 shadow-2xl max-w-md w-full mx-4">
-                  <h3 className="text-lg font-semibold text-slate-900 mb-4">Complete transaction</h3>
-                  <p className="mb-6 text-sm text-slate-600">
-                    Save the transaction with or without printing the receipt.
-                  </p>
+                <div className="rounded-3xl bg-white p-6 shadow-2xl max-w-xl w-full mx-4">
+                  <div className="text-center">
+                    <div className="mx-auto mb-2 flex h-11 w-11 items-center justify-center rounded-full bg-emerald-100 text-2xl text-emerald-700">
+                      ✓
+                    </div>
+                    <h3 className="text-xl font-semibold text-slate-900">Payment Complete</h3>
+                    <p className="mt-1 text-sm text-slate-600">Receipt / Invoice #</p>
+                    <p className="text-base font-semibold text-slate-900">{paymentCompleteSnapshot.receiptRef}</p>
+                  </div>
+
+                  <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-slate-500">Patient</span>
+                      <span className="text-right font-semibold text-slate-900">{paymentCompleteSnapshot.patientName}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-slate-500">Date</span>
+                      <span className="text-right font-semibold text-slate-900">{paymentCompleteSnapshot.completedAtLabel}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 space-y-2">
+                    {paymentCompleteSnapshot.lineItems.map((line, index) => (
+                      <div key={`${line.name}-${index}`} className="flex items-center justify-between gap-3 text-sm">
+                        <span className="text-slate-700">{line.name} × {line.quantity}</span>
+                        <span className="font-semibold text-slate-900">AED {line.amount.toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-4 border-t border-slate-200 pt-3 space-y-1.5 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600">Subtotal</span>
+                      <span className="font-semibold text-slate-900">AED {paymentCompleteSnapshot.subtotal.toFixed(2)}</span>
+                    </div>
+                    {paymentCompleteSnapshot.discount > 0.0049 && (
+                      <div className="flex items-center justify-between text-amber-700">
+                        <span>Promo / Price Adjustments</span>
+                        <span className="font-semibold">- AED {paymentCompleteSnapshot.discount.toFixed(2)}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600">VAT</span>
+                      <span className="font-semibold text-slate-900">AED {paymentCompleteSnapshot.vat.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center justify-between border-t border-slate-200 pt-2 text-base">
+                      <span className="font-semibold text-slate-900">Total Paid</span>
+                      <span className="font-bold text-slate-900">AED {paymentCompleteSnapshot.totalPaid.toFixed(2)}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
+                    <p className="font-semibold text-slate-900">Payment</p>
+                    {paymentCompleteSnapshot.paymentRows.map((row, index) => (
+                      <div key={`${row.label}-${index}`} className="mt-1 flex items-center justify-between">
+                        <span className="text-slate-700">{row.label}</span>
+                        <span className="font-semibold text-slate-900">AED {row.amount.toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+
                   <div className="grid gap-3">
                     <button
-                      onClick={() => completeTransaction(true)}
+                      onClick={() => printReceipt(paymentCompleteSnapshot.receipt)}
                       className="inline-flex items-center justify-center rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400"
-                      disabled={isSavingReceipt}
                     >
-                      {isSavingReceipt ? "Saving..." : "Print Receipt"}
+                      Print Receipt
                     </button>
                     <button
-                      onClick={() => completeTransaction(false)}
+                      onClick={finalizeSuccessfulTransaction}
                       className="inline-flex items-center justify-center rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
-                      disabled={isSavingReceipt}
                     >
-                      {isSavingReceipt ? "Saving..." : "Proceed without Printing"}
-                    </button>
-                    <button
-                      onClick={() => {
-                        setShowPrintModal(false);
-                        setShowPaymentModal(false);
-                        setCashReceivedByRow({});
-                      }}
-                      className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                    >
-                      Cancel
+                      Done
                     </button>
                   </div>
                 </div>
@@ -5877,6 +6020,18 @@ export default function ReceiptsPage() {
       </div>
       )}
 
+      <div className="pointer-events-none fixed right-4 top-24 z-[80] flex w-72 max-w-[92vw] flex-col gap-2">
+        {successToasts.map((toast) => (
+          <div
+            key={toast.id}
+            className="rounded-2xl border border-emerald-200 bg-white px-4 py-3 text-sm font-medium text-slate-800 shadow-lg"
+          >
+            <span className="mr-2 text-emerald-700">✓</span>
+            {toast.message}
+          </div>
+        ))}
+      </div>
+
       <SearchPatientModal
         isOpen={showSearchPatientModal}
         initialProfilePatientId={searchPatientModalInitialProfileId}
@@ -5905,6 +6060,7 @@ export default function ReceiptsPage() {
         onPatientUpdated={(updated) => {
           setPatients((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
           if (patientId === updated.id) selectPatient(updated);
+          pushSuccessToast("Patient updated");
         }}
         onCollectBalance={({ balance, payments, patient }) => {
           if (!receptionistId) { alert("Open the register first."); return; }
@@ -5943,7 +6099,11 @@ export default function ReceiptsPage() {
           });
           selectPatient(patient);
           setShowRegisterPatientModal(false);
-          alert(successMessage);
+          if (successMessage.toLowerCase().includes("registered")) {
+            pushSuccessToast("Patient registered");
+          } else {
+            pushSuccessToast("Patient selected");
+          }
         }}
       />
       <ReceiptHistoryModal isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} clinicId={activeClinic?.id} clinic={activeClinic ?? null} />
