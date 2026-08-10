@@ -97,6 +97,12 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
     .trim();
   const receiptTitle = clinic?.receipt_title || "TAX INVOICE";
   const receiptHeading = receiptHeaderLabel || receiptTitle;
+  const normalizedDoctorField = (doctorField || "").trim();
+  const normalizedDoctorName = (doctorName || "").trim();
+  const hasDoctorName = normalizedDoctorName.length > 0 && normalizedDoctorName !== "-";
+  const doctorLabel = normalizedDoctorField.length > 0 && normalizedDoctorField !== "-"
+    ? normalizedDoctorField
+    : "Doctor / الطبيب";
   const isAlDanaClinic = (clinic?.name || "").toLowerCase().includes("al dana");
   const clinicAddress = clinic?.address || (
     isAlDanaClinic
@@ -319,7 +325,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
         <div class="row"><span>Date / التاريخ</span><span>: ${dateValue}</span></div>
         <div class="row"><span>Time / الوقت</span><span>: ${timeValue}</span></div>
         <div class="row"><span>Cashier / أمين الصندوق</span><span>: ${cashierName}</span></div>
-        <div class="row"><span>${doctorField}</span><span>: ${doctorName}</span></div>
+        ${hasDoctorName ? `<div class="row"><span>${doctorLabel}</span><span>: ${normalizedDoctorName}</span></div>` : ""}
         <div class="row"><span>Patient Name / اسم المريض</span><span>: ${patientName}</span></div>
         <div class="row"><span>Patient ID / معرف المريض</span><span>: ${patientFileNumber}</span></div>
         <div class="row"><span>Mobile / الهاتف</span><span>: ${patientPhone}</span></div>
@@ -345,7 +351,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
         ${!showSnapshotDiscountBreakdown && discountAmount > 0
           ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>`
           : ""}
-        <div class="row"><span>Grand Total / الإجمالي</span><span>AED ${grandTotalBeforeFees.toFixed(2)}</span></div>
+        <div class="row"><span>Amount Before VAT / المبلغ قبل الضريبة</span><span>AED ${grandTotalBeforeFees.toFixed(2)}</span></div>
         <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
         ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee</span><span>AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
         <div class="hr" style="margin:4px 0;"></div>

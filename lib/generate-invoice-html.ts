@@ -276,14 +276,15 @@ export function generateInvoiceHtml(opts: GenerateInvoiceHtmlOptions): string {
     const lineTotal = hasSnapshotValues ? Number(item.finalLineTotal) : truncateCurrency(taxable + vatLine);
     const teethLabel = item.teeth && item.teeth.length > 0 ? ` <span style="font-size:8px;color:#888;">(Tooth #${item.teeth.join(", #")})</span>` : "";
     const pricingDetailLines: string[] = [];
-    if (hasTruePromo && originalUnitPrice != null) {
+    if (!hasSnapshotValues && hasTruePromo && originalUnitPrice != null) {
       pricingDetailLines.push(`<div style="margin-top:3px;font-size:8px;color:#666;">Original Price: ${fmt(originalUnitPrice * item.quantity)}</div>`);
-      pricingDetailLines.push(`<div style="font-size:8px;color:#666;">Promo Price: ${fmt(soldLineTotal)}</div>`);
-    } else if (hasPriceIncrease && originalUnitPrice != null) {
+    } else if (!hasSnapshotValues && hasPriceIncrease && originalUnitPrice != null) {
       pricingDetailLines.push(`<div style="margin-top:3px;font-size:8px;color:#666;">Original Price: ${fmt(originalUnitPrice * item.quantity)}</div>`);
-      pricingDetailLines.push(`<div style="font-size:8px;color:#666;">Price Adjustment: ${fmt(soldLineTotal)}</div>`);
     }
-    const unitPriceHtml = fmt(soldUnitPrice);
+    const displayUnitPrice = hasSnapshotValues && hasTruePromo && originalUnitPrice != null
+      ? originalUnitPrice
+      : soldUnitPrice;
+    const unitPriceHtml = fmt(displayUnitPrice);
     return `
       <tr>
         <td style="text-align:center;">${idx + 1}</td>

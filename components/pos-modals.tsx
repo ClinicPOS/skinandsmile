@@ -3022,7 +3022,7 @@ export function ReceiptHistoryModal({
       patientName: patient?.name || "-",
       patientPhone: patient?.phone || "-",
       patientFileNumber: patientFileNo,
-      doctorField: doctors.find((d) => d.id === receipt.doctor_id)?.name || "-",
+      doctorField: clinic?.name === "Skin & Smile Aesthetic Clinic" ? "Aesthetician / المختصة" : "Doctor / الطبيب",
       items: thermalItems,
       subtotal: summary.subtotal,
       discountAmount: summary.discountAmount,
