@@ -383,6 +383,8 @@ export default function ReceiptsPage() {
   const { accessSession, isLoaded, isManager, allowedClinicId } = useClinicAccess();
   const [patients, setPatients] = useState<any[]>([]);
   const [clinicPatientFiles, setClinicPatientFiles] = useState<any[]>([]);
+  const [registrationPatients, setRegistrationPatients] = useState<any[]>([]);
+  const [registrationClinicPatientFiles, setRegistrationClinicPatientFiles] = useState<any[]>([]);
   const [doctors, setDoctors] = useState<any[]>([]);
   const [receptionists, setReceptionists] = useState<any[]>([]);
   const [services, setServices] = useState<Service[]>([]);
@@ -654,32 +656,30 @@ export default function ReceiptsPage() {
 
   useEffect(() => {
     if (!isLoaded) return;
-    loadData();
-
+    let startupClinicId: string | null = allowedClinicId || null;
     const savedSession = localStorage.getItem(POS_REGISTER_SESSION_KEY);
-    if (!savedSession) {
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(savedSession);
-      if (!parsed?.receptionistId) {
-        return;
-      }
-      if (!clinicAccessAllowsClinic(accessSession, parsed.clinicId || null)) {
+    if (savedSession) {
+      try {
+        const parsed = JSON.parse(savedSession);
+        if (!clinicAccessAllowsClinic(accessSession, parsed?.clinicId || null)) {
+          localStorage.removeItem(POS_REGISTER_SESSION_KEY);
+        } else {
+          startupClinicId = String(parsed?.clinicId || "").trim() || startupClinicId;
+          if (parsed?.receptionistId) {
+            setIsPosUnlocked(true);
+            setReceptionistId(parsed.receptionistId);
+            setLoginReceptionistId(parsed.receptionistId);
+            setOpeningCash(Number(parsed.openingCash || 0));
+            setRegisterOpenedAt(parsed.openedAt || "");
+            setRegisterSessionId(parsed.registerSessionId || "");
+          }
+        }
+      } catch {
         localStorage.removeItem(POS_REGISTER_SESSION_KEY);
-        return;
       }
-
-      setIsPosUnlocked(true);
-      setReceptionistId(parsed.receptionistId);
-      setLoginReceptionistId(parsed.receptionistId);
-      setOpeningCash(Number(parsed.openingCash || 0));
-      setRegisterOpenedAt(parsed.openedAt || "");
-      setRegisterSessionId(parsed.registerSessionId || "");
-    } catch {
-      localStorage.removeItem(POS_REGISTER_SESSION_KEY);
     }
+
+    void loadData(startupClinicId);
   }, [accessSession, isLoaded]);
 
   useEffect(() => {
@@ -706,6 +706,10 @@ export default function ReceiptsPage() {
   }, [isPosUnlocked, registerSessionId, activeClinic?.id]);
 
   useEffect(() => {
+    void loadClinicScopedPatientData(activeClinic?.id || allowedClinicId || null);
+  }, [activeClinic?.id, allowedClinicId]);
+
+  useEffect(() => {
     if (!activeClinic?.id) {
       setRecentServiceIds([]);
       setFrequentlyUsedServiceIds([]);
@@ -729,6 +733,12 @@ export default function ReceiptsPage() {
     loadFrequentlyUsedServices();
     loadFavoriteServices();
   }, [activeClinic?.id, receptionistId, loginReceptionistId, receptionists]);
+
+  useEffect(() => {
+    if (!showRegisterPatientModal) return;
+    if (registrationPatients.length > 0 && registrationClinicPatientFiles.length > 0) return;
+    void loadRegistrationLookupData();
+  }, [showRegisterPatientModal, registrationPatients.length, registrationClinicPatientFiles.length]);
 
   async function loadFavoriteServices() {
     if (!activeClinic?.id) {
@@ -839,15 +849,20 @@ export default function ReceiptsPage() {
       return;
     }
 
-    const { data: receiptItemsData, error: itemsError } = await supabase
-      .from("receipt_items")
-      .select("service_id, quantity")
-      .in("receipt_id", receiptIds);
-
-    if (itemsError) {
-      console.warn("Failed loading receipt items for frequent services", itemsError);
-      setFrequentlyUsedServiceIds([]);
-      return;
+    const receiptItemsData: Array<{ service_id: string | null; quantity: number | null }> = [];
+    const RECEIPT_ID_BATCH = 120;
+    for (let index = 0; index < receiptIds.length; index += RECEIPT_ID_BATCH) {
+      const receiptIdBatch = receiptIds.slice(index, index + RECEIPT_ID_BATCH);
+      const { data, error: itemsError } = await supabase
+        .from("receipt_items")
+        .select("service_id, quantity")
+        .in("receipt_id", receiptIdBatch);
+      if (itemsError) {
+        console.warn("Failed loading receipt items for frequent services", itemsError);
+        setFrequentlyUsedServiceIds([]);
+        return;
+      }
+      receiptItemsData.push(...((data || []) as Array<{ service_id: string | null; quantity: number | null }>));
     }
 
     const usageByServiceId = new Map<string, number>();
@@ -887,10 +902,61 @@ export default function ReceiptsPage() {
     return all;
   }
 
-  async function loadData() {
+  async function loadClinicScopedPatientData(clinicId: string | null | undefined) {
+    if (!clinicId) {
+      setClinicPatientFiles([]);
+      setPatients([]);
+      return;
+    }
+
+    const CLINIC_FILES_BATCH = 1000;
+    const scopedClinicFiles: any[] = [];
+    const scopedPatientsById = new Map<string, any>();
+    for (let from = 0; ; from += CLINIC_FILES_BATCH) {
+      const { data: clinicFileRows, error: clinicFilesError } = await supabase
+        .from("clinic_patient_files")
+        .select("id, clinic_id, patient_id, file_no, mrn, patients(*)")
+        .eq("clinic_id", clinicId)
+        .range(from, from + CLINIC_FILES_BATCH - 1);
+      if (clinicFilesError) {
+        console.warn("Failed loading clinic patient files", clinicFilesError);
+        setClinicPatientFiles([]);
+        setPatients([]);
+        return;
+      }
+      const batchRows = clinicFileRows || [];
+      if (batchRows.length === 0) break;
+      for (const row of batchRows) {
+        scopedClinicFiles.push({
+          id: row.id,
+          clinic_id: row.clinic_id,
+          patient_id: row.patient_id,
+          file_no: row.file_no,
+          mrn: row.mrn,
+        });
+        const relatedPatient = Array.isArray(row.patients) ? row.patients[0] : row.patients;
+        if (relatedPatient && relatedPatient.id) {
+          scopedPatientsById.set(String(relatedPatient.id), relatedPatient);
+        }
+      }
+      if (batchRows.length < CLINIC_FILES_BATCH) break;
+    }
+
+    setClinicPatientFiles(scopedClinicFiles);
+    setPatients(Array.from(scopedPatientsById.values()));
+  }
+
+  async function loadRegistrationLookupData() {
+    const [patientRows, clinicFileRows] = await Promise.all([
+      fetchAllRows("patients", "*"),
+      fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no, mrn"),
+    ]);
+    setRegistrationPatients(patientRows);
+    setRegistrationClinicPatientFiles(clinicFileRows);
+  }
+
+  async function loadData(initialClinicId?: string | null) {
     const [
-      patientRows,
-      clinicFileRows,
       doctorResult,
       receptionistResult,
       serviceResult,
@@ -899,8 +965,6 @@ export default function ReceiptsPage() {
       balancePaymentsResult,
       patientCreditsResult,
     ] = await Promise.allSettled([
-      fetchAllRows("patients", "*"),
-      fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no, mrn"),
       supabase.from("doctors").select("*"),
       supabase.from("receptionist").select("*"),
       supabase.from("services").select("*"),
@@ -909,14 +973,6 @@ export default function ReceiptsPage() {
       supabase.from("balance_payments").select("*"),
       supabase.from("patient_credits").select("*"),
     ]);
-
-    if (patientRows.status === "fulfilled") {
-      setPatients(patientRows.value as any[]);
-    }
-
-    if (clinicFileRows.status === "fulfilled") {
-      setClinicPatientFiles(clinicFileRows.value as any[]);
-    }
 
     if (doctorResult.status === "fulfilled") {
       setDoctors((doctorResult.value.data || []) as any[]);
@@ -949,6 +1005,8 @@ export default function ReceiptsPage() {
     if (patientCreditsResult.status === "fulfilled" && !patientCreditsResult.value.error) {
       setPatientCredits((patientCreditsResult.value.data || []) as PatientCredit[]);
     }
+
+    await loadClinicScopedPatientData(initialClinicId || allowedClinicId || null);
   }
 
   async function refetchBalancePayments() {
@@ -5284,10 +5342,13 @@ export default function ReceiptsPage() {
             </div>
 
             {showPaymentModal && (
-              <div className="fixed inset-0 flex items-center justify-center bg-black/50 z-50">
-                <div className="rounded-3xl bg-white p-5 shadow-2xl max-w-2xl w-full mx-4">
-                  <h3 className="text-lg font-semibold text-slate-900 mb-4">PAYMENT</h3>
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                <div className="mx-4 flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
+                  <div className="shrink-0 border-b border-slate-200 px-5 py-4">
+                    <h3 className="text-lg font-semibold text-slate-900">PAYMENT</h3>
+                  </div>
 
+                  <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-5">
                   <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Amount Due</p>
                     <p className="mt-1 text-2xl font-bold text-slate-900">AED {getAmountDueToday().toFixed(2)}</p>
@@ -5535,40 +5596,43 @@ export default function ReceiptsPage() {
                       ))}
                     </div>
                   )}
-                  {selectedPaymentMethod === "Split Payment" && (
-                    <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
-                      <div className="flex items-center justify-between">
-                        <span>Remaining Invoice Balance</span>
-                        <span className="font-semibold">
-                          AED {Math.max(0, getAmountDueToday() - previewAllocations.reduce((sum, row) => sum + row.invoiceAllocationAmount, 0)).toFixed(2)}
-                        </span>
-                      </div>
-                    </div>
-                  )}
                   </>
                   )}
+                  </div>
 
-                  <button
-                    onClick={continueFromPaymentModal}
-                    disabled={
-                      isSavingReceipt
-                      || !isAllocationBalanced
-                      || livePaymentValidation.length > 0
-                      || getCashTenderValidationErrors().length > 0
-                    }
-                    className="mt-4 w-full rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400 disabled:opacity-50"
-                  >
-                    {isSavingReceipt ? "Completing Payment..." : "Complete Payment"}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowPaymentModal(false);
-                      setCashReceivedByRow({});
-                    }}
-                    className="mt-4 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                  >
-                    Cancel
-                  </button>
+                  <div className="shrink-0 border-t border-slate-200 bg-white p-4">
+                    {selectedPaymentMethod === "Split Payment" && (
+                      <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                        <div className="flex items-center justify-between">
+                          <span>Remaining Invoice Balance</span>
+                          <span className="font-semibold">
+                            AED {Math.max(0, getAmountDueToday() - previewAllocations.reduce((sum, row) => sum + row.invoiceAllocationAmount, 0)).toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    <button
+                      onClick={continueFromPaymentModal}
+                      disabled={
+                        isSavingReceipt
+                        || !isAllocationBalanced
+                        || livePaymentValidation.length > 0
+                        || getCashTenderValidationErrors().length > 0
+                      }
+                      className="w-full rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400 disabled:opacity-50"
+                    >
+                      {isSavingReceipt ? "Completing Payment..." : "Complete Payment"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowPaymentModal(false);
+                        setCashReceivedByRow({});
+                      }}
+                      className="mt-3 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -6086,8 +6150,8 @@ export default function ReceiptsPage() {
       <PosRegisterPatientModal
         isOpen={showRegisterPatientModal}
         clinicId={activeClinic?.id ?? null}
-        patients={patients}
-        clinicPatientFiles={clinicPatientFiles}
+        patients={registrationPatients.length > 0 ? registrationPatients : patients}
+        clinicPatientFiles={registrationClinicPatientFiles.length > 0 ? registrationClinicPatientFiles : clinicPatientFiles}
         onClose={() => setShowRegisterPatientModal(false)}
         onPatientRegistered={({ patient, successMessage }) => {
           setPatients((prev) => {
@@ -6100,6 +6164,39 @@ export default function ReceiptsPage() {
           setClinicPatientFiles((prev) => {
             const exists = prev.some((row) => String(row.id) === String(patient.clinic_patient_file_id));
             if (exists) return prev;
+            return [
+              ...prev,
+              {
+                id: String(patient.clinic_patient_file_id),
+                clinic_id: String(activeClinic?.id || ""),
+                patient_id: String(patient.id),
+                file_no: String(patient.clinic_file_no || ""),
+                mrn: patient.clinic_file_mrn || patient.mrn || null,
+              },
+            ];
+          });
+          setRegistrationPatients((prev) => {
+            const exists = prev.some((row) => String(row.id) === String(patient.id));
+            if (exists) {
+              return prev.map((row) => (String(row.id) === String(patient.id) ? { ...row, ...patient } : row));
+            }
+            return [...prev, patient];
+          });
+          setRegistrationClinicPatientFiles((prev) => {
+            const exists = prev.some((row) => String(row.id) === String(patient.clinic_patient_file_id));
+            if (exists) {
+              return prev.map((row) => (
+                String(row.id) === String(patient.clinic_patient_file_id)
+                  ? {
+                      ...row,
+                      clinic_id: String(activeClinic?.id || row.clinic_id || ""),
+                      patient_id: String(patient.id),
+                      file_no: String(patient.clinic_file_no || ""),
+                      mrn: patient.clinic_file_mrn || patient.mrn || null,
+                    }
+                  : row
+              ));
+            }
             return [
               ...prev,
               {
