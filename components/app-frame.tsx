@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
-import { useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { clearClinicAccessSession, getClinicAccessLabel, useClinicAccess } from "../lib/clinic-access";
+import { supabase } from "../lib/supabase";
+import { getDubaiBusinessDate } from "../lib/cash-deductions";
 
 const navigation = [
   { href: "/receipts", label: "POS" },
@@ -31,9 +33,33 @@ export function AppFrame({
   const { accessSession, isLoaded } = useClinicAccess();
   const isManager = accessSession?.mode === "manager";
   const isPosWorkspace = workspaceType === "pos";
-  const visibleNavigation = isManager
-    ? navigation
-    : navigation.filter((item) => item.href !== "/backend" && item.href !== "/reports");
+  const [birthdayRemainingCount, setBirthdayRemainingCount] = useState(0);
+
+  const refreshBirthdayCount = useCallback(async () => {
+    if (!accessSession || accessSession.mode !== "clinic" || !accessSession.clinicId) {
+      setBirthdayRemainingCount(0);
+      return;
+    }
+
+    const { data, error } = await supabase.rpc("get_clinic_birthday_remaining_count", {
+      p_clinic_id: accessSession.clinicId,
+      p_target_date: getDubaiBusinessDate(),
+    });
+    if (error) {
+      console.warn("Failed loading birthday bell count", error);
+      setBirthdayRemainingCount(0);
+      return;
+    }
+    setBirthdayRemainingCount(Math.max(0, Number(data || 0)));
+  }, [accessSession]);
+
+  const visibleNavigation = useMemo(() => {
+    if (isManager) return navigation;
+    return [
+      { href: "/receipts", label: "POS" },
+      { href: "/birthdays", label: `🔔 ${birthdayRemainingCount}` },
+    ];
+  }, [birthdayRemainingCount, isManager]);
 
   useEffect(() => {
     if (isLoaded && !accessSession) {
@@ -47,6 +73,34 @@ export function AppFrame({
       router.replace("/receipts");
     }
   }, [accessSession, isLoaded, isManager, pathname, router]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    void refreshBirthdayCount();
+  }, [isLoaded, refreshBirthdayCount]);
+
+  useEffect(() => {
+    if (!accessSession || accessSession.mode !== "clinic") return;
+
+    const onBirthdayUpdate = () => {
+      void refreshBirthdayCount();
+    };
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        void refreshBirthdayCount();
+      }
+    };
+    window.addEventListener("birthday-greetings-updated", onBirthdayUpdate);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    const intervalId = window.setInterval(() => {
+      void refreshBirthdayCount();
+    }, 60000);
+    return () => {
+      window.removeEventListener("birthday-greetings-updated", onBirthdayUpdate);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.clearInterval(intervalId);
+    };
+  }, [accessSession, refreshBirthdayCount]);
 
   if (!isLoaded || !accessSession) {
     return (

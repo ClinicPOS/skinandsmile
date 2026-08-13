@@ -114,3 +114,16 @@ export function getActiveClinicIdFromRegisterSession(): string | null {
     return null;
   }
 }
+
+export function getActiveReceptionistIdFromRegisterSession(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem("posRegisterSession");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const receptionistId = String(parsed?.receptionistId || "").trim();
+    return receptionistId || null;
+  } catch {
+    return null;
+  }
+}
