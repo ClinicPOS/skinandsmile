@@ -325,6 +325,7 @@ export async function POST(request: Request) {
   const customStart = body?.customStart ? String(body.customStart) : null;
   const customEnd = body?.customEnd ? String(body.customEnd) : null;
   const selectedYear = Number(body?.year || new Date().getFullYear());
+  const includeHistoricalData = body?.includeHistoricalData === true || period !== "today";
 
   let currentRange;
   try {
@@ -443,15 +444,25 @@ export async function POST(request: Request) {
     return (data || []) as RefundItemRow[];
   };
 
-  const [currentReceipts, compareReceipts, yearlyReceipts, previousYearReceipts, historyReceipts, currentRefunds, compareRefunds] = await Promise.all([
+  let yearlyReceipts: ReceiptRow[] = [];
+  let previousYearReceipts: ReceiptRow[] = [];
+  let historyReceipts: ReceiptRow[] = [];
+  let historicalBeforeRows: Array<{ patient_id: string | null; receptionist_id: string | null; transaction_type?: string | null }> = [];
+
+  const [currentReceipts, compareReceipts, currentRefunds, compareRefunds] = await Promise.all([
     fetchReceipts(currentRange.startUtcIso, currentRange.endUtcIso),
     fetchReceipts(compareRange.startUtcIso, compareRange.endUtcIso),
-    fetchReceipts(yearRange.startIso, yearRange.endIso),
-    fetchReceipts(yearRange.previousStartIso, yearRange.previousEndIso),
-    fetchReceipts(historyRange.startIso, historyRange.endIso),
     fetchRefunds(currentRange.startUtcIso, currentRange.endUtcIso),
     fetchRefunds(compareRange.startUtcIso, compareRange.endUtcIso),
   ]);
+
+  if (includeHistoricalData) {
+    [yearlyReceipts, previousYearReceipts, historyReceipts] = await Promise.all([
+      fetchReceipts(yearRange.startIso, yearRange.endIso),
+      fetchReceipts(yearRange.previousStartIso, yearRange.previousEndIso),
+      fetchReceipts(historyRange.startIso, historyRange.endIso),
+    ]);
+  }
 
   const currentReceiptMap = new Map(currentReceipts.map((row) => [row.id, row]));
   const compareReceiptMap = new Map(compareReceipts.map((row) => [row.id, row]));
@@ -543,24 +554,26 @@ export async function POST(request: Request) {
   const currentCompletedVisits = currentReceipts.length;
 
   const currentPatientIds = new Set(currentReceipts.map((row) => row.patient_id).filter((value): value is string => !!value));
-  const { data: historicalBeforeRows, error: historicalBeforeError } = await supabase
-    .from("receipts")
-    .select("patient_id, receptionist_id, created_at, transaction_type")
-    .lt("created_at", currentRange.startUtcIso);
-  if (historicalBeforeError) return Response.json({ error: historicalBeforeError.message }, { status: 500 });
-  const historicalBefore = ((historicalBeforeRows || []) as Array<{ patient_id: string | null; receptionist_id: string | null; transaction_type?: string | null }>)
-    .filter((row) => String(row.transaction_type || "regular") !== "plan_summary")
-    .filter((row) => {
-      if (!row.receptionist_id) return false;
-      const clinicOfReceptionist = receptionistClinicMap.get(row.receptionist_id) || "";
-      return clinicIds.includes(clinicOfReceptionist);
-    });
-  const previousPatientSet = new Set(historicalBefore.map((row) => row.patient_id).filter((value): value is string => !!value));
   let newPatients = 0;
   let returningPatients = 0;
-  for (const patientId of currentPatientIds) {
-    if (previousPatientSet.has(patientId)) returningPatients += 1;
-    else newPatients += 1;
+  if (includeHistoricalData) {
+    const { data: historicalBeforeData, error: historicalBeforeError } = await supabase
+      .from("receipts")
+      .select("patient_id, receptionist_id, created_at, transaction_type")
+      .lt("created_at", currentRange.startUtcIso);
+    if (historicalBeforeError) return Response.json({ error: historicalBeforeError.message }, { status: 500 });
+    historicalBeforeRows = ((historicalBeforeData || []) as Array<{ patient_id: string | null; receptionist_id: string | null; transaction_type?: string | null }>)
+      .filter((row) => String(row.transaction_type || "regular") !== "plan_summary")
+      .filter((row) => {
+        if (!row.receptionist_id) return false;
+        const clinicOfReceptionist = receptionistClinicMap.get(row.receptionist_id) || "";
+        return clinicIds.includes(clinicOfReceptionist);
+      });
+    const previousPatientSet = new Set(historicalBeforeRows.map((row) => row.patient_id).filter((value): value is string => !!value));
+    for (const patientId of currentPatientIds) {
+      if (previousPatientSet.has(patientId)) returningPatients += 1;
+      else newPatients += 1;
+    }
   }
 
   // Targets / schedules / events are optional dependencies.
@@ -777,7 +790,7 @@ export async function POST(request: Request) {
     netSales: number;
     averageNetSalesPerPatient: number;
   }> = [];
-  if (currentReceipts.length > 0) {
+  if (includeHistoricalData && currentReceipts.length > 0) {
     const receiptIds = currentReceipts.map((row) => row.id);
     const chunkSize = 500;
     const allReceiptItems: ReceiptItemRow[] = [];
@@ -860,7 +873,7 @@ export async function POST(request: Request) {
   }
 
   // Monthly trends.
-  const monthlyTrend = Array.from({ length: 12 }, (_, index) => {
+  const monthlyTrend = includeHistoricalData ? Array.from({ length: 12 }, (_, index) => {
     const monthNumber = index + 1;
     const monthStart = new Date(`${selectedYear}-${String(monthNumber).padStart(2, "0")}-01T00:00:00+04:00`);
     const nextMonth = new Date(`${selectedYear}-${String(monthNumber + 1).padStart(2, "0")}-01T00:00:00+04:00`);
@@ -892,26 +905,28 @@ export async function POST(request: Request) {
       previousYear: previousYearSales > 0 ? previousYearSales : null,
       belowTarget: targetForMonth > 0 ? netSales < targetForMonth : null,
     };
-  });
+  }) : [];
 
   // Patient demand patterns (completed visits only).
-  const historyDays = Math.floor((new Date(historyRange.endIso).getTime() - new Date(historyRange.startIso).getTime()) / (24 * 60 * 60 * 1000));
-  const dayOfWeekBuckets = Array.from({ length: 7 }, (_, weekday) => ({ weekday, visits: 0, averagePerOpenDay: null as number | null }));
-  const dayOfMonthBuckets = [
+  const historyDays = includeHistoricalData ? Math.floor((new Date(historyRange.endIso).getTime() - new Date(historyRange.startIso).getTime()) / (24 * 60 * 60 * 1000)) : 0;
+  const dayOfWeekBuckets = includeHistoricalData ? Array.from({ length: 7 }, (_, weekday) => ({ weekday, visits: 0, averagePerOpenDay: null as number | null })) : [];
+  const dayOfMonthBuckets = includeHistoricalData ? [
     { label: "Days 1-7", visits: 0 },
     { label: "Days 8-14", visits: 0 },
     { label: "Days 15-21", visits: 0 },
     { label: "Days 22-end", visits: 0 },
-  ];
-  for (const receipt of historyReceipts) {
-    const day = dubaiDateOnly(new Date(receipt.created_at));
-    const weekday = weekdayDubai(day);
-    dayOfWeekBuckets[weekday].visits += 1;
-    const dayNumber = parseYmd(day).d;
-    if (dayNumber <= 7) dayOfMonthBuckets[0].visits += 1;
-    else if (dayNumber <= 14) dayOfMonthBuckets[1].visits += 1;
-    else if (dayNumber <= 21) dayOfMonthBuckets[2].visits += 1;
-    else dayOfMonthBuckets[3].visits += 1;
+  ] : [];
+  if (includeHistoricalData) {
+    for (const receipt of historyReceipts) {
+      const day = dubaiDateOnly(new Date(receipt.created_at));
+      const weekday = weekdayDubai(day);
+      dayOfWeekBuckets[weekday].visits += 1;
+      const dayNumber = parseYmd(day).d;
+      if (dayNumber <= 7) dayOfMonthBuckets[0].visits += 1;
+      else if (dayNumber <= 14) dayOfMonthBuckets[1].visits += 1;
+      else if (dayNumber <= 21) dayOfMonthBuckets[2].visits += 1;
+      else dayOfMonthBuckets[3].visits += 1;
+    }
   }
 
   const weeklyOpenCounts = new Map<number, number>();

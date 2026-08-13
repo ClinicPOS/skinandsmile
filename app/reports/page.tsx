@@ -444,6 +444,7 @@ export default function ReportsPage() {
   const [lastUpdated, setLastUpdated] = useState<string>("");
   const [showCashDeductionDetails, setShowCashDeductionDetails] = useState(false);
   const inFlightRef = useRef(false);
+  const refreshTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     supabase.from("clinics").select("id, name").order("name", { ascending: true }).then(({ data: rows }) => {
@@ -451,10 +452,11 @@ export default function ReportsPage() {
     });
   }, []);
 
-  const loadDashboard = useCallback(async (options?: { background?: boolean }) => {
+  const loadDashboard = useCallback(async (options?: { background?: boolean; includeHistoricalData?: boolean }) => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     const background = !!options?.background;
+    const includeHistoricalData = options?.includeHistoricalData ?? (period !== "today" || tab !== "overview");
     if (background) setRefreshing(true);
     else setLoading(true);
     setError("");
@@ -471,6 +473,7 @@ export default function ReportsPage() {
           customStart: period === "custom" ? customStart : null,
           customEnd: period === "custom" ? customEnd : null,
           year: selectedYear,
+          includeHistoricalData,
         }),
       });
       const payload = await response.json();
@@ -492,26 +495,62 @@ export default function ReportsPage() {
       if (background) setRefreshing(false);
       else setLoading(false);
     }
-  }, [period, clinicId, customStart, customEnd, selectedYear]);
+  }, [period, clinicId, customStart, customEnd, selectedYear, tab]);
 
   useEffect(() => {
     if (period === "custom" && (!customStart || !customEnd)) return;
-    loadDashboard();
-  }, [period, clinicId, customStart, customEnd, selectedYear, loadDashboard]);
+    loadDashboard({ includeHistoricalData: period !== "today" || tab !== "overview" });
+  }, [period, clinicId, customStart, customEnd, selectedYear, tab, loadDashboard]);
 
   useEffect(() => {
     if (period !== "today") return;
     const channel = supabase
       .channel("ceo-dashboard-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "receipts" }, () => loadDashboard({ background: true }))
-      .on("postgres_changes", { event: "*", schema: "public", table: "refunds" }, () => loadDashboard({ background: true }))
-      .on("postgres_changes", { event: "*", schema: "public", table: "payment_records" }, () => loadDashboard({ background: true }))
-      .on("postgres_changes", { event: "*", schema: "public", table: "payment_allocations" }, () => loadDashboard({ background: true }))
-      .on("postgres_changes", { event: "*", schema: "public", table: "balance_payments" }, () => loadDashboard({ background: true }))
-      .on("postgres_changes", { event: "*", schema: "public", table: "cash_deductions" }, () => loadDashboard({ background: true }))
+      .on("postgres_changes", { event: "*", schema: "public", table: "receipts" }, () => {
+        if (refreshTimerRef.current) {
+          window.clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = window.setTimeout(() => loadDashboard({ background: true, includeHistoricalData: tab !== "overview" }), 400);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "refunds" }, () => {
+        if (refreshTimerRef.current) {
+          window.clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = window.setTimeout(() => loadDashboard({ background: true, includeHistoricalData: tab !== "overview" }), 400);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "payment_records" }, () => {
+        if (refreshTimerRef.current) {
+          window.clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = window.setTimeout(() => loadDashboard({ background: true, includeHistoricalData: tab !== "overview" }), 400);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "payment_allocations" }, () => {
+        if (refreshTimerRef.current) {
+          window.clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = window.setTimeout(() => loadDashboard({ background: true, includeHistoricalData: tab !== "overview" }), 400);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "balance_payments" }, () => {
+        if (refreshTimerRef.current) {
+          window.clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = window.setTimeout(() => loadDashboard({ background: true, includeHistoricalData: tab !== "overview" }), 400);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "cash_deductions" }, () => {
+        if (refreshTimerRef.current) {
+          window.clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = window.setTimeout(() => loadDashboard({ background: true, includeHistoricalData: tab !== "overview" }), 400);
+      })
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [period, loadDashboard]);
+    return () => {
+      if (refreshTimerRef.current) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+      supabase.removeChannel(channel);
+    };
+  }, [period, tab, loadDashboard]);
 
   const currentRangeLabel = useMemo(() => {
     if (data?.meta.currentRange) {
