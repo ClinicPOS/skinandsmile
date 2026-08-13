@@ -25,6 +25,8 @@ type ReceiptRow = {
   gateway_fee: number | null;
   amount_paid: number | null;
   discount_amount: number | null;
+  birthday_discount_amount?: number | null;
+  discount_reason?: string | null;
   payment_method: string | null;
   created_at: string;
   transaction_type?: string | null;
@@ -410,7 +412,7 @@ export async function POST(request: Request) {
   const fetchReceipts = async (startIso: string, endIso: string) => {
     let query = supabase
       .from("receipts")
-      .select("id, patient_id, receptionist_id, doctor_id, subtotal, vat, total, total_before_gateway_fee, gateway_fee, amount_paid, discount_amount, payment_method, created_at, transaction_type")
+      .select("id, patient_id, receptionist_id, doctor_id, subtotal, vat, total, total_before_gateway_fee, gateway_fee, amount_paid, discount_amount, birthday_discount_amount, discount_reason, payment_method, created_at, transaction_type")
       .gte("created_at", startIso)
       .lt("created_at", endIso);
     if (selectedReceptionistIds.size > 0 && selectedReceptionistIds.size !== receptionists.length) {
@@ -526,6 +528,16 @@ export async function POST(request: Request) {
   const compareNetSales = compareCollectionsEod;
   const currentCollections = currentCollectionsEod;
   const compareCollections = compareCollectionsEod;
+  const currentBirthdayDiscountTotal = currentReceipts.reduce((sum, row) => {
+    if (String(row.discount_reason || "").trim() !== "Birthday Discount 5%") return sum;
+    const explicitAmount = asNumber(row.birthday_discount_amount);
+    return sum + (explicitAmount > 0 ? explicitAmount : asNumber(row.discount_amount));
+  }, 0);
+  const compareBirthdayDiscountTotal = compareReceipts.reduce((sum, row) => {
+    if (String(row.discount_reason || "").trim() !== "Birthday Discount 5%") return sum;
+    const explicitAmount = asNumber(row.birthday_discount_amount);
+    return sum + (explicitAmount > 0 ? explicitAmount : asNumber(row.discount_amount));
+  }, 0);
   const currentUniquePatients = new Set(currentReceipts.map((row) => row.patient_id).filter(Boolean)).size;
   const compareUniquePatients = new Set(compareReceipts.map((row) => row.patient_id).filter(Boolean)).size;
   const currentCompletedVisits = currentReceipts.length;
@@ -1132,6 +1144,8 @@ export async function POST(request: Request) {
         targetProgress: overviewTargetAttainment,
         customerCollections: currentCollections,
         customerCollectionsCompare: compareCollections,
+        birthdayDiscounts: currentBirthdayDiscountTotal,
+        birthdayDiscountsCompare: compareBirthdayDiscountTotal,
         outstandingBalance: currentOutstanding,
         outstandingBalanceCompare: compareOutstanding,
         uniquePatientsSeen: currentUniquePatients,

@@ -60,6 +60,8 @@ type DashboardResponse = {
     targetProgress: number | null;
     customerCollections: number;
     customerCollectionsCompare: number;
+    birthdayDiscounts?: number;
+    birthdayDiscountsCompare?: number;
     outstandingBalance: number;
     outstandingBalanceCompare: number;
     uniquePatientsSeen: number;
@@ -293,11 +295,17 @@ function SummaryBanner({ data }: { data: DashboardResponse }) {
       : total > 0
         ? `All ${total} clinics on pace`
         : "No clinic status available";
+  const birthdayDiscountTotal = data.overview?.birthdayDiscounts ?? 0;
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-sm font-semibold text-slate-900">{summary}</p>
+        <div>
+          <p className="text-sm font-semibold text-slate-900">{summary}</p>
+          {birthdayDiscountTotal > 0 && (
+            <p className="mt-1 text-[11px] font-medium text-amber-700">Birthday Discounts: {formatCurrency(birthdayDiscountTotal)}</p>
+          )}
+        </div>
         <p className="text-xs text-slate-500">{note}</p>
       </div>
     </div>
@@ -407,6 +415,7 @@ function renderExportHtml(data: DashboardResponse, clinicLabel: string, currentR
         <div class="kpi"><div class="label">Target Pace</div><div class="value">${data.overview?.targetProgress == null ? "Not available" : `${data.overview.targetProgress.toFixed(1)}%`}</div></div>
         <div class="kpi"><div class="label">Customer Collections</div><div class="value">${formatCurrency(data.overview?.customerCollections)}</div></div>
         <div class="kpi"><div class="label">Outstanding Balance</div><div class="value">${formatCurrency(data.overview?.outstandingBalance)}</div></div>
+        <div class="kpi"><div class="label">Birthday Discounts</div><div class="value">${formatCurrency(data.overview?.birthdayDiscounts ?? 0)}</div></div>
       </div>
       <h2>Clinic Comparison</h2>
       <table>

@@ -167,17 +167,26 @@ function summarizePosServicePricing(service: PosPricingService) {
   };
 }
 
-function summarizeCartPricing(services: PosPricingService[], discountInput: string, discountType: "AED" | "%") {
+function summarizeCartPricing(
+  services: PosPricingService[],
+  discountInput: string,
+  discountType: "AED" | "%",
+  birthdayDiscountApplied = false
+) {
   const lineSummaries = services.map(summarizePosServicePricing);
   const originalSubtotal = lineSummaries.reduce((sum, line) => sum + line.originalLineTotal, 0);
   const discountedSubtotal = lineSummaries.reduce((sum, line) => sum + line.discountedLineTotal, 0);
   const itemDiscountAmount = lineSummaries.reduce((sum, line) => sum + line.manualDiscountAmount, 0);
   const parsedDiscountInput = parseFloat(discountInput) || 0;
-  const globalDiscountAmount = parsedDiscountInput <= 0
+  const birthdayDiscountAmount = birthdayDiscountApplied
+    ? Math.min(discountedSubtotal, (discountedSubtotal * 5) / 100)
+    : 0;
+  const baseGlobalDiscountAmount = parsedDiscountInput <= 0
     ? 0
     : discountType === "%"
       ? Math.min(discountedSubtotal, (discountedSubtotal * parsedDiscountInput) / 100)
       : Math.min(discountedSubtotal, parsedDiscountInput);
+  const globalDiscountAmount = Math.min(discountedSubtotal, baseGlobalDiscountAmount + birthdayDiscountAmount);
   const totalDiscount = Math.max(0, Math.min(originalSubtotal, itemDiscountAmount + globalDiscountAmount));
   const netSubtotal = Math.max(0, originalSubtotal - totalDiscount);
 
@@ -440,6 +449,7 @@ export default function ReceiptsPage() {
   const [applyCreditChecked, setApplyCreditChecked] = useState(false);
   const [discountInput, setDiscountInput] = useState("");
   const [discountType, setDiscountType] = useState<"AED" | "%">("AED");
+  const [birthdayDiscountApplied, setBirthdayDiscountApplied] = useState(false);
   const [, setShowPrintModal] = useState(false);
   const [isSavingReceipt, setIsSavingReceipt] = useState(false);
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
@@ -1199,6 +1209,7 @@ export default function ReceiptsPage() {
     setCartItemToothDrafts([]);
     setDiscountInput("");
     setDiscountType("AED");
+    setBirthdayDiscountApplied(false);
     setTransactionPatientId("");
     setTransactionPatientFileId("");
     setSelectedPatientInfo(null);
@@ -1242,11 +1253,38 @@ export default function ReceiptsPage() {
     }
   }
 
-  const pricingSummary = summarizeCartPricing(selectedServices, discountInput, discountType);
+  const birthdayDiscountEligible = useMemo(() => {
+    const dateOfBirth = selectedPatientInfo?.date_of_birth || patientDobInput || null;
+    if (!dateOfBirth) return false;
+
+    const dob = new Date(dateOfBirth);
+    if (Number.isNaN(dob.getTime())) return false;
+
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Dubai",
+      month: "2-digit",
+    });
+    const current = formatter.formatToParts(new Date());
+    const currentMonth = current.find((part) => part.type === "month")?.value || "";
+    const dobParts = formatter.formatToParts(dob);
+    const dobMonth = dobParts.find((part) => part.type === "month")?.value || "";
+    return dobMonth === currentMonth;
+  }, [selectedPatientInfo?.date_of_birth, patientDobInput]);
+
+  useEffect(() => {
+    if (!birthdayDiscountEligible) {
+      setBirthdayDiscountApplied(false);
+    }
+  }, [birthdayDiscountEligible]);
+
+  const pricingSummary = summarizeCartPricing(selectedServices, discountInput, discountType, birthdayDiscountApplied);
   const subtotal = pricingSummary.originalSubtotal;
   const manualDiscountAmount = pricingSummary.itemDiscountAmount;
   const globalDiscountAmount = pricingSummary.globalDiscountAmount;
   const discountAmount = pricingSummary.totalDiscount;
+  const birthdayDiscountAmount = birthdayDiscountEligible && birthdayDiscountApplied
+    ? Math.min(pricingSummary.discountedSubtotal, pricingSummary.discountedSubtotal * 0.05)
+    : 0;
   const preVatTotal = pricingSummary.netSubtotal;
   const vat = pricingSummary.totalVat;
   const total = pricingSummary.finalInvoiceTotal;
@@ -2736,6 +2774,7 @@ export default function ReceiptsPage() {
     const cashCollectedForDeductions = cashGrossCollectedToday;
     const cashAfterDeductions = cashGrossCollectedToday - totalCashDeductions;
     const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
+    const birthdayDiscountTotal = receipts.reduce((sum, receipt) => sum + Number(receipt.birthday_discount_amount || 0), 0);
     const netCollectionsAfterDeductions = netPatientMoneyReceived - totalCashDeductions;
     const balanceCollectionBreakdown = (balancePaymentsData || []).reduce((summary, payment) => {
       const breakdown = getPaymentBreakdownForReporting(String(payment.payment_method || ""), Number(payment.amount || 0));
@@ -2849,6 +2888,9 @@ export default function ReceiptsPage() {
       ["New Treatment Plan Sales", treatmentPlanInitialSalesTotal, "", ""],
       ["TOTAL INVOICE SALES", regularInvoiceValueTotal + treatmentPlanInitialSalesTotal, "", ""],
       ["", "", "", ""],
+      ["DISCOUNTS / PROMOTIONS", "", "", ""],
+      ["Birthday Discounts", birthdayDiscountTotal, "", ""],
+      ["", "", "", ""],
       ["PAYMENT BREAKDOWN", "", "", ""],
       ["Payment Method", "Collected", "Refunds", "Net"],
       ["Cash", cashTotal, refundMethodTotals.cash, cashTotal - refundMethodTotals.cash],
@@ -2887,7 +2929,7 @@ export default function ReceiptsPage() {
     summarySheet["!cols"] = [{ wch: 36 }, { wch: 18 }, { wch: 16 }, { wch: 16 }];
     const mergeRows: number[] = summaryRows.reduce((rows: number[], row, index) => {
       const label = typeof row[0] === "string" ? row[0].toUpperCase() : "";
-      if (["REPORT INFORMATION", "TODAY'S COLLECTION SUMMARY", "SALES / INVOICE", "PAYMENT BREAKDOWN", "BNPL SURCHARGES", "CASH RECONCILIATION", "ACTIVITY"].includes(label)) {
+      if (["REPORT INFORMATION", "TODAY'S COLLECTION SUMMARY", "SALES / INVOICE", "DISCOUNTS / PROMOTIONS", "PAYMENT BREAKDOWN", "BNPL SURCHARGES", "CASH RECONCILIATION", "ACTIVITY"].includes(label)) {
         rows.push(index + 1);
       }
       return rows;
@@ -2908,7 +2950,7 @@ export default function ReceiptsPage() {
     const isSectionHeaderRow = (row: number) => {
       const cellValue = summaryRows[row - 1]?.[0];
       const label = typeof cellValue === "string" ? cellValue.toUpperCase() : "";
-      return ["REPORT INFORMATION", "TODAY'S COLLECTION SUMMARY", "SALES / INVOICE", "PAYMENT BREAKDOWN", "BNPL SURCHARGES", "CASH RECONCILIATION", "ACTIVITY"].includes(label);
+      return ["REPORT INFORMATION", "TODAY'S COLLECTION SUMMARY", "SALES / INVOICE", "DISCOUNTS / PROMOTIONS", "PAYMENT BREAKDOWN", "BNPL SURCHARGES", "CASH RECONCILIATION", "ACTIVITY"].includes(label);
     };
 
     const isSubtotalRow = (row: number) => {
@@ -4077,6 +4119,8 @@ export default function ReceiptsPage() {
           gateway_fee: roundedPaymentFees > 0 ? roundedPaymentFees : null,
           gateway_fee_provider: gatewayFeeProvider,
           discount_amount: discountAmount > 0 ? discountAmount : null,
+          birthday_discount_amount: birthdayDiscountAmount > 0 ? birthdayDiscountAmount : null,
+          discount_reason: birthdayDiscountApplied ? "Birthday Discount 5%" : null,
           notes: null,
           payment_method: isFullyCoveredByCredit && creditApplied > 0.0049
             ? `Patient Credit (AED ${creditApplied.toFixed(2)})`
@@ -4286,6 +4330,7 @@ export default function ReceiptsPage() {
     setSelectedServices([]);
     setDiscountInput("");
     setDiscountType("AED");
+    setBirthdayDiscountApplied(false);
     setFilteredPatients([]);
     setShowPatientSuggestions(false);
     router.refresh();
@@ -4679,6 +4724,21 @@ export default function ReceiptsPage() {
                 ) : (
                   <div className="mt-2 space-y-2">
                     <p className="text-base font-semibold text-slate-900">{patientName || "—"}</p>
+                    {birthdayDiscountEligible && (
+                      <button
+                        type="button"
+                        onClick={() => setBirthdayDiscountApplied((current) => !current)}
+                        className={`mt-2 inline-flex items-center rounded-xl border px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                          birthdayDiscountApplied
+                            ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                            : "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
+                        }`}
+                      >
+                        {birthdayDiscountApplied
+                          ? `Birthday 5% Applied · AED ${birthdayDiscountAmount.toFixed(2)}`
+                          : "Apply Birthday 5%"}
+                      </button>
+                    )}
                     {(patientFileNumberInput || patientPhoneInput) && (
                       <div className="grid gap-1 text-sm text-slate-600 sm:grid-cols-2">
                         {patientFileNumberInput && <p>File #{patientFileNumberInput}</p>}

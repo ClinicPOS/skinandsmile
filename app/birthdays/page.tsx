@@ -70,6 +70,7 @@ export default function BirthdaysPage() {
   const [loading, setLoading] = useState(false);
   const [markingPatientId, setMarkingPatientId] = useState<string | null>(null);
   const [copiedPatientId, setCopiedPatientId] = useState<string | null>(null);
+  const [copiedContact, setCopiedContact] = useState<{ patientId: string; type: "phone" | "email" } | null>(null);
   const dubaiDateKey = useMemo(() => getDubaiBusinessDate(), []);
   const dubaiDateLabel = useMemo(() => formatDubaiDateLabel(dubaiDateKey), [dubaiDateKey]);
 
@@ -192,7 +193,7 @@ export default function BirthdaysPage() {
       `Phone / WhatsApp: ${row.phone || "No phone"}`,
       `Email: ${row.email || "No email"}`,
       "",
-      "Task: Create a short, warm, professional birthday greeting from the clinic suitable for WhatsApp. Do not mention medical history or sensitive information. Do not mention the patient's age unless it naturally improves the message. Nationality may be used only as a language hint; do not assume language preference solely from nationality. If no language preference is known, use friendly English.",
+      "Task: Create two birthday greetings for this patient from the clinic: (1) a WhatsApp message and (2) an Email message with a subject line. Make both greetings warm, personal, inviting, and professional. Make the patient feel genuinely remembered and appreciated rather than receiving a generic automated birthday message. Address the patient naturally by their first name. Include sincere birthday wishes and gently invite them to visit the clinic again without sounding pushy or overly promotional. The clinic is giving the birthday celebrant a 5% Birthday Discount for the entire month of their birthday. For example, if the patient's birthday is in August, the 5% Birthday Discount is valid until the end of August. Mention the offer naturally as a special birthday gift from the clinic. Birthday Promo Rules: - The discount is 5% off the celebrant's final bill. - It is valid for the entire birthday month, not only on the birthday. - It applies regardless of how many services the celebrant receives. - It can still be applied even if the services already have discounted or promotional prices. - It is only for the birthday celebrant and cannot be transferred to another person. - Do not invent minimum spend, excluded services, non-stacking rules, or any other restrictions that were not provided. WhatsApp: Keep it short, friendly, conversational, and easy to read. Use a few appropriate emojis. Clearly mention that the 5% Birthday Discount is available throughout their birthday month without making the message too long. Email: Make it slightly more polished and detailed while still warm and personal. Include a suitable birthday email subject line and clearly mention that the 5% Birthday Discount is valid for the whole birthday month. Do not mention medical history or sensitive information. Do not mention the patient's age unless it naturally improves the greeting. Nationality may only be used as a language hint; do not assume language preference solely from nationality. If no language preference is known, use friendly English. Output the WhatsApp message first, followed by the Email subject and Email message.",
     ].join("\n");
 
     try {
@@ -203,6 +204,21 @@ export default function BirthdaysPage() {
       }, 1500);
     } catch {
       alert("Could not copy details. Please try again.");
+    }
+  }
+
+  async function copyContact(row: BirthdayPatientRow, type: "phone" | "email") {
+    const value = type === "phone" ? row.phone : row.email;
+    if (!value) return;
+
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedContact({ patientId: row.patient_id, type });
+      window.setTimeout(() => {
+        setCopiedContact((current) => (current?.patientId === row.patient_id && current?.type === type ? null : current));
+      }, 1500);
+    } catch {
+      alert(`Could not copy ${type === "phone" ? "WhatsApp number" : "email"}. Please try again.`);
     }
   }
 
@@ -243,8 +259,30 @@ export default function BirthdaysPage() {
                     <p className="text-sm text-slate-600">
                       Sex: {row.sex || "Unknown"} · File No: {row.file_no || "—"} · MRN: {row.clinic_mrn || "—"}
                     </p>
-                    <p className="text-sm text-slate-600">Phone / WhatsApp: {row.phone || "No phone"}</p>
-                    <p className="text-sm text-slate-600">Email: {row.email || "No email"}</p>
+                    <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
+                      <span>Phone / WhatsApp: {row.phone || "No phone"}</span>
+                      {row.phone && (
+                        <button
+                          type="button"
+                          onClick={() => copyContact(row, "phone")}
+                          className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                        >
+                          {copiedContact?.patientId === row.patient_id && copiedContact.type === "phone" ? "Copied ✓" : "Copy WhatsApp"}
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
+                      <span>Email: {row.email || "No email"}</span>
+                      {row.email && (
+                        <button
+                          type="button"
+                          onClick={() => copyContact(row, "email")}
+                          className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100"
+                        >
+                          {copiedContact?.patientId === row.patient_id && copiedContact.type === "email" ? "Copied ✓" : "Copy Email"}
+                        </button>
+                      )}
+                    </div>
                     {row.greeted ? (
                       <p className="text-sm font-semibold text-emerald-700">
                         ✓ Greeted
