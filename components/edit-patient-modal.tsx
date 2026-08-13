@@ -4,23 +4,38 @@ import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import type { Patient } from "../lib/types";
 import { COUNTRIES } from "../lib/countries";
+import { normalizeMrn } from "../lib/patient-registration";
 
 // ---------------------------------------------------------------------------
 // EditPatientModal — edits patient demographics from the profile view.
-// The File Number is an official physical file label, so changing it requires
-// the Owner/Admin PIN (verified via /api/verify-boss-pin) and stays unique.
+// File No. is clinic-scoped and stored in clinic_patient_files for the current clinic.
 // ---------------------------------------------------------------------------
+
+type EditablePatient = Patient & {
+  clinic_file_no?: string | null;
+  clinic_file_mrn?: string | null;
+  clinic_patient_file_id?: string | null;
+};
+
+type MrnDuplicateWarningCandidate = {
+  patientId: string;
+  name: string;
+  fileNo: string | null;
+  phone: string | null;
+};
 
 export function EditPatientModal({
   isOpen,
   onClose,
   patient,
+  clinicId,
   onSaved,
 }: {
   isOpen: boolean;
   onClose: () => void;
-  patient: Patient | null;
-  onSaved?: (patient: Patient) => void;
+  patient: EditablePatient | null;
+  clinicId: string | null;
+  onSaved?: (patient: EditablePatient) => void;
 }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -31,12 +46,14 @@ export function EditPatientModal({
   const [address, setAddress] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
   const [sex, setSex] = useState("");
+  const [mrn, setMrn] = useState("");
   const [fileNumber, setFileNumber] = useState("");
   const [fileNumberUnlocked, setFileNumberUnlocked] = useState(false);
   const [showPinPrompt, setShowPinPrompt] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [verifyingPin, setVerifyingPin] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [mrnDuplicateWarnings, setMrnDuplicateWarnings] = useState<MrnDuplicateWarningCandidate[]>([]);
 
   useEffect(() => {
     if (!isOpen || !patient) return;
@@ -49,10 +66,12 @@ export function EditPatientModal({
     setAddress(patient.address || "");
     setDateOfBirth(patient.date_of_birth || "");
     setSex(patient.sex || "");
-    setFileNumber(patient.patient_number != null ? String(patient.patient_number) : "");
+    setMrn(patient.clinic_file_mrn || patient.mrn || "");
+    setFileNumber(patient.clinic_file_no || "");
     setFileNumberUnlocked(false);
     setShowPinPrompt(false);
     setPinInput("");
+    setMrnDuplicateWarnings([]);
   }, [isOpen, patient]);
 
   async function verifyPin() {
@@ -79,7 +98,7 @@ export function EditPatientModal({
     }
   }
 
-  async function save() {
+  async function save(allowDuplicateMrn = false) {
     if (!patient) return;
     if (!name.trim()) {
       alert("Patient name is required.");
@@ -97,35 +116,89 @@ export function EditPatientModal({
       address: address.trim() || null,
       date_of_birth: dateOfBirth || null,
       sex: sex || null,
+      mrn: mrn.trim() || null,
     };
 
+    const normalizedMrn = normalizeMrn(mrn);
+    if (!allowDuplicateMrn && clinicId && normalizedMrn) {
+      const { data: clinicFiles, error: clinicFilesError } = await supabase
+        .from("clinic_patient_files")
+        .select("id, patient_id, file_no, mrn, patients(name, phone, mrn)")
+        .eq("clinic_id", clinicId);
+      if (clinicFilesError) {
+        alert(`Could not verify MRN: ${clinicFilesError.message}`);
+        return;
+      }
+
+      const duplicates = ((clinicFiles || []) as Array<{
+        id: string;
+        patient_id: string;
+        file_no: string;
+        mrn: string | null;
+        patients:
+          | { name: string | null; phone: string | null; mrn: string | null }
+          | Array<{ name: string | null; phone: string | null; mrn: string | null }>
+          | null;
+      }>)
+        .filter((row) => String(row.patient_id || "") !== String(patient.id))
+        .map((row) => {
+          const linked = Array.isArray(row.patients) ? row.patients[0] : row.patients;
+          const candidateMrn = normalizeMrn(row.mrn || linked?.mrn || "");
+          return { row, linked, candidateMrn };
+        })
+        .filter((entry) => entry.candidateMrn === normalizedMrn)
+        .map((entry) => ({
+          patientId: String(entry.row.patient_id || ""),
+          name: String(entry.linked?.name || "Unknown patient"),
+          fileNo: entry.row.file_no || null,
+          phone: entry.linked?.phone || null,
+        }));
+
+      if (duplicates.length > 0) {
+        setMrnDuplicateWarnings(duplicates);
+        return;
+      }
+    }
+
+    let nextClinicFileNo = patient.clinic_file_no || null;
+    let nextClinicMrn = mrn.trim() || null;
     if (fileNumberUnlocked) {
+      if (!clinicId || !patient.clinic_patient_file_id) {
+        alert("This patient is missing a clinic-specific file record for the current clinic.");
+        return;
+      }
       const trimmed = fileNumber.trim();
       if (!trimmed) {
         alert("File No. cannot be empty.");
         return;
       }
-      const parsed = parseInt(trimmed, 10);
-      if (!Number.isFinite(parsed) || parsed <= 0) {
-        alert("File No. must be a positive number.");
-        return;
-      }
-      if (parsed !== patient.patient_number) {
+      if (trimmed !== String(patient.clinic_file_no || "").trim()) {
         const { data: dupes, error: dupeError } = await supabase
-          .from("patients")
-          .select("id")
-          .eq("patient_number", parsed)
-          .neq("id", patient.id)
+          .from("clinic_patient_files")
+          .select("id, patient_id, file_no, patients(name, phone)")
+          .eq("clinic_id", clinicId)
+          .eq("file_no", trimmed)
+          .neq("id", patient.clinic_patient_file_id)
           .limit(1);
         if (dupeError) {
           alert(`Could not verify File No.: ${dupeError.message}`);
           return;
         }
         if ((dupes || []).length > 0) {
-          alert("This File Number already exists. Please use another File Number.");
+          const duplicateRow = (dupes || [])[0] as {
+            file_no: string;
+            patients:
+              | { name: string | null; phone: string | null }
+              | Array<{ name: string | null; phone: string | null }>
+              | null;
+          };
+          const linkedPatient = Array.isArray(duplicateRow?.patients) ? duplicateRow.patients[0] : duplicateRow?.patients;
+          alert(
+            `File No. ${duplicateRow.file_no} already belongs to ${linkedPatient?.name || "another patient"}${linkedPatient?.phone ? ` (${linkedPatient.phone})` : ""} in this clinic.`
+          );
           return;
         }
-        updates.patient_number = parsed;
+        nextClinicFileNo = trimmed;
       }
     }
 
@@ -141,14 +214,42 @@ export function EditPatientModal({
       if (error) {
         console.error("Update patient failed:", error);
         if ((error as { code?: string }).code === "23505") {
-          alert("This File Number already exists. Please use another File Number.");
+          alert("This record could not be saved due to a duplicate value.");
         } else {
           alert(`Error saving patient: ${error.message || "Unknown error"}`);
         }
         return;
       }
 
-      onSaved?.(data as Patient);
+      if (clinicId && patient.clinic_patient_file_id) {
+        const clinicFileUpdates: Record<string, string | null> = {
+          mrn: nextClinicMrn,
+        };
+        if (fileNumberUnlocked && nextClinicFileNo != null) {
+          clinicFileUpdates.file_no = nextClinicFileNo;
+        }
+
+        const { data: updatedClinicFile, error: clinicFileError } = await supabase
+          .from("clinic_patient_files")
+          .update(clinicFileUpdates)
+          .eq("id", patient.clinic_patient_file_id)
+          .eq("clinic_id", clinicId)
+          .select("id, file_no, mrn")
+          .single();
+        if (clinicFileError) {
+          alert(`Patient saved, but clinic file update failed: ${clinicFileError.message}`);
+          return;
+        }
+        nextClinicFileNo = String(updatedClinicFile.file_no || "");
+        nextClinicMrn = updatedClinicFile.mrn ?? null;
+      }
+
+      onSaved?.({
+        ...(data as EditablePatient),
+        clinic_patient_file_id: patient.clinic_patient_file_id ?? null,
+        clinic_file_no: nextClinicFileNo,
+        clinic_file_mrn: nextClinicMrn,
+      });
       onClose();
     } finally {
       setSaving(false);
@@ -174,8 +275,7 @@ export function EditPatientModal({
             <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">File No.</label>
             <div className="flex gap-2">
               <input
-                type="number"
-                min="1"
+                type="text"
                 value={fileNumber}
                 onChange={(e) => setFileNumber(e.target.value)}
                 disabled={!fileNumberUnlocked}
@@ -212,10 +312,42 @@ export function EditPatientModal({
             )}
             <p className="mt-1 text-xs text-slate-400">
               {fileNumberUnlocked
-                ? "File No. unlocked — it must stay unique."
+                ? "File No. unlocked — it stays unique within this clinic."
                 : "Changing the File No. requires the Owner/Admin PIN."}
             </p>
           </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">MRN</label>
+            <input type="text" value={mrn} onChange={(e) => setMrn(e.target.value)} className={inputClass} />
+          </div>
+          {mrnDuplicateWarnings.length > 0 && (
+            <div className="rounded-2xl border border-amber-300 bg-amber-50 p-3">
+              <p className="text-sm font-semibold text-amber-900">Possible Duplicate MRN</p>
+              <p className="mt-1 text-xs text-amber-800">MRN {mrn.trim()} is already used by:</p>
+              <div className="mt-2 space-y-1.5">
+                {mrnDuplicateWarnings.map((candidate) => (
+                  <p key={candidate.patientId} className="rounded-xl border border-amber-200 bg-white px-2 py-1 text-xs text-slate-700">
+                    {candidate.name} · File No.: {candidate.fileNo || "—"} · Phone: {candidate.phone || "—"}
+                  </p>
+                ))}
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={() => setMrnDuplicateWarnings([])}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700"
+                >
+                  Go Back
+                </button>
+                <button
+                  onClick={() => void save(true)}
+                  disabled={saving}
+                  className="rounded-xl bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+                >
+                  Continue Anyway
+                </button>
+              </div>
+            </div>
+          )}
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Name *</label>
             <input type="text" value={name} onChange={(e) => setName(e.target.value)} className={inputClass} />
@@ -281,7 +413,7 @@ export function EditPatientModal({
               Cancel
             </button>
             <button
-              onClick={save}
+            onClick={() => void save()}
               disabled={saving}
               className="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
             >

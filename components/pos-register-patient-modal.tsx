@@ -5,6 +5,10 @@ import { COUNTRIES } from "../lib/countries";
 import { ensurePatientClinicFile } from "../lib/clinic-patient-files";
 import {
   DuplicateCandidate,
+  FileNoConflictCandidate,
+  MrnDuplicateCandidate,
+  findClinicFileNoConflict,
+  findPossibleDuplicateMrnInClinic,
   findPossibleDuplicatePatients,
   normalizePatientPhone,
   registerPatientFromPos,
@@ -47,9 +51,12 @@ export function PosRegisterPatientModal({
   const [address, setAddress] = useState("");
   const [notes, setNotes] = useState("");
   const [mrn, setMrn] = useState("");
+  const [fileNo, setFileNo] = useState("");
   const [saving, setSaving] = useState(false);
   const [warningCandidates, setWarningCandidates] = useState<DuplicateCandidate[]>([]);
   const [confirmCreateAnyway, setConfirmCreateAnyway] = useState(false);
+  const [mrnWarningCandidates, setMrnWarningCandidates] = useState<MrnDuplicateCandidate[]>([]);
+  const [pendingCreateAfterMrnWarning, setPendingCreateAfterMrnWarning] = useState(false);
 
   const hasWarnings = warningCandidates.length > 0;
   const canonicalMobile = useMemo(() => normalizePatientPhone(mobile), [mobile]);
@@ -66,9 +73,12 @@ export function PosRegisterPatientModal({
     setAddress("");
     setNotes("");
     setMrn("");
+    setFileNo("");
     setSaving(false);
     setWarningCandidates([]);
     setConfirmCreateAnyway(false);
+    setMrnWarningCandidates([]);
+    setPendingCreateAfterMrnWarning(false);
     onClose();
   }
 
@@ -81,6 +91,29 @@ export function PosRegisterPatientModal({
       fullName: name,
       mobile,
       dateOfBirth: dateOfBirth || null,
+    });
+  }
+
+  function findFileNoConflictForClinic(excludePatientId?: string | null): FileNoConflictCandidate | null {
+    if (!clinicId) return null;
+    return findClinicFileNoConflict({
+      patients,
+      clinicPatientFiles,
+      clinicId,
+      fileNo,
+      excludePatientId,
+    });
+  }
+
+  function computeMrnWarnings(excludePatientId?: string | null) {
+    if (!clinicId) return [];
+    if (!mrn.trim()) return [];
+    return findPossibleDuplicateMrnInClinic({
+      patients,
+      clinicPatientFiles,
+      clinicId,
+      mrn,
+      excludePatientId,
     });
   }
 
@@ -104,6 +137,7 @@ export function PosRegisterPatientModal({
         mrn: mrn || null,
         address: address || null,
         notes: notes || null,
+        fileNo: fileNo || null,
       });
 
       onPatientRegistered({
@@ -148,6 +182,21 @@ export function PosRegisterPatientModal({
       return;
     }
 
+    const fileNoConflict = findFileNoConflictForClinic();
+    if (fileNoConflict) {
+      alert(
+        `File No. ${fileNoConflict.clinicFileNo} already belongs to ${fileNoConflict.name}${fileNoConflict.phone ? ` (${fileNoConflict.phone})` : ""} in this clinic.`
+      );
+      return;
+    }
+
+    const mrnWarnings = computeMrnWarnings();
+    if (mrnWarnings.length > 0) {
+      setMrnWarningCandidates(mrnWarnings);
+      setPendingCreateAfterMrnWarning(true);
+      return;
+    }
+
     await createNewPatient();
   }
 
@@ -164,10 +213,24 @@ export function PosRegisterPatientModal({
 
     setSaving(true);
     try {
+      if (candidate.clinicFileNo && fileNo.trim() && candidate.clinicFileNo !== fileNo.trim()) {
+        alert(`This patient already has File No. ${candidate.clinicFileNo} in this clinic. Use Edit Patient to change it.`);
+        return;
+      }
+
+      const fileNoConflict = findFileNoConflictForClinic(candidate.patientId);
+      if (fileNoConflict) {
+        alert(
+          `File No. ${fileNoConflict.clinicFileNo} already belongs to ${fileNoConflict.name}${fileNoConflict.phone ? ` (${fileNoConflict.phone})` : ""} in this clinic.`
+        );
+        return;
+      }
+
       const ensured = await ensurePatientClinicFile({
         clinicId,
         patientId: candidate.patientId,
         mrn: mrn.trim() || null,
+        fileNo: fileNo.trim() || null,
       });
       onPatientRegistered({
         patient: {
@@ -186,6 +249,19 @@ export function PosRegisterPatientModal({
     } finally {
       setSaving(false);
     }
+  }
+
+  async function continueAfterMrnWarning() {
+    const fileNoConflict = findFileNoConflictForClinic();
+    if (fileNoConflict) {
+      alert(
+        `File No. ${fileNoConflict.clinicFileNo} already belongs to ${fileNoConflict.name}${fileNoConflict.phone ? ` (${fileNoConflict.phone})` : ""} in this clinic.`
+      );
+      return;
+    }
+    setMrnWarningCandidates([]);
+    setPendingCreateAfterMrnWarning(false);
+    await createNewPatient();
   }
 
   if (!isOpen) return null;
@@ -266,6 +342,46 @@ export function PosRegisterPatientModal({
               </div>
             </div>
           )}
+          {mrnWarningCandidates.length > 0 && (
+            <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4">
+              <p className="text-sm font-semibold text-amber-900">Possible Duplicate MRN</p>
+              <p className="mt-1 text-xs text-amber-800">
+                MRN {mrn.trim()} is already used by:
+              </p>
+              <div className="mt-3 space-y-2">
+                {mrnWarningCandidates.map((candidate) => (
+                  <div key={candidate.patientId} className="rounded-xl border border-amber-200 bg-white px-3 py-2">
+                    <p className="text-sm font-semibold text-slate-900">{candidate.name}</p>
+                    <p className="text-xs text-slate-600">
+                      File No.: {candidate.clinicFileNo || "—"} · Phone: {candidate.phone || "—"}
+                    </p>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMrnWarningCandidates([]);
+                    setPendingCreateAfterMrnWarning(false);
+                  }}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+                >
+                  Go Back
+                </button>
+                {pendingCreateAfterMrnWarning && (
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void continueAfterMrnWarning()}
+                    className="rounded-xl bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-500 disabled:opacity-60"
+                  >
+                    Continue Anyway
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="sm:col-span-2">
@@ -312,6 +428,10 @@ export function PosRegisterPatientModal({
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Address</label>
               <input value={address} onChange={(e) => setAddress(e.target.value)} className={inputClass} />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">File No. (Optional)</label>
+              <input value={fileNo} onChange={(e) => setFileNo(e.target.value)} className={inputClass} />
             </div>
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">MRN</label>

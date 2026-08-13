@@ -36,6 +36,21 @@ export type DuplicateCandidate = {
   matchedByNameDob: boolean;
 };
 
+export type MrnDuplicateCandidate = {
+  patientId: string;
+  name: string;
+  phone: string | null;
+  clinicFileNo: string | null;
+  mrn: string;
+};
+
+export type FileNoConflictCandidate = {
+  patientId: string;
+  name: string;
+  phone: string | null;
+  clinicFileNo: string;
+};
+
 export function normalizePatientPhone(value: string | null | undefined): string {
   const rawDigits = String(value || "").replace(/\D/g, "");
   if (!rawDigits) return "";
@@ -66,6 +81,10 @@ export function normalizePatientName(value: string | null | undefined): string {
     .toLowerCase()
     .replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~-]+/g, " ")
     .replace(/\s+/g, " ");
+}
+
+export function normalizeMrn(value: string | null | undefined): string {
+  return String(value || "").trim().toUpperCase();
 }
 
 export function findPossibleDuplicatePatients(input: {
@@ -115,6 +134,74 @@ export function findPossibleDuplicatePatients(input: {
   }
 
   return matches;
+}
+
+export function findPossibleDuplicateMrnInClinic(input: {
+  patients: PatientLike[];
+  clinicPatientFiles: ClinicPatientFileLike[];
+  clinicId: string;
+  mrn: string;
+  excludePatientId?: string | null;
+}): MrnDuplicateCandidate[] {
+  const normalizedInputMrn = normalizeMrn(input.mrn);
+  if (!normalizedInputMrn) return [];
+
+  const patientById = new Map<string, PatientLike>();
+  for (const patient of input.patients) {
+    patientById.set(String(patient.id || ""), patient);
+  }
+
+  const matches: MrnDuplicateCandidate[] = [];
+  for (const file of input.clinicPatientFiles) {
+    if (String(file.clinic_id || "") !== input.clinicId) continue;
+    const patientId = String(file.patient_id || "");
+    if (!patientId) continue;
+    if (input.excludePatientId && patientId === String(input.excludePatientId)) continue;
+    const patient = patientById.get(patientId);
+    const candidateMrn = normalizeMrn(file.mrn ?? patient?.mrn ?? "");
+    if (!candidateMrn || candidateMrn !== normalizedInputMrn) continue;
+    matches.push({
+      patientId,
+      name: String(patient?.name || "Unknown patient"),
+      phone: patient?.phone ?? null,
+      clinicFileNo: String(file.file_no || "") || null,
+      mrn: candidateMrn,
+    });
+  }
+
+  return matches;
+}
+
+export function findClinicFileNoConflict(input: {
+  patients: PatientLike[];
+  clinicPatientFiles: ClinicPatientFileLike[];
+  clinicId: string;
+  fileNo: string;
+  excludePatientId?: string | null;
+}): FileNoConflictCandidate | null {
+  const target = String(input.fileNo || "").trim();
+  if (!target) return null;
+
+  const patientById = new Map<string, PatientLike>();
+  for (const patient of input.patients) {
+    patientById.set(String(patient.id || ""), patient);
+  }
+
+  for (const file of input.clinicPatientFiles) {
+    if (String(file.clinic_id || "") !== input.clinicId) continue;
+    if (String(file.file_no || "").trim() !== target) continue;
+    const patientId = String(file.patient_id || "");
+    if (input.excludePatientId && patientId === String(input.excludePatientId)) continue;
+    const patient = patientById.get(patientId);
+    return {
+      patientId,
+      name: String(patient?.name || "Unknown patient"),
+      phone: patient?.phone ?? null,
+      clinicFileNo: target,
+    };
+  }
+
+  return null;
 }
 
 export async function registerPatientFromPos(payload: {

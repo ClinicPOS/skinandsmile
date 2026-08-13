@@ -242,7 +242,7 @@ function summarizeCartPricing(services: PosPricingService[], discountInput: stri
   };
 }
 
-const paymentOptions = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"];
+const paymentOptions = ["Cash", "Card", "Tabby", "Tabby Card", "Tamara", "Split Payment"];
 const allocationMethodOptions: Array<{ value: PaymentMethodVariant; label: string }> = [
   { value: "cash", label: "Cash" },
   { value: "card", label: "Card" },
@@ -2239,7 +2239,7 @@ export default function ReceiptsPage() {
 
     const { data: treatmentPlansCreatedData, error: treatmentPlansCreatedError } = await supabase
       .from("treatment_plans")
-      .select("id, patient_id, title, total_amount, planned_visits, status, notes, created_at, completed_at, patients(name, patient_number)")
+      .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, created_at, completed_at, patients(name, patient_number)")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -2275,7 +2275,7 @@ export default function ReceiptsPage() {
     let treatmentPlanInitialSalesTotal = 0;
     const { data: treatmentPlanPaymentRecordsData, error: treatmentPlanPaymentRecordsError } = await supabase
       .from("treatment_plan_payment_records")
-      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, title, total_amount, planned_visits, status), patients(name, patient_number)")
+      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status), patients(name, patient_number)")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -2317,7 +2317,7 @@ export default function ReceiptsPage() {
       if (missingPlanIds.length > 0) {
         const { data: missingPlansData, error: missingPlansError } = await supabase
           .from("treatment_plans")
-          .select("id, patient_id, title, total_amount, planned_visits, status, notes, created_at, completed_at, patients(name, patient_number)")
+          .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, created_at, completed_at, patients(name, patient_number)")
           .eq("clinic_id", activeClinic.id)
           .in("id", missingPlanIds)
           .order("created_at", { ascending: true });
@@ -2360,6 +2360,10 @@ export default function ReceiptsPage() {
         const planId = String(plan.id || "");
         const totalAmount = Number(plan.total_amount || 0);
         const paidToDate = treatmentPlanPaidToDate.get(planId) || 0;
+        const completedVisits = Math.max(
+          treatmentPlanVisitCounts.get(planId) || 0,
+          plan?.clinic_patient_file_id ? 1 : 0
+        );
         treatmentPlanRows.push([
           new Date(plan.created_at || now).toLocaleTimeString("en-US", {
             timeZone: "Asia/Dubai",
@@ -2374,7 +2378,7 @@ export default function ReceiptsPage() {
           totalAmount,
           paidToDate,
           Math.max(0, totalAmount - paidToDate),
-          `${treatmentPlanVisitCounts.get(planId) || 0} / ${Number(plan.planned_visits || 1)}`,
+          `${completedVisits} / ${Number(plan.planned_visits || 1)}`,
           plan.notes || "",
         ]);
       });
@@ -2475,6 +2479,10 @@ export default function ReceiptsPage() {
         });
       });
 
+      const completedVisits = Math.max(
+        treatmentPlanVisitCounts.get(planId) || 0,
+        plan?.clinic_patient_file_id ? 1 : 0
+      );
       treatmentPlanPaymentRows.push([
         new Date(payment.created_at || now).toLocaleTimeString("en-US", {
           timeZone: "Asia/Dubai",
@@ -2489,7 +2497,7 @@ export default function ReceiptsPage() {
         invoiceSettled,
         paidAfterToday,
         remainingAfterToday,
-        `${treatmentPlanVisitCounts.get(planId) || 0} / ${Number(plan?.planned_visits || 1)}`,
+        `${completedVisits} / ${Number(plan?.planned_visits || 1)}`,
         payment.payment_method_summary || "",
         allocationNotes,
       ]);
@@ -3557,6 +3565,11 @@ export default function ReceiptsPage() {
       setCashReceivedByRow({});
       return;
     }
+    if (method === "Tabby Card") {
+      setPaymentAllocationDrafts([createAllocationDraftRow("tabby_card", amountDueText)]);
+      setCashReceivedByRow({});
+      return;
+    }
     if (method === "Tamara") {
       setPaymentAllocationDrafts([createAllocationDraftRow("tamara", amountDueText)]);
       setCashReceivedByRow({});
@@ -3665,6 +3678,7 @@ export default function ReceiptsPage() {
     if (method === "Cash") return ["cash"];
     if (method === "Card") return ["card"];
     if (method === "Tabby") return ["tabby_standard", "tabby_card"];
+    if (method === "Tabby Card") return ["tabby_card"];
     if (method === "Tamara") return ["tamara"];
     return allocationMethodOptions.map((opt) => opt.value);
   }
@@ -5471,7 +5485,7 @@ export default function ReceiptsPage() {
                             {(isTabbyRow || isTamaraRow) && (
                               <div className="mt-3 rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2">
                                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-700">
-                                  Amount to Collect via {isTabbyRow ? "Tabby" : "Tamara"}
+                                  Amount to Collect via {isTabbyRow ? paymentVariantLabel(methodVariant) : "Tamara"}
                                 </p>
                                 <p className="mt-1 text-lg font-bold text-cyan-900">
                                   AED {(computedRow?.customerChargedAmount || 0).toFixed(2)}

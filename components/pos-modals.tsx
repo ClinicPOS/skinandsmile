@@ -79,7 +79,7 @@ type Receipt = {
   created_at?: string;
 };
 
-const PLAN_PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"] as const;
+const PLAN_PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tabby Card", "Tamara", "Split Payment"] as const;
 type PlanPaymentMode = (typeof PLAN_PAYMENT_MODE_OPTIONS)[number];
 
 const PLAN_ALLOCATION_METHOD_OPTIONS: Array<{ value: PaymentMethodVariant; label: string }> = [
@@ -105,6 +105,7 @@ function planModeToVariant(mode: PlanPaymentMode): PaymentMethodVariant {
   if (mode === "Cash") return "cash";
   if (mode === "Card") return "card";
   if (mode === "Tabby") return "tabby_standard";
+  if (mode === "Tabby Card") return "tabby_card";
   if (mode === "Tamara") return "tamara";
   return "cash";
 }
@@ -2417,6 +2418,7 @@ export function SearchPatientModal({
         isOpen={showEditModal}
         onClose={() => setShowEditModal(false)}
         patient={selectedPatient}
+        clinicId={clinicId ?? null}
         onSaved={(updated) => {
           const merged = { ...selectedPatient, ...(updated as PatientRecord) } as FullPatient;
           setSelectedPatient(merged);

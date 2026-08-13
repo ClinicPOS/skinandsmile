@@ -18,7 +18,7 @@ import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-pa
 import { printHtmlWhenImagesReady } from "../lib/receipt-branding";
 import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 
-const PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tamara", "Split Payment"] as const;
+const PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tabby Card", "Tamara", "Split Payment"] as const;
 const PAYMENT_ARRANGEMENTS = [
   "Full payment today",
   "Down payment + remaining balance",
@@ -80,6 +80,7 @@ function modeToVariant(mode: string): PaymentMethodVariant {
   if (mode === "Cash") return "cash";
   if (mode === "Card") return "card";
   if (mode === "Tabby") return "tabby_standard";
+  if (mode === "Tabby Card") return "tabby_card";
   if (mode === "Tamara") return "tamara";
   return "cash";
 }
