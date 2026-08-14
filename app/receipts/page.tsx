@@ -36,6 +36,7 @@ import { extractLegacyCashAmount, getCashDeductionTypeLabel, getDubaiBusinessDat
 import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 import { getBusinessDayKeyForReporting, getPaymentBreakdownForReporting, summarizeStoredAllocationCollectionsForReporting, summarizeStoredAllocationRowsForReporting } from "../../lib/receipts-reporting";
 import { mapRegularReceiptRenderLine } from "../../lib/regular-receipt-rendering";
+import { buildReceiptInsertPayload, MISSING_RECEIPT_CLINIC_MESSAGE } from "../../lib/receipt-insert";
 
 type PosPricingService = {
   id?: string | null;
@@ -3997,6 +3998,12 @@ export default function ReceiptsPage() {
       return false;
     }
 
+    const receiptClinicId = String(activeClinic?.id || "").trim();
+    if (!receiptClinicId) {
+      alert(MISSING_RECEIPT_CLINIC_MESSAGE);
+      return false;
+    }
+
     setIsSavingReceipt(true);
 
     const computedAllocations = isFullyCoveredByCredit ? [] : buildComputedAllocationsForSave();
@@ -4089,12 +4096,6 @@ export default function ReceiptsPage() {
       return false;
     }
 
-    if ((isPartialPayment || creditApplied > 0.0049) && !activeClinic?.id) {
-      alert("Partial payments and patient credit need an active clinic. Open the register for a clinic first.");
-      setIsSavingReceipt(false);
-      return false;
-    }
-
     try {
     const patientIdToPersist = transactionPatientId || patientId;
     if (patientIdToPersist) {
@@ -4107,33 +4108,28 @@ export default function ReceiptsPage() {
     const { data: receiptData, error: receiptError } = await supabase
       .from("receipts")
       .insert([
-        {
-          patient_id: transactionPatientId,
-          patient_file_id: transactionPatientFileId || null,
-          doctor_id: doctorId || null,
-          receptionist_id: activeReceptionistId,
-          subtotal: subtotal,
-          vat: vat,
+        buildReceiptInsertPayload({
+          clinicId: receiptClinicId,
+          patientId: transactionPatientId,
+          patientFileId: transactionPatientFileId || null,
+          doctorId: doctorId || null,
+          receptionistId: activeReceptionistId,
+          subtotal,
+          vat,
           total: totalWithPaymentFees,
-          total_before_gateway_fee: total,
-          gateway_fee: roundedPaymentFees > 0 ? roundedPaymentFees : null,
-          gateway_fee_provider: gatewayFeeProvider,
-          discount_amount: discountAmount > 0 ? discountAmount : null,
-          birthday_discount_amount: birthdayDiscountAmount > 0 ? birthdayDiscountAmount : null,
-          discount_reason: birthdayDiscountApplied ? "Birthday Discount 5%" : null,
-          notes: null,
-          payment_method: isFullyCoveredByCredit && creditApplied > 0.0049
+          totalBeforeGatewayFee: total,
+          gatewayFee: roundedPaymentFees,
+          gatewayFeeProvider,
+          discountAmount,
+          birthdayDiscountAmount,
+          birthdayDiscountApplied,
+          paymentMethod: isFullyCoveredByCredit && creditApplied > 0.0049
             ? `Patient Credit (AED ${creditApplied.toFixed(2)})`
             : getPaymentSummaryForSave(),
-          // Only set on partial payments so the insert keeps working on databases
-          // that haven't run supabase-partial-payments-migration.sql yet.
-          // NULL amount_paid = paid in full. When credit is used, amount_paid is
-          // always set to the money actually received (credit excluded).
-          ...(isPartialPayment || creditApplied > 0.0049 || roundedPaymentFees > 0 ? { amount_paid: amountPaidToday } : {}),
-          // Portion covered by prepaid patient credit; only written when used so
-          // databases without supabase-credit-applied-migration.sql keep working.
-          ...(creditApplied > 0.0049 ? { credit_applied: creditApplied } : {}),
-        },
+          includeAmountPaid: isPartialPayment || creditApplied > 0.0049 || roundedPaymentFees > 0,
+          amountPaid: amountPaidToday,
+          creditApplied,
+        }),
       ])
       .select()
       .single();
@@ -4198,7 +4194,7 @@ export default function ReceiptsPage() {
 
       const { data: paymentRecordId, error: paymentRecordError } = await supabase.rpc("create_payment_record_with_allocations", {
         p_receipt_id: receiptData.id,
-        p_clinic_id: activeClinic.id,
+        p_clinic_id: receiptClinicId,
         p_receptionist_id: activeReceptionistId,
         p_total_invoice_amount_settled: Math.round(invoiceSettled * 100) / 100,
         p_total_vat_amount: Math.round(vatSettled * 100) / 100,
@@ -4225,7 +4221,7 @@ export default function ReceiptsPage() {
         .insert([
           {
             patient_id: transactionPatientId,
-            clinic_id: activeClinic!.id,
+            clinic_id: receiptClinicId,
             amount: -creditApplied,
             reason: `Applied to receipt ${receiptRef}`,
             receipt_id: receiptData.id,
@@ -4252,7 +4248,7 @@ export default function ReceiptsPage() {
         .insert([
           {
             patient_id: transactionPatientId,
-            clinic_id: activeClinic!.id,
+            clinic_id: receiptClinicId,
             original_date: new Date().toLocaleDateString("en-CA"),
             original_amount: outstandingRemainder,
             reason: creditApplied > 0.0049
@@ -4277,20 +4273,16 @@ export default function ReceiptsPage() {
     }
 
     if (notes.trim()) {
-      if (!activeClinic?.id) {
-        alert("Receipt saved, but the clinical note was not saved because no clinic is active.");
-      } else {
-        const { error: noteError } = await supabase.from("patient_notes").insert({
-          patient_id: transactionPatientId,
-          receipt_id: receiptData.id,
-          note: notes.trim(),
-          doctor_id: doctorId || null,
-          receptionist_id: activeReceptionistId,
-          clinic_id: activeClinic.id,
-        });
-        if (noteError) {
-          console.error("Patient note save error", noteError.message, noteError.code, noteError.details, noteError.hint);
-        }
+      const { error: noteError } = await supabase.from("patient_notes").insert({
+        patient_id: transactionPatientId,
+        receipt_id: receiptData.id,
+        note: notes.trim(),
+        doctor_id: doctorId || null,
+        receptionist_id: activeReceptionistId,
+        clinic_id: receiptClinicId,
+      });
+      if (noteError) {
+        console.error("Patient note save error", noteError.message, noteError.code, noteError.details, noteError.hint);
       }
     }
 

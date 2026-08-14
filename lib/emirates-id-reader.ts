@@ -286,6 +286,13 @@ export function mergeReaderPatientFields(
     if (!nextValue) return;
 
     const currentValue = String(current[field] || "").trim();
+    if (field === "sex") {
+      if (currentValue !== nextValue) {
+        updates[field] = nextValue;
+      }
+      return;
+    }
+
     if (!isFilled(currentValue)) {
       updates[field] = nextValue;
       return;
