@@ -24,6 +24,10 @@ export type EmiratesIdReadResult = {
   photoDataUrl: string | null;
 };
 
+export type EmiratesIdDiagnosticResult = {
+  keyPaths: string[];
+};
+
 type EmiratesIdReaderPayload = {
   HasData?: boolean | string | null;
   Error?: string | null;
@@ -178,6 +182,85 @@ function normalizeReaderPayload(payload: EmiratesIdReaderPayload): EmiratesIdRea
   };
 }
 
+function collectPayloadKeyPaths(value: unknown, parentPath = "", keyPaths = new Set<string>()) {
+  if (Array.isArray(value)) {
+    const arrayPath = parentPath ? `${parentPath}[]` : "[]";
+    keyPaths.add(arrayPath);
+    value.forEach((item) => {
+      if (item && typeof item === "object") {
+        collectPayloadKeyPaths(item, arrayPath, keyPaths);
+      }
+    });
+    return keyPaths;
+  }
+
+  if (!value || typeof value !== "object") {
+    return keyPaths;
+  }
+
+  Object.entries(value as Record<string, unknown>).forEach(([key, nestedValue]) => {
+    const path = parentPath ? `${parentPath}.${key}` : key;
+    keyPaths.add(path);
+
+    if (nestedValue && typeof nestedValue === "object") {
+      collectPayloadKeyPaths(nestedValue, path, keyPaths);
+    }
+  });
+
+  return keyPaths;
+}
+
+async function readRawEmiratesIdPayload(timeoutMs = EID_READER_TIMEOUT_MS): Promise<EmiratesIdReaderPayload> {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    throw createReaderError("unavailable", "Reader is unavailable.");
+  }
+
+  const receiver = ensureSingleResponseReceiver();
+
+  return await new Promise<EmiratesIdReaderPayload>((resolve, reject) => {
+    const cleanup = () => {
+      window.clearTimeout(timerId);
+      receiver.removeEventListener("click", handleClick);
+      receiver.textContent = "";
+    };
+
+    const fail = (error: EmiratesIdReaderError) => {
+      cleanup();
+      reject(error);
+    };
+
+    const handleClick = () => {
+      const rawText = String(receiver.textContent || "").trim();
+      receiver.textContent = "";
+      if (!rawText) {
+        fail(createReaderError("empty_response", "Reader returned an empty response."));
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(rawText) as EmiratesIdReaderPayload;
+        cleanup();
+        resolve(payload);
+      } catch {
+        fail(createReaderError("parse_error", "Reader response could not be parsed."));
+      }
+    };
+
+    const timerId = window.setTimeout(() => {
+      fail(createReaderError("timeout", "Timed out waiting for Emirates ID reader response."));
+    }, timeoutMs);
+
+    receiver.addEventListener("click", handleClick);
+    receiver.textContent = "";
+
+    try {
+      document.dispatchEvent(new CustomEvent(EID_EVENT_NAME));
+    } catch {
+      fail(createReaderError("unavailable", "Could not dispatch Emirates ID reader event."));
+    }
+  });
+}
+
 export function mergeReaderPatientFields(
   current: EmiratesIdReaderFields,
   incoming: EmiratesIdReaderFields
@@ -211,62 +294,13 @@ export function getEmiratesIdReaderMessage(error: unknown) {
 }
 
 export async function readEmiratesIdCard(timeoutMs = EID_READER_TIMEOUT_MS): Promise<EmiratesIdReadResult> {
-  if (typeof window === "undefined" || typeof document === "undefined") {
-    throw createReaderError("unavailable", "Reader is unavailable.");
-  }
+  const payload = await readRawEmiratesIdPayload(timeoutMs);
+  return normalizeReaderPayload(payload);
+}
 
-  const receiver = ensureSingleResponseReceiver();
-
-  return await new Promise<EmiratesIdReadResult>((resolve, reject) => {
-    const cleanup = () => {
-      window.clearTimeout(timerId);
-      receiver.removeEventListener("click", handleClick);
-      receiver.textContent = "";
-    };
-
-    const fail = (error: EmiratesIdReaderError) => {
-      cleanup();
-      reject(error);
-    };
-
-    const handleClick = () => {
-      const rawText = String(receiver.textContent || "").trim();
-      receiver.textContent = "";
-      if (!rawText) {
-        fail(createReaderError("empty_response", "Reader returned an empty response."));
-        return;
-      }
-
-      let payload: EmiratesIdReaderPayload;
-      try {
-        payload = JSON.parse(rawText) as EmiratesIdReaderPayload;
-      } catch {
-        fail(createReaderError("parse_error", "Reader response could not be parsed."));
-        return;
-      }
-
-      try {
-        const normalized = normalizeReaderPayload(payload);
-        cleanup();
-        resolve(normalized);
-      } catch (error) {
-        fail((error as EmiratesIdReaderError).code
-          ? error as EmiratesIdReaderError
-          : createReaderError("reader_error", "Reader returned an error."));
-      }
-    };
-
-    const timerId = window.setTimeout(() => {
-      fail(createReaderError("timeout", "Timed out waiting for Emirates ID reader response."));
-    }, timeoutMs);
-
-    receiver.addEventListener("click", handleClick);
-    receiver.textContent = "";
-
-    try {
-      document.dispatchEvent(new CustomEvent(EID_EVENT_NAME));
-    } catch {
-      fail(createReaderError("unavailable", "Could not dispatch Emirates ID reader event."));
-    }
-  });
+export async function readEmiratesIdDiagnostic(timeoutMs = EID_READER_TIMEOUT_MS): Promise<EmiratesIdDiagnosticResult> {
+  const payload = await readRawEmiratesIdPayload(timeoutMs);
+  return {
+    keyPaths: Array.from(collectPayloadKeyPaths(payload)).sort((left, right) => left.localeCompare(right)),
+  };
 }

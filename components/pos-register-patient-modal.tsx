@@ -20,6 +20,7 @@ import {
   getEmiratesIdReaderMessage,
   mergeReaderPatientFields,
   readEmiratesIdCard,
+  readEmiratesIdDiagnostic,
 } from "../lib/emirates-id-reader";
 
 type RegisteredPatientPayload = {
@@ -66,6 +67,8 @@ export function PosRegisterPatientModal({
   const [readerStatus, setReaderStatus] = useState("Ready");
   const [readerSkippedFields, setReaderSkippedFields] = useState<string[]>([]);
   const [readerPhoto, setReaderPhoto] = useState<string | null>(null);
+  const [readerDiagnosticStatus, setReaderDiagnosticStatus] = useState("");
+  const [readerDiagnosticPaths, setReaderDiagnosticPaths] = useState<string[]>([]);
 
   const hasWarnings = warningCandidates.length > 0;
   const canonicalMobile = useMemo(() => normalizePatientPhone(mobile), [mobile]);
@@ -91,6 +94,8 @@ export function PosRegisterPatientModal({
     setReaderStatus("Ready");
     setReaderSkippedFields([]);
     setReaderPhoto(null);
+    setReaderDiagnosticStatus("");
+    setReaderDiagnosticPaths([]);
     onClose();
   }
 
@@ -143,6 +148,20 @@ export function PosRegisterPatientModal({
       setReaderPhoto(null);
       setReaderSkippedFields([]);
       setReaderStatus(getEmiratesIdReaderMessage(error));
+    }
+  }
+
+  async function handleInspectEmiratesIdFields() {
+    setReaderDiagnosticStatus("Inspecting Emirates ID response keys…");
+    setReaderDiagnosticPaths([]);
+
+    try {
+      const result = await readEmiratesIdDiagnostic();
+      setReaderDiagnosticPaths(result.keyPaths);
+      setReaderDiagnosticStatus(result.keyPaths.length > 0 ? "Reader response keys loaded." : "No reader response keys were returned.");
+    } catch (error) {
+      setReaderDiagnosticPaths([]);
+      setReaderDiagnosticStatus(getEmiratesIdReaderMessage(error));
     }
   }
 
@@ -441,19 +460,44 @@ export function PosRegisterPatientModal({
                 <p className="text-sm font-semibold text-slate-900">Emirates ID Reader</p>
                 <p className="mt-1 text-xs text-slate-500">{readerStatus}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => void handleReadEmiratesId()}
-                disabled={readerStatus === "Reading Emirates ID…"}
-                className="rounded-xl border border-cyan-200 bg-white px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {readerStatus === "Reading Emirates ID…" ? "Reading Emirates ID…" : "Read Emirates ID"}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleReadEmiratesId()}
+                  disabled={readerStatus === "Reading Emirates ID…" || readerDiagnosticStatus === "Inspecting Emirates ID response keys…"}
+                  className="rounded-xl border border-cyan-200 bg-white px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {readerStatus === "Reading Emirates ID…" ? "Reading Emirates ID…" : "Read Emirates ID"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleInspectEmiratesIdFields()}
+                  disabled={readerStatus === "Reading Emirates ID…" || readerDiagnosticStatus === "Inspecting Emirates ID response keys…"}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {readerDiagnosticStatus === "Inspecting Emirates ID response keys…" ? "Inspecting Reader Fields…" : "Inspect Reader Fields"}
+                </button>
+              </div>
             </div>
             {readerSkippedFields.length > 0 ? (
               <p className="mt-3 text-xs text-amber-700">
                 Existing fields were left unchanged: {readerSkippedFields.join(", ")}.
               </p>
+            ) : null}
+            {readerDiagnosticStatus ? (
+              <p className="mt-3 text-xs text-slate-600">{readerDiagnosticStatus}</p>
+            ) : null}
+            {readerDiagnosticPaths.length > 0 ? (
+              <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Returned Reader Keys Only</p>
+                <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                  {readerDiagnosticPaths.map((path) => (
+                    <li key={path} className="font-mono">
+                      {path}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ) : null}
             {readerPhoto ? (
               <div className="mt-4">
