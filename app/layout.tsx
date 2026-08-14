@@ -15,6 +15,16 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Skin and Smile Dental Clinic (Al Satwa)",
   description: "Office POS application for patients, staff, services, and receipts.",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    apple: [
+      {
+        url: "/icons/skin-and-smile-192.png",
+        sizes: "192x192",
+        type: "image/png",
+      },
+    ],
+  },
 };
 
 export default function RootLayout({
