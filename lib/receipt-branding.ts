@@ -24,6 +24,7 @@ export const receiptLogoOptions: ReceiptLogoOption[] = [
   { value: "logo3", label: "Logo 3", path: "/images/logo3.png", thermalPath: "/images/Alsatwathermal.png" },
   { value: "al-jameelah", label: "Al Jameelah Clinic", path: "/images/aljameelah.png", thermalPath: "/images/Jameelahthermal.png" },
   { value: "al-jameelah-new", label: "Al Jameelah Clinic (new)", path: "/images/aljameelah.png", thermalPath: "/images/Jameelahthermal.png" },
+  { value: "al-qima", label: "Al Qima Medical Center", path: "/images/al-qima.png", thermalPath: "/images/al-qima-thermal-80mm-576px.png" },
 ] as const;
 
 function normalizeClinicName(value: string | null | undefined) {
@@ -72,6 +73,9 @@ export function getReceiptLogoPath(
     if (normalizedName.includes("al jameelah") || normalizedName.includes("jameelah")) {
       return "/images/Jameelahthermal.png?v=20260805-transparent";
     }
+    if (normalizedName.includes("al qima") || normalizedName.includes("qima")) {
+      return "/images/al-qima-thermal-80mm-576px.png?v=20260815-al-qima";
+    }
   } else {
     if (normalizedName.includes("al dana") || normalizedName.includes("dana")) {
       return "/images/aldana.png?v=20260805-transparent";
@@ -87,6 +91,9 @@ export function getReceiptLogoPath(
     }
     if (normalizedName.includes("al jameelah") || normalizedName.includes("jameelah")) {
       return "/images/aljameelah.png?v=20260805-transparent";
+    }
+    if (normalizedName.includes("al qima") || normalizedName.includes("qima")) {
+      return "/images/al-qima.png?v=20260815-al-qima";
     }
   }
 
