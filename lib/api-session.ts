@@ -1,21 +1,14 @@
 import { cookies } from "next/headers";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  APP_AUTH_COOKIE_NAME,
+  type ActiveSession,
+  type ActiveSessionRecord,
+  normalizeSessionMode,
+} from "./session-auth";
 
-export type AppSessionRecord = {
-  token: string;
-  session_mode?: string | null;
-  clinic_id?: string | null;
-  user_role?: string | null;
-  receptionist_id?: string | null;
-};
-
-export type AppSession = {
-  token: string;
-  sessionMode: "manager" | "clinic";
-  clinicId: string | null;
-  userRole: string;
-  receptionistId: string | null;
-};
+export type AppSessionRecord = ActiveSessionRecord;
+export type AppSession = ActiveSession;
 
 export function createServerSupabaseClient(): SupabaseClient {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -30,7 +23,7 @@ export async function readAppSession(
   supabase: SupabaseClient
 ): Promise<{ session: AppSession | null; errorResponse?: Response }> {
   const cookieStore = await cookies();
-  const sessionToken = cookieStore.get("app-auth")?.value || "";
+  const sessionToken = cookieStore.get(APP_AUTH_COOKIE_NAME)?.value || "";
   if (!sessionToken) {
     return {
       session: null,
@@ -55,7 +48,7 @@ export async function readAppSession(
   return {
     session: {
       token: row.token,
-      sessionMode: String(row.session_mode || "").toLowerCase() === "clinic" ? "clinic" : "manager",
+      sessionMode: normalizeSessionMode(row.session_mode),
       clinicId: row.clinic_id ? String(row.clinic_id) : null,
       userRole: String(row.user_role || "").toLowerCase(),
       receptionistId: row.receptionist_id ? String(row.receptionist_id) : null,

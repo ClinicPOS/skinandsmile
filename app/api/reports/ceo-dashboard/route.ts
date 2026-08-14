@@ -1,17 +1,10 @@
-import { cookies } from "next/headers";
-import { createClient } from "@supabase/supabase-js";
 import { buildComparisonRange, buildDashboardRange, DashboardPeriod, percentageChange, statusFromTarget } from "../../../../lib/ceo-dashboard";
 import { extractLegacyCashAmount } from "../../../../lib/cash-deductions";
 import { computeTreatmentPlanRollup } from "../../../../lib/treatment-plan-rollup";
+import { createServerSupabaseClient, readAppSession } from "../../../../lib/api-session";
+import { canAccessReports } from "../../../../lib/session-auth";
 
 export const dynamic = "force-dynamic";
-
-type SessionRow = {
-  token: string;
-  session_mode?: string | null;
-  user_role?: string | null;
-  clinic_id?: string | null;
-};
 
 type ReceiptRow = {
   id: string;
@@ -312,13 +305,15 @@ function expectedTargetForRange(
   return { expectedTarget: expected, hasAnyTarget };
 }
 
-export async function POST(request: Request) {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return Response.json({ error: "Supabase configuration is missing." }, { status: 500 });
-  }
+function shortDubaiDayLabel(ymd: string) {
+  return makeDubaiDate(ymd).toLocaleDateString("en-US", {
+    timeZone: "Asia/Dubai",
+    month: "short",
+    day: "numeric",
+  });
+}
 
+export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
   const period = String(body?.period || "today") as DashboardPeriod;
   const clinicId = String(body?.clinicId || "").trim() || null;
@@ -349,25 +344,33 @@ export async function POST(request: Request) {
   const compareRangeStartDubai = dubaiDateOnly(new Date(compareRange.startUtcIso));
   const compareRangeEndDubai = addDays(dubaiDateOnly(new Date(compareRange.endUtcIso)), -1);
 
-  const cookieStore = await cookies();
-  const sessionToken = cookieStore.get("app-auth")?.value || "";
-  if (!sessionToken) return Response.json({ error: "Unauthorized." }, { status: 401 });
-
-  const supabase = createClient(supabaseUrl, supabaseAnonKey);
-  const { data: sessionData, error: sessionError } = await supabase
-    .from("active_sessions")
-    .select("token, session_mode, user_role, clinic_id")
-    .eq("token", sessionToken)
-    .maybeSingle();
-
-  if (sessionError || !sessionData) return Response.json({ error: "Unauthorized session." }, { status: 401 });
-  const session = sessionData as SessionRow;
-  const sessionMode = String(session.session_mode || "").toLowerCase();
-  const sessionRole = String(session.user_role || "").toLowerCase();
-  const allowedRoles = new Set(["ceo", "it_admin"]);
-  if (sessionMode !== "manager" || !allowedRoles.has(sessionRole)) {
+  const supabase = createServerSupabaseClient();
+  const { session, errorResponse } = await readAppSession(supabase);
+  if (!session) return errorResponse!;
+  if (!canAccessReports(session)) {
     return Response.json({ error: "Forbidden. CEO dashboard access is limited to CEO and IT administrator roles." }, { status: 403 });
   }
+
+  const fetchRowsByIdsInBatches = async <RowType,>(
+    tableName: string,
+    selectClause: string,
+    filterColumn: string,
+    ids: string[],
+    chunkSize = 100
+  ) => {
+    if (ids.length === 0) return [] as RowType[];
+    const rows: RowType[] = [];
+    for (let index = 0; index < ids.length; index += chunkSize) {
+      const chunk = ids.slice(index, index + chunkSize);
+      const { data, error } = await supabase
+        .from(tableName)
+        .select(selectClause)
+        .in(filterColumn, chunk);
+      if (error) throw error;
+      rows.push(...((data || []) as RowType[]));
+    }
+    return rows;
+  };
 
   const [clinicsRes, receptionistsRes, doctorsRes] = await Promise.all([
     supabase.from("clinics").select("id, name").order("name", { ascending: true }),
@@ -396,7 +399,11 @@ export async function POST(request: Request) {
       overview: null,
       clinicPerformance: [],
       doctorPerformance: [],
-      trends: { monthly: [], patientDemand: { historyDays: 0, message: "Not enough history.", dayOfWeek: [], dayOfMonthBuckets: [] } },
+      trends: {
+        sales: { granularity: "day", points: [] },
+        monthly: [],
+        patientDemand: { historyDays: 0, message: "Not enough history.", dayOfWeek: [], dayOfMonthBuckets: [] },
+      },
       payments: { methods: [], missingAllocationCoverage: true },
       cashManagement: {
         cashCollected: 0,
@@ -552,6 +559,13 @@ export async function POST(request: Request) {
   const currentUniquePatients = new Set(currentReceipts.map((row) => row.patient_id).filter(Boolean)).size;
   const compareUniquePatients = new Set(compareReceipts.map((row) => row.patient_id).filter(Boolean)).size;
   const currentCompletedVisits = currentReceipts.length;
+  const todayDubai = dubaiDateOnly(new Date());
+  const liveRangeEndIso = makeDubaiDate(addDays(todayDubai, 1)).toISOString();
+  const salesTrendRangeEndIso = (period === "this_week" || period === "this_month")
+    && liveRangeEndIso < currentRange.endUtcIso
+    ? liveRangeEndIso
+    : currentRange.endUtcIso;
+  const selectedRangeDays = eachDubaiDay(currentRange.startUtcIso, salesTrendRangeEndIso);
 
   const currentPatientIds = new Set(currentReceipts.map((row) => row.patient_id).filter((value): value is string => !!value));
   let newPatients = 0;
@@ -619,6 +633,68 @@ export async function POST(request: Request) {
     const month = `${row.target_year}-${String(row.target_month).padStart(2, "0")}`;
     targetsByClinicMonth.set(`${row.clinic_id}:${month}`, asNumber(row.net_sales_target));
   }
+
+  const receiptCollectionAmount = (row: ReceiptRow) => row.amount_paid == null ? asNumber(row.total) : asNumber(row.amount_paid);
+
+  const salesTrend = includeHistoricalData
+    ? selectedRangeDays.length <= 31
+      ? {
+          granularity: "day" as const,
+          points: selectedRangeDays.map((day) => {
+            const nextDay = addDays(day, 1);
+            const startIso = makeDubaiDate(day).toISOString();
+            const endIso = makeDubaiDate(nextDay).toISOString();
+            const dayReceipts = currentReceipts.filter((row) => row.created_at >= startIso && row.created_at < endIso);
+            const dayBalancePayments = currentBalancePayments.filter((row) => row.created_at && row.created_at >= startIso && row.created_at < endIso);
+            const dayDeposits = currentDeposits.filter((row) => row.created_at && row.created_at >= startIso && row.created_at < endIso);
+            const dayTreatmentPlanPayments = currentTreatmentPlanPayments.filter((row) => row.created_at && row.created_at >= startIso && row.created_at < endIso);
+            const targetResult = targetDataAvailable
+              ? clinicIds.reduce(
+                  (summary, id) => {
+                    const expected = expectedTargetForRange(id, startIso, endIso, targetsByClinicMonth, scheduleByClinic, eventRows);
+                    return {
+                      expectedTarget: summary.expectedTarget + expected.expectedTarget,
+                      hasAnyTarget: summary.hasAnyTarget || expected.hasAnyTarget,
+                    };
+                  },
+                  { expectedTarget: 0, hasAnyTarget: false }
+                )
+              : { expectedTarget: 0, hasAnyTarget: false };
+            return {
+              date: day,
+              label: shortDubaiDayLabel(day),
+              netSales: dayReceipts.reduce((sum, row) => sum + receiptCollectionAmount(row), 0)
+                + sumAmountRows(dayBalancePayments)
+                + sumAmountRows(dayDeposits)
+                + sumAmountRows(dayTreatmentPlanPayments),
+              target: targetResult.hasAnyTarget ? targetResult.expectedTarget : null,
+              previousYear: null,
+              belowTarget: null as boolean | null,
+            };
+          }),
+        }
+      : {
+          granularity: "month" as const,
+          points: [] as Array<{
+            date: string | null;
+            label: string;
+            netSales: number;
+            target: number | null;
+            previousYear: number | null;
+            belowTarget: boolean | null;
+          }>,
+        }
+    : {
+        granularity: "day" as const,
+        points: [] as Array<{
+          date: string | null;
+          label: string;
+          netSales: number;
+          target: number | null;
+          previousYear: number | null;
+          belowTarget: boolean | null;
+        }>,
+      };
 
   const clinicPerformance = clinicIds.map((id) => {
     const name = clinics.find((clinic) => clinic.id === id)?.name || "Unknown Clinic";
@@ -792,29 +868,26 @@ export async function POST(request: Request) {
   }> = [];
   if (includeHistoricalData && currentReceipts.length > 0) {
     const receiptIds = currentReceipts.map((row) => row.id);
-    const chunkSize = 500;
-    const allReceiptItems: ReceiptItemRow[] = [];
-    for (let index = 0; index < receiptIds.length; index += chunkSize) {
-      const chunk = receiptIds.slice(index, index + chunkSize);
-      const { data: receiptItemsData, error: receiptItemsError } = await supabase
-        .from("receipt_items")
-        .select("receipt_id, doctor_id, total")
-        .in("receipt_id", chunk);
-      if (receiptItemsError) {
-        const errorCode = String((receiptItemsError as { code?: string }).code || "");
-        if (isTableMissing(receiptItemsError)) {
-          doctorPerformanceWarning = "Doctor performance is unavailable because receipt item tables are not yet available.";
-        } else if (errorCode === "42501") {
-          doctorPerformanceWarning = "Doctor performance is unavailable due to receipt item permission policy.";
-        } else {
-          doctorPerformanceWarning = "Doctor performance is temporarily unavailable.";
-        }
-        console.error("Doctor performance query failed", receiptItemsError);
-        break;
+    let items: ReceiptItemRow[] = [];
+    try {
+      items = await fetchRowsByIdsInBatches<ReceiptItemRow>(
+        "receipt_items",
+        "receipt_id, doctor_id, total",
+        "receipt_id",
+        receiptIds,
+        100
+      );
+    } catch (receiptItemsError) {
+      const errorCode = String((receiptItemsError as { code?: string }).code || "");
+      if (isTableMissing(receiptItemsError)) {
+        doctorPerformanceWarning = "Doctor performance was calculated from receipt-level doctor assignments because receipt item tables are not yet available. Item-level attribution may be incomplete.";
+      } else if (errorCode === "42501") {
+        doctorPerformanceWarning = "Doctor performance was calculated from receipt-level doctor assignments because receipt item access is restricted. Item-level attribution may be incomplete.";
+      } else {
+        doctorPerformanceWarning = "Doctor performance was calculated from receipt-level doctor assignments because item-level attribution could not be loaded completely.";
       }
-      allReceiptItems.push(...((receiptItemsData || []) as ReceiptItemRow[]));
+      console.error("Doctor performance query failed", receiptItemsError);
     }
-    const items = allReceiptItems;
     // Build a map from receiptId → doctor_id (from receipt_items rows that have it set)
     const itemDoctorByReceipt = new Map<string, string>();
     for (const item of items) {
@@ -859,17 +932,15 @@ export async function POST(request: Request) {
       current.netSales += receiptNetSales;
       doctorMap.set(doctorId, current);
     }
-    if (!doctorPerformanceWarning) {
-      doctorPerformance = [...doctorMap.values()].map((row) => ({
-        doctorId: row.doctorId,
-        doctorName: row.doctorName,
-        clinicName: clinics.find((clinic) => clinic.id === row.clinicId)?.name || "Unassigned",
-        uniquePatients: row.patientIds.size,
-        completedVisits: row.receiptIds.size,
-        netSales: row.netSales,
-        averageNetSalesPerPatient: row.patientIds.size > 0 ? row.netSales / row.patientIds.size : 0,
-      })).sort((left, right) => right.netSales - left.netSales);
-    }
+    doctorPerformance = [...doctorMap.values()].map((row) => ({
+      doctorId: row.doctorId,
+      doctorName: row.doctorName,
+      clinicName: clinics.find((clinic) => clinic.id === row.clinicId)?.name || "Unassigned",
+      uniquePatients: row.patientIds.size,
+      completedVisits: row.receiptIds.size,
+      netSales: row.netSales,
+      averageNetSalesPerPatient: row.patientIds.size > 0 ? row.netSales / row.patientIds.size : 0,
+    })).sort((left, right) => right.netSales - left.netSales);
   }
 
   // Monthly trends.
@@ -906,6 +977,16 @@ export async function POST(request: Request) {
       belowTarget: targetForMonth > 0 ? netSales < targetForMonth : null,
     };
   }) : [];
+  if (salesTrend.granularity === "month") {
+    salesTrend.points = monthlyTrend.map((point) => ({
+      date: null,
+      label: point.month,
+      netSales: point.netSales,
+      target: point.target,
+      previousYear: point.previousYear,
+      belowTarget: point.belowTarget,
+    }));
+  }
 
   // Patient demand patterns (completed visits only).
   const historyDays = includeHistoricalData ? Math.floor((new Date(historyRange.endIso).getTime() - new Date(historyRange.startIso).getTime()) / (24 * 60 * 60 * 1000)) : 0;
@@ -969,20 +1050,24 @@ export async function POST(request: Request) {
     paymentRows = (recordsRes.data || []) as PaymentRecordRow[];
     const paymentIds = paymentRows.map((row) => row.id);
     if (paymentIds.length > 0) {
-      const [allocRes, refundRes] = await Promise.all([
-        supabase
-          .from("payment_allocations")
-          .select("id, payment_id, method_group, method_variant, treatment_net_amount, fee_amount, refunded_treatment_amount, refunded_fee_amount, customer_charged_amount")
-          .in("payment_id", paymentIds),
-        supabase
-          .from("payment_allocation_refunds")
-          .select("payment_id, payment_allocation_id, refunded_treatment_amount, total_returned_amount, reversed_fee_amount, created_at")
-          .in("payment_id", paymentIds),
+      const [allocationData, allocationRefundData] = await Promise.all([
+        fetchRowsByIdsInBatches<PaymentAllocationRow>(
+          "payment_allocations",
+          "id, payment_id, method_group, method_variant, treatment_net_amount, fee_amount, refunded_treatment_amount, refunded_fee_amount, customer_charged_amount",
+          "payment_id",
+          paymentIds,
+          100
+        ),
+        fetchRowsByIdsInBatches<PaymentAllocationRefundRow>(
+          "payment_allocation_refunds",
+          "payment_id, payment_allocation_id, refunded_treatment_amount, total_returned_amount, reversed_fee_amount, created_at",
+          "payment_id",
+          paymentIds,
+          100
+        ),
       ]);
-      if (allocRes.error) throw allocRes.error;
-      if (refundRes.error) throw refundRes.error;
-      allocationRows = (allocRes.data || []) as PaymentAllocationRow[];
-      allocationRefundRows = (refundRes.data || []) as PaymentAllocationRefundRow[];
+      allocationRows = allocationData;
+      allocationRefundRows = allocationRefundData;
     }
     const methodMap = new Map<string, { method: string; amount: number; count: number }>();
     for (const allocation of allocationRows) {
@@ -1180,6 +1265,7 @@ export async function POST(request: Request) {
       clinicPerformance,
       doctorPerformance,
       trends: {
+        sales: salesTrend,
         monthly: monthlyTrend,
         patientDemand: {
           historyDays,
