@@ -188,29 +188,15 @@ function BackendPageContent() {
   const [editingDoctorSpecialty, setEditingDoctorSpecialty] = useState("");
 
   const [serviceName, setServiceName] = useState("");
-  const [serviceDisplayName, setServiceDisplayName] = useState("");
-  const [serviceVariant, setServiceVariant] = useState("");
   const [servicePrice, setServicePrice] = useState("");
   const [serviceVatRate, setServiceVatRate] = useState<VatRateDraft>("");
   const [serviceCategory, setServiceCategory] = useState("");
-  const [serviceSearchKeywords, setServiceSearchKeywords] = useState("");
-  const [serviceCommonAliases, setServiceCommonAliases] = useState("");
-  const [serviceDefaultVisitCount, setServiceDefaultVisitCount] = useState("1");
-  const [serviceSortOrder, setServiceSortOrder] = useState("0");
-  const [serviceActivePlanRecommended, setServiceActivePlanRecommended] = useState(false);
-  const [serviceIsActive, setServiceIsActive] = useState(true);
-  const [serviceBillingUnit, setServiceBillingUnit] = useState("Session");
-  const [serviceRequiresQuantity, setServiceRequiresQuantity] = useState(false);
-  const [serviceToothSelectionMode, setServiceToothSelectionMode] = useState<"none" | "optional" | "required">("none");
   const [editingServiceId, setEditingServiceId] = useState("");
   const [editingServiceName, setEditingServiceName] = useState("");
-  const [editingServiceDisplayName, setEditingServiceDisplayName] = useState("");
   const [editingServiceVariant, setEditingServiceVariant] = useState("");
   const [editingServicePrice, setEditingServicePrice] = useState("");
   const [editingServiceVatRate, setEditingServiceVatRate] = useState<VatRateDraft>("");
   const [editingServiceCategory, setEditingServiceCategory] = useState("");
-  const [editingServiceSearchKeywords, setEditingServiceSearchKeywords] = useState("");
-  const [editingServiceCommonAliases, setEditingServiceCommonAliases] = useState("");
   const [editingServiceDefaultVisitCount, setEditingServiceDefaultVisitCount] = useState("1");
   const [editingServiceSortOrder, setEditingServiceSortOrder] = useState("0");
   const [editingServiceActivePlanRecommended, setEditingServiceActivePlanRecommended] = useState(false);
@@ -1334,17 +1320,6 @@ function BackendPageContent() {
       alert("Please select a VAT rate for the new service.");
       return;
     }
-    const parsedVisitCount = Math.max(1, Number(serviceDefaultVisitCount || 1));
-    if (!Number.isFinite(parsedVisitCount)) {
-      alert("Please enter a valid default visit count.");
-      return;
-    }
-    const parsedSortOrder = Number(serviceSortOrder || 0);
-    if (!Number.isFinite(parsedSortOrder)) {
-      alert("Please enter a valid sort order.");
-      return;
-    }
-
     if (!selectedClinicId) {
       alert("Please select a specific clinic before adding a service.");
       return;
@@ -1352,24 +1327,24 @@ function BackendPageContent() {
 
     const { error } = await supabase.from("services").insert([
       {
-        name: serviceName,
-        display_name: serviceDisplayName.trim() || serviceName.trim(),
-        variant: serviceVariant.trim() || null,
+        name: serviceName.trim(),
+        display_name: serviceName.trim(),
+        variant: null,
         price: parsedPrice,
         standard_price: parsedPrice,
         vat_rate: parsedVatRate,
         clinic_id: selectedClinicId,
         category: canonicalServiceCategory(serviceCategory),
         category_id: canonicalServiceCategory(serviceCategory),
-        search_keywords: serviceSearchKeywords.trim() || null,
-        common_aliases: serviceCommonAliases.trim() || null,
-        default_visit_count: Math.round(parsedVisitCount),
-        sort_order: Math.round(parsedSortOrder),
-        active_plan_recommended: serviceActivePlanRecommended,
-        is_active: serviceIsActive,
-        requires_quantity: serviceRequiresQuantity,
-        billing_unit: serviceBillingUnit,
-        tooth_selection_mode: serviceToothSelectionMode,
+        search_keywords: null,
+        common_aliases: null,
+        default_visit_count: 1,
+        sort_order: 0,
+        active_plan_recommended: false,
+        is_active: true,
+        requires_quantity: false,
+        billing_unit: "Session",
+        tooth_selection_mode: "none",
       },
     ]);
 
@@ -1383,20 +1358,9 @@ function BackendPageContent() {
     }
 
     setServiceName("");
-    setServiceDisplayName("");
-    setServiceVariant("");
     setServicePrice("");
     setServiceVatRate("");
     setServiceCategory("");
-    setServiceSearchKeywords("");
-    setServiceCommonAliases("");
-    setServiceDefaultVisitCount("1");
-    setServiceSortOrder("0");
-    setServiceActivePlanRecommended(false);
-    setServiceIsActive(true);
-    setServiceBillingUnit("Session");
-    setServiceRequiresQuantity(false);
-    setServiceToothSelectionMode("none");
     loadAll();
   }
 
@@ -1443,16 +1407,14 @@ function BackendPageContent() {
     }
 
     const baseUpdate = {
-      name: editingServiceName,
-      display_name: editingServiceDisplayName.trim() || editingServiceName.trim(),
+      name: editingServiceName.trim(),
+      display_name: editingServiceName.trim(),
       variant: editingServiceVariant.trim() || null,
       price: parsedPrice,
       standard_price: parsedPrice,
       vat_rate: parsedVatRate,
       category: canonicalServiceCategory(editingServiceCategory),
       category_id: canonicalServiceCategory(editingServiceCategory),
-      search_keywords: editingServiceSearchKeywords.trim() || null,
-      common_aliases: editingServiceCommonAliases.trim() || null,
       default_visit_count: Math.round(parsedVisitCount),
       sort_order: Math.round(parsedSortOrder),
       active_plan_recommended: editingServiceActivePlanRecommended,
@@ -1469,7 +1431,7 @@ function BackendPageContent() {
       max_price: editingServicePricingType === "variable" ? parsedMaxPrice : null,
     };
 
-    let { error } = await supabase
+    const { error } = await supabase
       .from("services")
       .update({ ...baseUpdate, ...pricingFields })
       .eq("id", id);
@@ -1507,12 +1469,9 @@ function BackendPageContent() {
 
     setEditingServiceId("");
     setEditingServiceName("");
-    setEditingServiceDisplayName("");
     setEditingServiceVariant("");
     setEditingServicePrice("");
     setEditingServiceVatRate("");
-    setEditingServiceSearchKeywords("");
-    setEditingServiceCommonAliases("");
     setEditingServiceDefaultVisitCount("1");
     setEditingServiceSortOrder("0");
     setEditingServiceActivePlanRecommended(false);
@@ -2412,14 +2371,8 @@ function BackendPageContent() {
             <input
               value={serviceName}
               onChange={(e) => setServiceName(e.target.value)}
-              placeholder="Internal service name"
-              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-            />
-            <input
-              value={serviceDisplayName}
-              onChange={(e) => setServiceDisplayName(e.target.value)}
-              placeholder="Display name (shown in POS)"
-              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
+              placeholder="Service name"
+              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
             />
             <input
               type="number"
@@ -2442,28 +2395,10 @@ function BackendPageContent() {
               <p className="text-[11px] text-slate-500">Required for new services.</p>
             </div>
             <input
-              value={serviceVariant}
-              onChange={(e) => setServiceVariant(e.target.value)}
-              placeholder="Variant / short description (optional)"
-              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
-            />
-            <input
               list="service-category-options"
               value={serviceCategory}
               onChange={(e) => setServiceCategory(e.target.value)}
               placeholder="Category (pick existing or type a new one)"
-              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
-            />
-            <input
-              value={serviceSearchKeywords}
-              onChange={(e) => setServiceSearchKeywords(e.target.value)}
-              placeholder="Search keywords (comma-separated)"
-              className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
-            />
-            <input
-              value={serviceCommonAliases}
-              onChange={(e) => setServiceCommonAliases(e.target.value)}
-              placeholder="Common aliases (comma-separated)"
               className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100 sm:col-span-2"
             />
             <datalist id="service-category-options">
@@ -2471,78 +2406,6 @@ function BackendPageContent() {
                 <option key={c} value={c} />
               ))}
             </datalist>
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-slate-500">Default Visits</label>
-              <input
-                type="number"
-                min="1"
-                value={serviceDefaultVisitCount}
-                onChange={(e) => setServiceDefaultVisitCount(e.target.value)}
-                className="w-20 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-slate-500">Sort Order</label>
-              <input
-                type="number"
-                value={serviceSortOrder}
-                onChange={(e) => setServiceSortOrder(e.target.value)}
-                className="w-20 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-slate-500">Billing Unit</label>
-              <select
-                value={serviceBillingUnit}
-                onChange={(e) => setServiceBillingUnit(e.target.value)}
-                className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
-              >
-                {["Session", "Tooth", "Syringe", "Area", "Unit", "Pack", "Other"].map((u) => (
-                  <option key={u} value={u}>{u}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-slate-500">Tooth Selection</label>
-              <select
-                value={serviceToothSelectionMode}
-                onChange={(e) => setServiceToothSelectionMode(e.target.value as "none" | "optional" | "required")}
-                className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100"
-              >
-                <option value="none">Off</option>
-                <option value="optional">Optional</option>
-                <option value="required">Required</option>
-              </select>
-            </div>
-            <label className="flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={serviceRequiresQuantity}
-                onChange={(e) => setServiceRequiresQuantity(e.target.checked)}
-                className="h-4 w-4 rounded accent-cyan-600"
-              />
-              <span className="text-sm text-slate-700">Requires Quantity</span>
-            </label>
-            <label className="flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={serviceActivePlanRecommended}
-                onChange={(e) => setServiceActivePlanRecommended(e.target.checked)}
-                className="h-4 w-4 rounded accent-cyan-600"
-              />
-              <span className="text-sm text-slate-700">Active Plan recommended</span>
-            </label>
-            <label className="flex cursor-pointer items-center gap-2">
-              <input
-                type="checkbox"
-                checked={serviceIsActive}
-                onChange={(e) => setServiceIsActive(e.target.checked)}
-                className="h-4 w-4 rounded accent-cyan-600"
-              />
-              <span className="text-sm text-slate-700">Active</span>
-            </label>
           </div>
           <button
             onClick={addService}
@@ -2559,13 +2422,7 @@ function BackendPageContent() {
                     <input
                       value={editingServiceName}
                       onChange={(e) => setEditingServiceName(e.target.value)}
-                      placeholder="Internal service name"
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
-                    />
-                    <input
-                      value={editingServiceDisplayName}
-                      onChange={(e) => setEditingServiceDisplayName(e.target.value)}
-                      placeholder="Display name"
+                      placeholder="Service name"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
                     <input
@@ -2643,18 +2500,6 @@ function BackendPageContent() {
                       value={editingServiceCategory}
                       onChange={(e) => setEditingServiceCategory(e.target.value)}
                       placeholder="Category (pick existing or type a new one)"
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
-                    />
-                    <input
-                      value={editingServiceSearchKeywords}
-                      onChange={(e) => setEditingServiceSearchKeywords(e.target.value)}
-                      placeholder="Search keywords"
-                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
-                    />
-                    <input
-                      value={editingServiceCommonAliases}
-                      onChange={(e) => setEditingServiceCommonAliases(e.target.value)}
-                      placeholder="Common aliases"
                       className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none"
                     />
                     <select
@@ -2806,14 +2651,11 @@ function BackendPageContent() {
                       <button
                         onClick={() => {
                           setEditingServiceId(service.id);
-                          setEditingServiceName(service.name || "");
-                          setEditingServiceDisplayName(service.display_name || service.name || "");
+                          setEditingServiceName(service.display_name || service.name || "");
                           setEditingServiceVariant(service.variant || service.description || "");
                           setEditingServicePrice(String(service.price ?? ""));
                           setEditingServiceVatRate(vatRateDraftFromValue(service.vat_rate));
                           setEditingServiceCategory(service.category || "");
-                          setEditingServiceSearchKeywords(service.search_keywords || "");
-                          setEditingServiceCommonAliases(service.common_aliases || "");
                           setEditingServiceDefaultVisitCount(String(service.default_visit_count || 1));
                           setEditingServiceSortOrder(String(service.sort_order ?? 0));
                           setEditingServiceActivePlanRecommended(Boolean(service.active_plan_recommended));
