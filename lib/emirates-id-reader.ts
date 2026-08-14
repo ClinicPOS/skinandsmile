@@ -15,7 +15,8 @@ export type EmiratesIdReaderFieldKey =
   | "nationality"
   | "phone"
   | "email"
-  | "passportNumber";
+  | "passportNumber"
+  | "address";
 
 export type EmiratesIdReaderFields = Partial<Record<EmiratesIdReaderFieldKey, string>>;
 
@@ -24,22 +25,34 @@ export type EmiratesIdReadResult = {
   photoDataUrl: string | null;
 };
 
-export type EmiratesIdDiagnosticResult = {
-  keyPaths: string[];
-};
-
 type EmiratesIdReaderPayload = {
   HasData?: boolean | string | null;
   Error?: string | null;
-  FullNameEnglish?: string | null;
   IdNumber?: string | null;
-  DateOfBirth?: string | null;
-  Gender?: string | null;
-  NationalityEnglish?: string | null;
-  MobilePhoneNumber?: string | null;
-  Email?: string | null;
-  PassportNumber?: string | null;
   Photo?: string | null;
+  nonModifiablePublicData?: {
+    FullNameEnglish?: string | null;
+    DateOfBirth?: string | null;
+    Gender?: string | null;
+    NationalityEnglish?: string | null;
+  } | null;
+  modifiablePublicData?: {
+    PassportNumber?: string | null;
+  } | null;
+  homeAddress?: {
+    MobilePhoneNumber?: string | null;
+    Email?: string | null;
+    FlatNumber?: string | null;
+    BuildingNameEnglish?: string | null;
+    StreetEnglish?: string | null;
+    AreaEnglish?: string | null;
+    CityEnglish?: string | null;
+    EmirateEnglish?: string | null;
+  } | null;
+  workAddress?: {
+    MobilePhoneNumber?: string | null;
+    Email?: string | null;
+  } | null;
 };
 
 type EmiratesIdReaderErrorCode = "timeout" | "no_data" | "reader_error" | "parse_error" | "empty_response" | "unavailable";
@@ -57,6 +70,7 @@ const FIELD_LABELS: Record<EmiratesIdReaderFieldKey, string> = {
   phone: "Phone",
   email: "Email",
   passportNumber: "Passport Number",
+  address: "Address",
 };
 
 function createReaderError(code: EmiratesIdReaderErrorCode, message: string): EmiratesIdReaderError {
@@ -144,6 +158,21 @@ function normalizePhotoDataUrl(value: string | null | undefined) {
   return compact ? `data:image/jpeg;base64,${compact}` : null;
 }
 
+function firstNonEmpty(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const trimmed = String(value || "").trim();
+    if (trimmed) return trimmed;
+  }
+  return "";
+}
+
+function buildAddress(parts: Array<string | null | undefined>) {
+  return parts
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
 function normalizeReaderPayload(payload: EmiratesIdReaderPayload): EmiratesIdReadResult {
   const errorMessage = String(payload.Error || "").trim();
   if (errorMessage) {
@@ -158,14 +187,25 @@ function normalizeReaderPayload(payload: EmiratesIdReaderPayload): EmiratesIdRea
   }
 
   const fields: EmiratesIdReaderFields = {};
-  const fullName = String(payload.FullNameEnglish || "").trim();
+  const fullName = String(payload.nonModifiablePublicData?.FullNameEnglish || "").trim();
   const emiratesId = formatEmiratesId(payload.IdNumber);
-  const dateOfBirth = normalizeDateOfBirth(payload.DateOfBirth);
-  const sex = normalizeSex(payload.Gender);
-  const nationality = String(payload.NationalityEnglish || "").trim();
-  const phone = normalizePatientPhone(payload.MobilePhoneNumber);
-  const email = String(payload.Email || "").trim();
-  const passportNumber = String(payload.PassportNumber || "").trim();
+  const dateOfBirth = normalizeDateOfBirth(payload.nonModifiablePublicData?.DateOfBirth);
+  const sex = normalizeSex(payload.nonModifiablePublicData?.Gender);
+  const nationality = String(payload.nonModifiablePublicData?.NationalityEnglish || "").trim();
+  const phone = normalizePatientPhone(firstNonEmpty(
+    payload.homeAddress?.MobilePhoneNumber,
+    payload.workAddress?.MobilePhoneNumber
+  ));
+  const email = firstNonEmpty(payload.homeAddress?.Email, payload.workAddress?.Email);
+  const passportNumber = String(payload.modifiablePublicData?.PassportNumber || "").trim();
+  const address = buildAddress([
+    payload.homeAddress?.FlatNumber,
+    payload.homeAddress?.BuildingNameEnglish,
+    payload.homeAddress?.StreetEnglish,
+    payload.homeAddress?.AreaEnglish,
+    payload.homeAddress?.CityEnglish,
+    payload.homeAddress?.EmirateEnglish,
+  ]);
 
   if (fullName) fields.name = fullName;
   if (emiratesId) fields.emiratesId = emiratesId;
@@ -175,39 +215,12 @@ function normalizeReaderPayload(payload: EmiratesIdReaderPayload): EmiratesIdRea
   if (phone) fields.phone = phone;
   if (email) fields.email = email;
   if (passportNumber) fields.passportNumber = passportNumber;
+  if (address) fields.address = address;
 
   return {
     fields,
     photoDataUrl: normalizePhotoDataUrl(payload.Photo),
   };
-}
-
-function collectPayloadKeyPaths(value: unknown, parentPath = "", keyPaths = new Set<string>()) {
-  if (Array.isArray(value)) {
-    const arrayPath = parentPath ? `${parentPath}[]` : "[]";
-    keyPaths.add(arrayPath);
-    value.forEach((item) => {
-      if (item && typeof item === "object") {
-        collectPayloadKeyPaths(item, arrayPath, keyPaths);
-      }
-    });
-    return keyPaths;
-  }
-
-  if (!value || typeof value !== "object") {
-    return keyPaths;
-  }
-
-  Object.entries(value as Record<string, unknown>).forEach(([key, nestedValue]) => {
-    const path = parentPath ? `${parentPath}.${key}` : key;
-    keyPaths.add(path);
-
-    if (nestedValue && typeof nestedValue === "object") {
-      collectPayloadKeyPaths(nestedValue, path, keyPaths);
-    }
-  });
-
-  return keyPaths;
 }
 
 async function readRawEmiratesIdPayload(timeoutMs = EID_READER_TIMEOUT_MS): Promise<EmiratesIdReaderPayload> {
@@ -296,11 +309,4 @@ export function getEmiratesIdReaderMessage(error: unknown) {
 export async function readEmiratesIdCard(timeoutMs = EID_READER_TIMEOUT_MS): Promise<EmiratesIdReadResult> {
   const payload = await readRawEmiratesIdPayload(timeoutMs);
   return normalizeReaderPayload(payload);
-}
-
-export async function readEmiratesIdDiagnostic(timeoutMs = EID_READER_TIMEOUT_MS): Promise<EmiratesIdDiagnosticResult> {
-  const payload = await readRawEmiratesIdPayload(timeoutMs);
-  return {
-    keyPaths: Array.from(collectPayloadKeyPaths(payload)).sort((left, right) => left.localeCompare(right)),
-  };
 }
