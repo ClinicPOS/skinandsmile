@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useMemo, useState } from "react";
 import { COUNTRIES } from "../lib/countries";
 import { ensurePatientClinicFile } from "../lib/clinic-patient-files";
@@ -15,6 +16,11 @@ import {
   type ClinicPatientFileLike,
   type PatientLike,
 } from "../lib/patient-registration";
+import {
+  getEmiratesIdReaderMessage,
+  mergeReaderPatientFields,
+  readEmiratesIdCard,
+} from "../lib/emirates-id-reader";
 
 type RegisteredPatientPayload = {
   patient: PatientLike & {
@@ -57,6 +63,9 @@ export function PosRegisterPatientModal({
   const [confirmCreateAnyway, setConfirmCreateAnyway] = useState(false);
   const [mrnWarningCandidates, setMrnWarningCandidates] = useState<MrnDuplicateCandidate[]>([]);
   const [pendingCreateAfterMrnWarning, setPendingCreateAfterMrnWarning] = useState(false);
+  const [readerStatus, setReaderStatus] = useState("Ready");
+  const [readerSkippedFields, setReaderSkippedFields] = useState<string[]>([]);
+  const [readerPhoto, setReaderPhoto] = useState<string | null>(null);
 
   const hasWarnings = warningCandidates.length > 0;
   const canonicalMobile = useMemo(() => normalizePatientPhone(mobile), [mobile]);
@@ -79,6 +88,9 @@ export function PosRegisterPatientModal({
     setConfirmCreateAnyway(false);
     setMrnWarningCandidates([]);
     setPendingCreateAfterMrnWarning(false);
+    setReaderStatus("Ready");
+    setReaderSkippedFields([]);
+    setReaderPhoto(null);
     onClose();
   }
 
@@ -92,6 +104,46 @@ export function PosRegisterPatientModal({
       mobile,
       dateOfBirth: dateOfBirth || null,
     });
+  }
+
+  async function handleReadEmiratesId() {
+    setReaderStatus("Reading Emirates ID…");
+    setReaderSkippedFields([]);
+    setReaderPhoto(null);
+
+    try {
+      const result = await readEmiratesIdCard();
+      const { updates, skippedFields } = mergeReaderPatientFields(
+        {
+          name,
+          emiratesId,
+          dateOfBirth,
+          sex: gender,
+          nationality,
+          phone: mobile,
+          email,
+          passportNumber,
+        },
+        result.fields
+      );
+
+      if (updates.name) setName(updates.name);
+      if (updates.emiratesId) setEmiratesId(updates.emiratesId);
+      if (updates.dateOfBirth) setDateOfBirth(updates.dateOfBirth);
+      if (updates.sex) setGender(updates.sex);
+      if (updates.nationality) setNationality(updates.nationality);
+      if (updates.phone) setMobile(updates.phone);
+      if (updates.email) setEmail(updates.email);
+      if (updates.passportNumber) setPassportNumber(updates.passportNumber);
+
+      setReaderPhoto(result.photoDataUrl);
+      setReaderSkippedFields(skippedFields);
+      setReaderStatus("Emirates ID read successfully");
+    } catch (error) {
+      setReaderPhoto(null);
+      setReaderSkippedFields([]);
+      setReaderStatus(getEmiratesIdReaderMessage(error));
+    }
   }
 
   function findFileNoConflictForClinic(excludePatientId?: string | null): FileNoConflictCandidate | null {
@@ -382,6 +434,41 @@ export function PosRegisterPatientModal({
               </div>
             </div>
           )}
+
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-900">Emirates ID Reader</p>
+                <p className="mt-1 text-xs text-slate-500">{readerStatus}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleReadEmiratesId()}
+                disabled={readerStatus === "Reading Emirates ID…"}
+                className="rounded-xl border border-cyan-200 bg-white px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {readerStatus === "Reading Emirates ID…" ? "Reading Emirates ID…" : "Read Emirates ID"}
+              </button>
+            </div>
+            {readerSkippedFields.length > 0 ? (
+              <p className="mt-3 text-xs text-amber-700">
+                Existing fields were left unchanged: {readerSkippedFields.join(", ")}.
+              </p>
+            ) : null}
+            {readerPhoto ? (
+              <div className="mt-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Emirates ID Photo</p>
+                <Image
+                  src={readerPhoto}
+                  alt="Emirates ID Photo"
+                  width={96}
+                  height={112}
+                  unoptimized
+                  className="mt-2 h-28 w-24 rounded-xl border border-slate-200 object-cover"
+                />
+              </div>
+            ) : null}
+          </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="sm:col-span-2">

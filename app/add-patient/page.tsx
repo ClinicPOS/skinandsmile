@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
@@ -11,6 +12,11 @@ import {
   nextClinicFileNumber,
 } from "../../lib/clinic-patient-files";
 import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
+import {
+  getEmiratesIdReaderMessage,
+  mergeReaderPatientFields,
+  readEmiratesIdCard,
+} from "../../lib/emirates-id-reader";
 import type { Clinic, Patient, OutstandingBalance } from "../../lib/types";
 
 export default function AddPatientPage() {
@@ -36,6 +42,9 @@ export default function AddPatientPage() {
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [showBalanceModal, setShowBalanceModal] = useState(false);
   const [savedBalance, setSavedBalance] = useState<OutstandingBalance | null>(null);
+  const [readerStatus, setReaderStatus] = useState("Ready");
+  const [readerSkippedFields, setReaderSkippedFields] = useState<string[]>([]);
+  const [readerPhoto, setReaderPhoto] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -67,6 +76,52 @@ export default function AddPatientPage() {
     setPassportNumber("");
     setMrn("");
     setFileNo("");
+    setReaderStatus("Ready");
+    setReaderSkippedFields([]);
+    setReaderPhoto(null);
+  }
+
+  async function handleReadEmiratesId() {
+    setReaderStatus("Reading Emirates ID…");
+    setReaderSkippedFields([]);
+    setReaderPhoto(null);
+
+    try {
+      const result = await readEmiratesIdCard();
+      const { updates, skippedFields } = mergeReaderPatientFields(
+        {
+          name,
+          emiratesId,
+          dateOfBirth: dob,
+          sex,
+          nationality: nationality || nationalitySearch,
+          phone,
+          email,
+          passportNumber,
+        },
+        result.fields
+      );
+
+      if (updates.name) setName(updates.name);
+      if (updates.emiratesId) setEmiratesId(updates.emiratesId);
+      if (updates.dateOfBirth) setDob(updates.dateOfBirth);
+      if (updates.sex) setSex(updates.sex);
+      if (updates.nationality) {
+        setNationality(updates.nationality);
+        setNationalitySearch(updates.nationality);
+      }
+      if (updates.phone) setPhone(updates.phone);
+      if (updates.email) setEmail(updates.email);
+      if (updates.passportNumber) setPassportNumber(updates.passportNumber);
+
+      setReaderPhoto(result.photoDataUrl);
+      setReaderSkippedFields(skippedFields);
+      setReaderStatus("Emirates ID read successfully");
+    } catch (error) {
+      setReaderPhoto(null);
+      setReaderSkippedFields([]);
+      setReaderStatus(getEmiratesIdReaderMessage(error));
+    }
   }
 
   async function addPatient() {
@@ -198,6 +253,41 @@ export default function AddPatientPage() {
         <div>
           <h2 className="text-lg font-bold text-slate-900">Patients</h2>
           <p className="text-xs text-slate-500">Register a new patient. File No. is auto-assigned when left blank.</p>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-slate-900">Emirates ID Reader</p>
+              <p className="mt-1 text-xs text-slate-500">{readerStatus}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleReadEmiratesId()}
+              disabled={readerStatus === "Reading Emirates ID…"}
+              className="rounded-2xl border border-cyan-200 bg-white px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {readerStatus === "Reading Emirates ID…" ? "Reading Emirates ID…" : "Read Emirates ID"}
+            </button>
+          </div>
+          {readerSkippedFields.length > 0 ? (
+            <p className="mt-3 text-xs text-amber-700">
+              Existing fields were left unchanged: {readerSkippedFields.join(", ")}.
+            </p>
+          ) : null}
+          {readerPhoto ? (
+            <div className="mt-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Emirates ID Photo</p>
+              <Image
+                src={readerPhoto}
+                alt="Emirates ID Photo"
+                width={96}
+                height={112}
+                unoptimized
+                className="mt-2 h-28 w-24 rounded-xl border border-slate-200 object-cover"
+              />
+            </div>
+          ) : null}
         </div>
 
         {lastAdded && (
