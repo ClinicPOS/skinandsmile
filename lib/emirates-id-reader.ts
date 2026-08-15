@@ -137,8 +137,8 @@ function normalizeDateOfBirth(value: string | null | undefined) {
 function normalizeSex(value: string | null | undefined) {
   const normalized = String(value || "").trim().toLowerCase();
   if (!normalized) return "";
-  if (normalized === "male" || normalized === "m") return "Male";
-  if (normalized === "female" || normalized === "f") return "Female";
+  if (normalized === "male" || normalized === "m" || normalized === "1") return "Male";
+  if (normalized === "female" || normalized === "f" || normalized === "2") return "Female";
   return "";
 }
 
