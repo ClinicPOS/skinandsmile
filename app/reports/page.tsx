@@ -146,7 +146,7 @@ type DashboardResponse = {
   };
   payments: {
     methods: Array<{
-      method: "cash" | "card" | "tabby" | "tamara";
+      method: "cash" | "card" | "bank_transfer" | "tabby" | "tamara";
       amount: number;
       count: number;
     }>;
@@ -231,6 +231,7 @@ const QUICK_PRESETS: Array<{ id: ReportsQuickPreset; label: string }> = [
 const METHOD_COLORS: Record<string, string> = {
   cash: "#0f766e",
   card: "#0284c7",
+  bank_transfer: "#475569",
   tabby: "#7c3aed",
   tamara: "#b45309",
 };
@@ -238,6 +239,7 @@ const METHOD_COLORS: Record<string, string> = {
 function methodLabel(method: string) {
   if (method === "cash") return "Cash";
   if (method === "card") return "Card";
+  if (method === "bank_transfer") return "Bank Transfer";
   if (method === "tabby") return "Tabby";
   if (method === "tamara") return "Tamara";
   return method;
@@ -1121,7 +1123,7 @@ export default function ReportsPage() {
   const paymentMethodTotals = data?.payments.methods.reduce<Record<string, number>>((totals, row) => {
     totals[row.method] = row.amount;
     return totals;
-  }, { cash: 0, card: 0, tabby: 0, tamara: 0 }) || { cash: 0, card: 0, tabby: 0, tamara: 0 };
+  }, { cash: 0, card: 0, bank_transfer: 0, tabby: 0, tamara: 0 }) || { cash: 0, card: 0, bank_transfer: 0, tabby: 0, tamara: 0 };
   const noSalesInRange = !!data?.overview && data.overview.netSales === 0 && data.overview.completedVisits === 0;
 
   return (
@@ -1706,6 +1708,7 @@ export default function ReportsPage() {
                 <ExecutiveKpiCard title="Total Collected" value={formatCurrency(data.payments.customerCollections)} />
                 <ExecutiveKpiCard title="Cash" value={formatCurrency(paymentMethodTotals.cash)} />
                 <ExecutiveKpiCard title="Card" value={formatCurrency(paymentMethodTotals.card)} />
+                <ExecutiveKpiCard title="Bank Transfer" value={formatCurrency(paymentMethodTotals.bank_transfer)} />
                 <ExecutiveKpiCard title="Tabby" value={formatCurrency(paymentMethodTotals.tabby)} />
                 <ExecutiveKpiCard title="Tamara" value={formatCurrency(paymentMethodTotals.tamara)} />
                 <ExecutiveKpiCard title="Payment Fees Collected" value={formatCurrency(data.payments.paymentFeesCollected)} />

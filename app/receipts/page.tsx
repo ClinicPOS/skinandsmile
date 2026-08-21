@@ -252,10 +252,11 @@ function summarizeCartPricing(
   };
 }
 
-const paymentOptions = ["Cash", "Card", "Tabby", "Tabby Card", "Tamara", "Split Payment"];
+const paymentOptions = ["Cash", "Card", "Bank Transfer", "Tabby", "Tabby Card", "Tamara", "Split Payment"];
 const allocationMethodOptions: Array<{ value: PaymentMethodVariant; label: string }> = [
   { value: "cash", label: "Cash" },
   { value: "card", label: "Card" },
+  { value: "bank_transfer", label: "Bank Transfer" },
   { value: "tabby_standard", label: "Tabby" },
   { value: "tabby_card", label: "Tabby Card" },
   { value: "tamara", label: "Tamara" },
@@ -2176,6 +2177,8 @@ export default function ReceiptsPage() {
         ? "cash"
         : allocation?.method_variant === "card"
           ? "card"
+          : allocation?.method_variant === "bank_transfer"
+            ? "bankTransfer"
           : allocation?.method_variant === "tabby_standard"
             ? "tabby"
             : allocation?.method_variant === "tabby_card"
@@ -2550,6 +2553,8 @@ export default function ReceiptsPage() {
           cashTotal += customerChargedAmount;
         } else if (allocation.method_variant === "card") {
           cardTotal += customerChargedAmount;
+        } else if (allocation.method_variant === "bank_transfer") {
+          bankTransferTotal += customerChargedAmount;
         } else if (allocation.method_variant === "tabby_standard") {
           tabbyTotal += customerChargedAmount;
           tabbyFeeTotal += feeAmount;
@@ -2677,7 +2682,7 @@ export default function ReceiptsPage() {
             tabbyCard: structuredCollectionSummary?.tabbyCard || 0,
             tamara: structuredCollectionSummary?.tamara || 0,
             insurance: 0,
-            bankTransfer: 0,
+            bankTransfer: structuredCollectionSummary?.bankTransfer || 0,
             legacyUnallocated: structuredCollectionSummary?.legacyUnallocated || 0,
             mop: structuredPaymentAllocations.length > 1 ? "SPLIT" : "STRUCTURED",
           }
@@ -3455,6 +3460,7 @@ export default function ReceiptsPage() {
       const methodRows: Array<{ key: PaymentMethodVariant; label: string }> = [
         { key: "cash", label: "Cash" },
         { key: "card", label: "Card" },
+        { key: "bank_transfer", label: "Bank Transfer" },
         { key: "tabby_standard", label: "Tabby" },
         { key: "tabby_card", label: "Tabby Card" },
         { key: "tamara", label: "Tamara" },
@@ -3661,6 +3667,11 @@ export default function ReceiptsPage() {
       setCashReceivedByRow({});
       return;
     }
+    if (method === "Bank Transfer") {
+      setPaymentAllocationDrafts([createAllocationDraftRow("bank_transfer", amountDueText)]);
+      setCashReceivedByRow({});
+      return;
+    }
     if (method === "Tabby") {
       setPaymentAllocationDrafts([createAllocationDraftRow("tabby_standard", amountDueText)]);
       setCashReceivedByRow({});
@@ -3778,6 +3789,7 @@ export default function ReceiptsPage() {
   function allowedVariantsForSelectedMethod(method: string): PaymentMethodVariant[] {
     if (method === "Cash") return ["cash"];
     if (method === "Card") return ["card"];
+    if (method === "Bank Transfer") return ["bank_transfer"];
     if (method === "Tabby") return ["tabby_standard", "tabby_card"];
     if (method === "Tabby Card") return ["tabby_card"];
     if (method === "Tamara") return ["tamara"];

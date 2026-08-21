@@ -197,6 +197,7 @@ function normalizeMethodGroup(group: string) {
   const key = String(group || "").toLowerCase();
   if (key === "cash") return "cash";
   if (key === "card") return "card";
+  if (key === "bank_transfer") return "bank_transfer";
   if (key === "tabby") return "tabby";
   if (key === "tamara") return "tamara";
   return "unknown";
@@ -1079,7 +1080,7 @@ export async function POST(request: Request) {
       current.count += 1;
       methodMap.set(method, current);
     }
-    const paymentMethods = ["cash", "card", "tabby", "tamara"].map((method) => methodMap.get(method) || { method, amount: 0, count: 0 });
+    const paymentMethods = ["cash", "card", "bank_transfer", "tabby", "tamara"].map((method) => methodMap.get(method) || { method, amount: 0, count: 0 });
 
     const paymentFeesCollected = allocationRows.reduce((sum, row) => sum + Math.max(0, asNumber(row.fee_amount) - asNumber(row.refunded_fee_amount)), 0);
     const customerCollections = paymentRows.reduce((sum, row) => sum + asNumber(row.total_customer_charged_amount), 0);
