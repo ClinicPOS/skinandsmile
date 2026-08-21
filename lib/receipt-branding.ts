@@ -11,20 +11,10 @@ type ReceiptLogoOption = {
 };
 
 export const receiptLogoOptions: ReceiptLogoOption[] = [
-  { value: "skin-smile", label: "Skin and Smile default", path: "/images/logo6.jpg", thermalPath: "/images/skin-and-smile-logo-72mm-203dpi-576px.png" },
-  { value: "skin-smile-alt", label: "Skin and Smile alternate", path: "/images/dental.png", thermalPath: "/images/Alsatwathermal.png" },
-  { value: "dental", label: "Skin and Smile Dental", path: "/images/dental.png", thermalPath: "/images/Alsatwathermal.png" },
-  { value: "aesthetic", label: "Skin and Smile Aesthetic", path: "/images/invoiceskinandsmile-aesthetic.png", thermalPath: "/images/aesthetic.png" },
-  { value: "al-dana", label: "Skin and Smile Dental (Al Dana)", path: "/images/aldana.png", thermalPath: "/images/aldanathermal.PNG" },
-  { value: "altamuze", label: "Al Tamuze", path: "/images/altamuze.png", thermalPath: "/images/altamuzethermal.jpg" },
-  { value: "altamuze-compact", label: "Al Tamuze compact", path: "/images/logo4.png", thermalPath: "/images/altamuzethermal.jpg" },
-  { value: "altamuze-new", label: "Altamuze Medical Center", path: "/images/altamuze.png", thermalPath: "/images/altamuzethermal.jpg" },
-  { value: "logo", label: "Logo 1", path: "/images/logo.png", thermalPath: "/images/Alsatwathermal.png" },
-  { value: "logo2", label: "Logo 2", path: "/images/logo2.png", thermalPath: "/images/Alsatwathermal.png" },
-  { value: "logo3", label: "Logo 3", path: "/images/logo3.png", thermalPath: "/images/Alsatwathermal.png" },
-  { value: "al-jameelah", label: "Al Jameelah Clinic", path: "/images/aljameelah.png", thermalPath: "/images/Jameelahthermal.png" },
-  { value: "al-jameelah-new", label: "Al Jameelah Clinic (new)", path: "/images/aljameelah.png", thermalPath: "/images/Jameelahthermal.png" },
-  { value: "al-qima", label: "Al Qima Medical Center", path: "/images/al-qima.png", thermalPath: "/images/al-qima-thermal-80mm-576px.png" },
+  { value: "skin-smile", label: "Skin and Smile default", path: "/images/skinandsmile.png", thermalPath: "/images/skinandsmile.png" },
+  { value: "altamuze", label: "Al Tamuze", path: "/images/Altamuze1.png", thermalPath: "/images/Altamuze1.png" },
+  { value: "al-jameelah", label: "Al Jameelah Clinic", path: "/images/aljameelah2.png", thermalPath: "/images/aljameelah2.png" },
+  { value: "al-qima", label: "Al Qima Medical Center", path: "/images/alqima.png", thermalPath: "/images/alqima.png" },
 ] as const;
 
 function normalizeClinicName(value: string | null | undefined) {
@@ -112,6 +102,7 @@ type ReceiptQrOptions = {
   clinicTiktok?: string;
   qrUrl?: string;
   invoiceNo?: string;
+  qrOnly?: boolean;
 };
 
 function cleanSocialHandle(value: string) {
@@ -161,6 +152,13 @@ export function buildReceiptQrHtml(options: ReceiptQrOptions) {
   qr.make();
   const svg = qr.createSvgTag({ cellSize: 3, margin: 2, scalable: true })
     .replace("<svg ", '<svg style="width:22mm;height:22mm;display:block;" ');
+
+  if (options.qrOnly) {
+    return `
+    <div class="receipt-qr receipt-qr-only" style="display:flex;align-items:center;justify-content:center;break-inside:avoid;">
+      ${svg}
+    </div>`;
+  }
 
   return `
     <div class="receipt-qr" style="display:flex;flex-direction:column;align-items:center;margin:6px 0 4px;break-inside:avoid;">

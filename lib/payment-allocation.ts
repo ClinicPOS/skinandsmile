@@ -2,8 +2,8 @@ import { fromMinorUnits, roundCurrency, sumMinorUnits, toMinorUnits } from "./mo
 
 export const PROVIDER_FEE_RATE = 0.075;
 
-export type PaymentMethodGroup = "cash" | "card" | "tabby" | "tamara";
-export type PaymentMethodVariant = "cash" | "card" | "tabby_standard" | "tabby_card" | "tamara";
+export type PaymentMethodGroup = "cash" | "card" | "bank_transfer" | "tabby" | "tamara";
+export type PaymentMethodVariant = "cash" | "card" | "bank_transfer" | "tabby_standard" | "tabby_card" | "tamara";
 
 export type PaymentAllocationDraft = {
   id: string;
@@ -50,6 +50,7 @@ type PaymentSummaryOptions = {
 export function paymentGroupFromVariant(variant: PaymentMethodVariant): PaymentMethodGroup {
   if (variant === "cash") return "cash";
   if (variant === "card") return "card";
+  if (variant === "bank_transfer") return "bank_transfer";
   if (variant === "tamara") return "tamara";
   return "tabby";
 }
@@ -60,6 +61,8 @@ export function paymentVariantLabel(variant: PaymentMethodVariant): string {
       return "Cash";
     case "card":
       return "Card";
+    case "bank_transfer":
+      return "Bank Transfer";
     case "tabby_standard":
       return "Tabby";
     case "tabby_card":

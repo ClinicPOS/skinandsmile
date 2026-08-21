@@ -26,16 +26,27 @@ function transpileTsToCjs(inputPath, outputPath) {
 
 const moneyTs = path.join(repoRoot, "lib", "money.ts");
 const allocationTs = path.join(repoRoot, "lib", "payment-allocation.ts");
+const cashDeductionsTs = path.join(repoRoot, "lib", "cash-deductions.ts");
+const receiptsReportingTs = path.join(repoRoot, "lib", "receipts-reporting.ts");
 const moneyJs = path.join(tmpDir, "money.js");
 const allocationJs = path.join(tmpDir, "payment-allocation.js");
+const cashDeductionsJs = path.join(tmpDir, "cash-deductions.js");
+const receiptsReportingJs = path.join(tmpDir, "receipts-reporting.js");
 transpileTsToCjs(moneyTs, moneyJs);
 transpileTsToCjs(allocationTs, allocationJs);
+transpileTsToCjs(cashDeductionsTs, cashDeductionsJs);
+transpileTsToCjs(receiptsReportingTs, receiptsReportingJs);
 
 const {
   buildPaymentAllocations,
   validatePaymentAllocations,
   paymentSummaryLabel,
 } = require(allocationJs);
+const {
+  getPaymentBreakdownForReporting,
+  summarizeStoredAllocationRowsForReporting,
+  summarizeStoredAllocationCollectionsForReporting,
+} = require(receiptsReportingJs);
 
 function draft(id, methodVariant, amount, providerReferenceNumber = "") {
   return {
@@ -61,6 +72,34 @@ function draft(id, methodVariant, amount, providerReferenceNumber = "") {
   const rows = buildPaymentAllocations([draft("r1", "card", "300.00")], 300, 300, 0);
   assert.equal(rows[0].feeAmount, 0);
   assert.equal(rows[0].customerChargedAmount, 300);
+}
+
+// Bank transfer is a normal paid method: no fee and no provider reference.
+{
+  const rows = buildPaymentAllocations([draft("r1", "bank_transfer", "300.00")], 300, 300, 0);
+  assert.equal(rows[0].methodGroup, "bank_transfer");
+  assert.equal(rows[0].feeAmount, 0);
+  assert.equal(rows[0].customerChargedAmount, 300);
+  assert.equal(paymentSummaryLabel(rows), "Bank Transfer");
+  assert.ok(!validatePaymentAllocations([draft("r1", "bank_transfer", "300.00")], 300).some((e) => e.code === "missing_reference"));
+}
+
+// Structured reports keep bank transfers separate from Card and Legacy.
+{
+  const storedRow = {
+    method_variant: "bank_transfer",
+    invoice_allocation_amount: 300,
+    customer_charged_amount: 300,
+    fee_amount: 0,
+    provider_reference_number: null,
+  };
+  const rowSummary = summarizeStoredAllocationRowsForReporting([storedRow]);
+  const collectionSummary = summarizeStoredAllocationCollectionsForReporting([storedRow]);
+  assert.equal(rowSummary.breakdown.bankTransfer, 300);
+  assert.equal(rowSummary.breakdown.legacyUnallocated, 0);
+  assert.equal(collectionSummary.bankTransfer, 300);
+  assert.equal(collectionSummary.legacyUnallocated, 0);
+  assert.equal(getPaymentBreakdownForReporting("bank_transfer", 300).bankTransfer, 300);
 }
 
 // Tabby-only payment

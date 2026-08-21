@@ -14,7 +14,7 @@ export type ReportingPaymentBreakdown = {
 };
 
 export function getPaymentBreakdownForReporting(paymentMethodRaw: string, totalAmount: number): ReportingPaymentBreakdown {
-  const paymentMethod = String(paymentMethodRaw || "").toLowerCase();
+  const paymentMethod = String(paymentMethodRaw || "").toLowerCase().replace(/_/g, " ");
   const safeTotal = Math.max(0, Number(totalAmount || 0));
   const breakdown: ReportingPaymentBreakdown = {
     cash: 0,
@@ -113,6 +113,7 @@ export function summarizeStoredAllocationRowsForReporting(rows: PaymentAllocatio
     tabby: 0,
     tabbyCard: 0,
     tamara: 0,
+    bankTransfer: 0,
     legacyUnallocated: 0,
   };
   const references = {
@@ -136,6 +137,10 @@ export function summarizeStoredAllocationRowsForReporting(rows: PaymentAllocatio
     if (row.method_variant === "card") {
       breakdown.card += invoiceAllocated;
       if (reference) references.card.add(reference);
+      return;
+    }
+    if (row.method_variant === "bank_transfer") {
+      breakdown.bankTransfer += invoiceAllocated;
       return;
     }
     if (row.method_variant === "tabby_card") {
@@ -219,6 +224,9 @@ export function summarizeStoredAllocationCollectionsForReporting(rows: PaymentAl
         break;
       case "card":
         summary.card += customerChargedAmount;
+        break;
+      case "bank_transfer":
+        summary.bankTransfer += customerChargedAmount;
         break;
       case "tabby_standard":
         summary.tabby += customerChargedAmount;

@@ -266,8 +266,8 @@ export type TreatmentPlanPaymentRecord = {
 export type TreatmentPlanPaymentAllocation = {
   id: string;
   payment_id: string;
-  method_group: "cash" | "card" | "tabby" | "tamara";
-  method_variant: "cash" | "card" | "tabby_standard" | "tabby_card" | "tamara";
+  method_group: "cash" | "card" | "bank_transfer" | "tabby" | "tamara";
+  method_variant: "cash" | "card" | "bank_transfer" | "tabby_standard" | "tabby_card" | "tamara";
   treatment_net_amount: number;
   vat_amount: number;
   invoice_allocation_amount: number;
@@ -302,8 +302,8 @@ export type PaymentRecord = {
 export type PaymentAllocation = {
   id: string;
   payment_id: string;
-  method_group: "cash" | "card" | "tabby" | "tamara";
-  method_variant: "cash" | "card" | "tabby_standard" | "tabby_card" | "tamara";
+  method_group: "cash" | "card" | "bank_transfer" | "tabby" | "tamara";
+  method_variant: "cash" | "card" | "bank_transfer" | "tabby_standard" | "tabby_card" | "tamara";
   treatment_net_amount: number;
   vat_amount: number;
   invoice_allocation_amount: number;

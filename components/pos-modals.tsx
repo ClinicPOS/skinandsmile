@@ -79,12 +79,13 @@ type Receipt = {
   created_at?: string;
 };
 
-const PLAN_PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tabby Card", "Tamara", "Split Payment"] as const;
+const PLAN_PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Bank Transfer", "Tabby", "Tabby Card", "Tamara", "Split Payment"] as const;
 type PlanPaymentMode = (typeof PLAN_PAYMENT_MODE_OPTIONS)[number];
 
 const PLAN_ALLOCATION_METHOD_OPTIONS: Array<{ value: PaymentMethodVariant; label: string }> = [
   { value: "cash", label: "Cash" },
   { value: "card", label: "Card" },
+  { value: "bank_transfer", label: "Bank Transfer" },
   { value: "tabby_standard", label: "Tabby" },
   { value: "tabby_card", label: "Tabby Card" },
   { value: "tamara", label: "Tamara" },
@@ -104,6 +105,7 @@ function newPlanAllocationDraft(methodVariant: PaymentMethodVariant | "" = "", a
 function planModeToVariant(mode: PlanPaymentMode): PaymentMethodVariant {
   if (mode === "Cash") return "cash";
   if (mode === "Card") return "card";
+  if (mode === "Bank Transfer") return "bank_transfer";
   if (mode === "Tabby") return "tabby_standard";
   if (mode === "Tabby Card") return "tabby_card";
   if (mode === "Tamara") return "tamara";
@@ -117,7 +119,7 @@ function legacyPaymentMethodToVariant(method: string): { methodVariant: PaymentM
   if (normalized === "mastercard") return { methodVariant: "card", cardNetwork: "Mastercard", methodLabel: "Mastercard" };
   if (normalized === "tabby") return { methodVariant: "tabby_standard", methodLabel: "Tabby" };
   if (normalized === "tamara") return { methodVariant: "tamara", methodLabel: "Tamara" };
-  if (normalized === "bank transfer") return { methodVariant: "card", methodLabel: "Bank Transfer" };
+  if (normalized === "bank transfer") return { methodVariant: "bank_transfer", methodLabel: "Bank Transfer" };
   return { methodVariant: "card", methodLabel: method || "Card" };
 }
 
@@ -2019,7 +2021,7 @@ export function SearchPatientModal({
                                   <div className="space-y-1">
                                     {payments.slice(0, 3).map((payment) => (
                                       <p key={payment.id} className="rounded-lg bg-slate-50 px-2 py-1 text-slate-600">
-                                        AED {Number(payment.amount || 0).toFixed(2)} · {payment.payment_method} · {new Date(payment.created_at).toLocaleDateString("en-GB")}
+                                        AED {Number(payment.amount || 0).toFixed(2)} · {payment.payment_method === "bank_transfer" ? "Bank Transfer" : payment.payment_method} · {new Date(payment.created_at).toLocaleDateString("en-GB")}
                                       </p>
                                     ))}
                                   </div>

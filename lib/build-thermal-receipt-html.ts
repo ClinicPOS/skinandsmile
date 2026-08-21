@@ -121,15 +121,6 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
   const receiptThankYou = clinic?.receipt_thank_you || "Thank you for visiting us / شكراً لزيارتك لنا";
   const receiptFinalMessage = clinic?.receipt_final_message || "Thank you for Visiting US!";
 
-  const socialHtml = clinicInstagram || clinicFacebook || clinicTiktok
-    ? `
-      <div class="footer-center" style="margin-top:6px;">Follow us:</div>
-      ${clinicInstagram ? `<div class="footer-center">Instagram: ${clinicInstagram}</div>` : ""}
-      ${clinicFacebook ? `<div class="footer-center">Facebook: ${clinicFacebook}</div>` : ""}
-      ${clinicTiktok ? `<div class="footer-center">TikTok: ${clinicTiktok}</div>` : ""}
-      `
-    : "";
-
   const qrHtml = buildReceiptQrHtml({
     clinic,
     clinicDisplayName,
@@ -139,6 +130,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
     clinicFacebook,
     clinicTiktok,
     invoiceNo: invoiceNumber,
+    qrOnly: true,
   });
 
   const itemsHtml = items
@@ -301,64 +293,210 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
           .detail-total { font-weight: 700; }
           .item-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
           .amount { text-align: right; white-space: nowrap; }
+          .receipt-header { text-align: center; }
+          .receipt-heading { margin: 0; }
+          .invoice-box {
+            border: 1px solid #000;
+            padding: 3px 8px;
+            margin: 6px 0 4px;
+            text-align: center;
+            font-size: 10px;
+            line-height: 1.35;
+            font-weight: 700;
+          }
+          .info-row {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 8px;
+            margin: 2px 0;
+            font-size: 9px;
+            line-height: 1.35;
+          }
+          .info-label {
+            flex: 0 0 52%;
+            font-weight: 700;
+            text-align: left;
+          }
+          .info-value {
+            flex: 1;
+            text-align: right;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+          }
+          .patient-block {
+            margin: 4px 0 2px;
+            padding: 2px 0;
+            border-top: 1px solid #000;
+            border-bottom: 1px solid #000;
+          }
+          .patient-label {
+            display: block;
+            font-size: 9px;
+            font-weight: 700;
+            line-height: 1.3;
+            margin-bottom: 1px;
+          }
+          .patient-name {
+            display: block;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+          }
+          .section-divider {
+            border-top: 1px dashed #000;
+            margin: 6px 0 4px;
+          }
+          .section-title {
+            margin: 6px 0 3px;
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+          }
+          .total-line {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            font-size: 10px;
+            line-height: 1.35;
+            margin: 2px 0;
+          }
+          .total-line .label { font-weight: 600; }
+          .total-strong {
+            border-top: 1px solid #000;
+            border-bottom: 1px solid #000;
+            padding: 4px 0;
+            margin-top: 6px;
+            font-size: 15px;
+            font-weight: 800;
+            line-height: 1.2;
+          }
+          .review-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 6px 0;
+          }
+          .review-divider {
+            width: 1px;
+            height: 30px;
+            background: #000;
+            margin: 0 2px;
+          }
+          .review-qr-wrap {
+            flex: 0 0 24mm;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .review-qr-wrap .receipt-qr {
+            margin: 0;
+          }
+          .review-qr-wrap svg {
+            width: 22mm !important;
+            height: 22mm !important;
+            max-width: 22mm;
+            max-height: 22mm;
+            display: block;
+          }
+          .review-copy {
+            flex: 1;
+            min-width: 0;
+            font-size: 9px;
+            line-height: 1.35;
+            color: #000;
+            text-align: left;
+          }
+          .review-title {
+            font-size: 10px;
+            font-weight: 700;
+            margin-bottom: 2px;
+          }
+          .review-stars {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            margin: 2px 0 3px;
+          }
+          .final-message {
+            margin: 8px 0;
+            text-align: center;
+            font-size: 11px;
+            font-weight: 800;
+            line-height: 1.3;
+          }
+          .compact-contact {
+            text-align: center;
+            font-size: 9px;
+            line-height: 1.4;
+          }
         </style>
       </head>
       <body>
         ${buildThermalLogoHtml(logoPath, "Clinic logo")}
 
-        <div class="double">${receiptHeading}</div>
-
-        <div class="clinic-name">${clinicDisplayName}</div>
-
-        <div class="address">
-          ${clinicAddress
-            .split(/\\n|\n/)
-            .map((line: string) => `<div>${line}</div>`)
-            .join("")}
-          ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
-          ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
+        <div class="receipt-header">
+          <div class="clinic-name">${clinicDisplayName}</div>
+          <div class="address">
+            ${clinicAddress
+              .split(/\\n|\n/)
+              .map((line: string) => `<div>${line}</div>`)
+              .join("")}
+            ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
+            ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
+          </div>
         </div>
 
         <div class="hr"></div>
 
-        <div class="row"><span>Invoice No / رقم الفاتورة</span><span>: ${invoiceNumber}</span></div>
-        <div class="row"><span>Date / التاريخ</span><span>: ${dateValue}</span></div>
-        <div class="row"><span>Time / الوقت</span><span>: ${timeValue}</span></div>
-        <div class="row"><span>Cashier / أمين الصندوق</span><span>: ${cashierName}</span></div>
-        ${hasDoctorName ? `<div class="row"><span>${doctorLabel}</span><span>: ${normalizedDoctorName}</span></div>` : ""}
-        <div class="row"><span>Patient Name / اسم المريض</span><span>: ${patientName}</span></div>
-        <div class="row"><span>Patient ID / معرف المريض</span><span>: ${patientFileNumber}</span></div>
-        <div class="row"><span>Mobile / الهاتف</span><span>: ${patientPhone}</span></div>
+        <div class="double receipt-heading">${receiptHeading}</div>
+        <div class="invoice-box">Invoice No / رقم الفاتورة : ${invoiceNumber}</div>
 
-        <div class="hr"></div>
+        <div class="info-row"><span class="info-label">Date / التاريخ</span><span class="info-value">${dateValue}</span></div>
+        <div class="info-row"><span class="info-label">Time / الوقت</span><span class="info-value">${timeValue}</span></div>
+        <div class="info-row"><span class="info-label">Cashier / أمين الصندوق</span><span class="info-value">${cashierName}</span></div>
+        ${hasDoctorName ? `<div class="info-row"><span class="info-label">${doctorLabel}</span><span class="info-value">${normalizedDoctorName}</span></div>` : ""}
+        <div class="info-row"><span class="info-label">Patient ID / معرف المريض</span><span class="info-value">${patientFileNumber}</span></div>
+        <div class="info-row"><span class="info-label">Mobile / جوال</span><span class="info-value">${patientPhone}</span></div>
+
+        <div class="patient-block">
+          <span class="patient-label">Patient Name / اسم المريض</span>
+          <span class="patient-name">${patientName}</span>
+        </div>
+
+        <div class="section-divider"></div>
 
         <div class="head-row"><span>DESCRIPTION / الوصف</span><span>AMOUNT / المبلغ</span></div>
         <div class="hr" style="margin-top:2px;"></div>
         ${itemsHtml || '<div class="center">No services selected</div>'}
 
-        <div class="hr"></div>
+        <div class="section-divider"></div>
 
-        <div class="row"><span>Subtotal / Services</span><span>AED ${originalSubtotal.toFixed(2)}</span></div>
+        <div class="total-line"><span class="label">Subtotal / Services</span><span>AED ${originalSubtotal.toFixed(2)}</span></div>
         ${showSnapshotDiscountBreakdown && manualDiscountTotal > 0.0049 && globalDiscountTotal <= 0.0049
-          ? `<div class="row"><span>Discount</span><span>- AED ${manualDiscountTotal.toFixed(2)}</span></div>`
+          ? `<div class="total-line"><span class="label">Discount</span><span>- AED ${manualDiscountTotal.toFixed(2)}</span></div>`
           : ""}
         ${showSnapshotDiscountBreakdown && manualDiscountTotal > 0.0049 && globalDiscountTotal > 0.0049
-          ? `<div class="row"><span>Promo / Price Adjustments</span><span>- AED ${manualDiscountTotal.toFixed(2)}</span></div>`
+          ? `<div class="total-line"><span class="label">Promo / Price Adjustments</span><span>- AED ${manualDiscountTotal.toFixed(2)}</span></div>`
           : ""}
         ${showSnapshotDiscountBreakdown && globalDiscountTotal > 0.0049
-          ? `<div class="row"><span>Global Discount</span><span>- AED ${globalDiscountTotal.toFixed(2)}</span></div>`
+          ? `<div class="total-line"><span class="label">Global Discount</span><span>- AED ${globalDiscountTotal.toFixed(2)}</span></div>`
           : ""}
         ${!showSnapshotDiscountBreakdown && discountAmount > 0
-          ? `<div class="row"><span>Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>`
+          ? `<div class="total-line"><span class="label">Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>`
           : ""}
-        <div class="row"><span>Amount Before VAT / المبلغ قبل الضريبة</span><span>AED ${grandTotalBeforeFees.toFixed(2)}</span></div>
-        <div class="row"><span>VAT</span><span>AED ${vat.toFixed(2)}</span></div>
-        ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee</span><span>AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
-        <div class="hr" style="margin:4px 0;"></div>
-        <div class="row" style="font-weight:700;"><span>TOTAL / الإجمالي</span><span>AED ${(total + allocationFeeTotal).toFixed(2)}</span></div>
+        <div class="total-line"><span class="label">Amount Before VAT / المبلغ قبل الضريبة</span><span>AED ${grandTotalBeforeFees.toFixed(2)}</span></div>
+        <div class="total-line"><span class="label">VAT / الضريبة</span><span>AED ${vat.toFixed(2)}</span></div>
+        ${allocationFeeTotal > 0 ? `<div class="total-line"><span class="label">Payment Fee</span><span>AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
+        <div class="total-line total-strong"><span class="label">TOTAL / الإجمالي</span><span>AED ${(total + allocationFeeTotal).toFixed(2)}</span></div>
 
         <div class="hr"></div>
 
+        <div class="section-title">Payment Details</div>
         ${paymentSection}
         ${paymentStatusRows}
   ${notesForReceipt ? `
@@ -370,22 +508,34 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
 
         <div class="footer-center">${receiptVatNote}</div>
         <div class="footer-center">${receiptThankYou}</div>
-        ${socialHtml}
 
         <div class="hr"></div>
 
-        <div style="text-align:center;font-size:9px;line-height:1.4;">
+        <div class="compact-contact">
           ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
           ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
         </div>
 
         <div class="hr"></div>
 
-        ${qrHtml}
+        <div class="review-row">
+          <div class="review-qr-wrap">${qrHtml}</div>
+          <div class="review-divider"></div>
+          <div class="review-copy">
+            <div class="review-title">How did we do today?</div>
+            <div class="review-stars">★ ★ ★ ★ ★</div>
+            <div>Scan the QR code</div>
+            <div>to share your experience.</div>
+            <div>Your feedback helps us</div>
+            <div>serve you better.</div>
+          </div>
+        </div>
 
         <div class="hr"></div>
 
-        <div class="double">${receiptFinalMessage}</div>
+        <div class="final-message">${receiptFinalMessage}</div>
+
+        <div class="hr"></div>
       </body>
     </html>`;
 }

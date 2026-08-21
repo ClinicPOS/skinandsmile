@@ -18,7 +18,7 @@ import { printTreatmentPlanPaymentReceipt } from "../lib/print-treatment-plan-pa
 import { printHtmlWhenImagesReady } from "../lib/receipt-branding";
 import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 
-const PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Tabby", "Tabby Card", "Tamara", "Split Payment"] as const;
+const PAYMENT_MODE_OPTIONS = ["Cash", "Card", "Bank Transfer", "Tabby", "Tabby Card", "Tamara", "Split Payment"] as const;
 const PAYMENT_ARRANGEMENTS = [
   "Full payment today",
   "Down payment + remaining balance",
@@ -30,6 +30,7 @@ const PAYMENT_ARRANGEMENTS = [
 const ALLOCATION_METHOD_OPTIONS: Array<{ value: PaymentMethodVariant; label: string }> = [
   { value: "cash", label: "Cash" },
   { value: "card", label: "Card" },
+  { value: "bank_transfer", label: "Bank Transfer" },
   { value: "tabby_standard", label: "Tabby" },
   { value: "tabby_card", label: "Tabby Card" },
   { value: "tamara", label: "Tamara" },
@@ -79,6 +80,7 @@ function newAllocationDraft(methodVariant: PaymentMethodVariant | "" = "", amoun
 function modeToVariant(mode: string): PaymentMethodVariant {
   if (mode === "Cash") return "cash";
   if (mode === "Card") return "card";
+  if (mode === "Bank Transfer") return "bank_transfer";
   if (mode === "Tabby") return "tabby_standard";
   if (mode === "Tabby Card") return "tabby_card";
   if (mode === "Tamara") return "tamara";
