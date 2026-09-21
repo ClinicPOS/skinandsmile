@@ -28,6 +28,7 @@ import {
 import { ReportsControlBar } from "../../components/reports/reports-control-bar";
 import { ReportsDatePickerPopover } from "../../components/reports/reports-date-picker-popover";
 import { ReportsLoadingState } from "../../components/reports/reports-loading-state";
+import { ServicePerformanceSection } from "../../components/reports/service-performance-section";
 import { ReportsFrame } from "../../components/reports-frame";
 import { supabase } from "../../lib/supabase";
 import {
@@ -191,7 +192,7 @@ type ReportsSessionResponse = {
   accessLabel?: string;
 };
 
-type DashboardTab = "overview" | "clinics_doctors" | "trends_demand" | "payments";
+type DashboardTab = "overview" | "clinics_doctors" | "trends_demand" | "services" | "payments";
 type ReportsQuickPreset =
   | "today"
   | "yesterday"
@@ -214,6 +215,7 @@ const TABS: Array<{ id: DashboardTab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "clinics_doctors", label: "Clinics & Doctors" },
   { id: "trends_demand", label: "Trends" },
+  { id: "services", label: "Services" },
   { id: "payments", label: "Payments" },
 ];
 
@@ -1700,6 +1702,14 @@ export default function ReportsPage() {
                 )}
               </SectionCard>
             </div>
+          ) : null}
+
+          {tab === "services" ? (
+            <ServicePerformanceSection
+              clinicId={clinicId}
+              startDate={dateSelection.startDate}
+              endDate={dateSelection.endDate}
+            />
           ) : null}
 
           {tab === "payments" ? (

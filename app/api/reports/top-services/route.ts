@@ -1,318 +1,183 @@
-import { createClient } from "@supabase/supabase-js";
+import { createServerSupabaseClient, readAppSession } from "../../../../lib/api-session";
+import { fromMinorUnits, toMinorUnits } from "../../../../lib/money";
+import { fetchAllPages } from "../../../../lib/paginated-fetch";
+import { canAccessReports } from "../../../../lib/session-auth";
 
 export const dynamic = "force-dynamic";
 
-type ReceiptRow = {
-  id: string;
-  patient_id: string | null;
-  receptionist_id: string;
-  created_at: string;
-};
-
+type ReceiptRow = { id: string; clinic_id: string | null; patient_id: string | null; created_at: string; transaction_type?: string | null };
 type ReceiptItemRow = {
-  receipt_id: string;
-  service_id: string;
-  total: number | string | null;
-  price: number | string | null;
+  id: string; receipt_id: string; service_id: string; quantity: number | null;
+  price: number | string | null; original_price: number | string | null; total: number | string | null;
+  service_name_snapshot: string | null; taxable_amount: number | string | null;
+};
+type ServiceRow = { id: string; name: string | null; display_name: string | null; category: string | null; category_id: string | null };
+type RefundItemRow = { receipt_item_id: string | null; amount: number | string | null; refunded_treatment_amount: number | string | null };
+type ServiceAccumulator = {
+  id: string; name: string; category: string; quantity: number; grossMinor: number;
+  discountMinor: number; refundMinor: number; patientIds: Set<string>; trendMinor: Map<string, number>;
 };
 
-type ServiceRow = {
-  id: string;
-  name: string | null;
-};
+const PAGE_SIZE = 1000;
+const ID_BATCH_SIZE = 100;
 
-type ServiceAggregate = {
-  id: string;
-  name: string;
-  count: number;
-  revenue: number;
-  patientIds: Set<string>;
-  doctorIds: Set<string>;
-};
-
-function parseDateParam(value: string | null): Date | null {
-  if (!value) return null;
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return parsed;
+function parseDubaiRange(startDate: unknown, endDate: unknown) {
+  const start = String(startDate || "");
+  const end = String(endDate || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || end < start) {
+    throw new Error("A valid startDate and endDate are required.");
+  }
+  const startDateValue = new Date(`${start}T00:00:00+04:00`);
+  const endExclusive = new Date(`${end}T00:00:00+04:00`);
+  endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
+  const days = Math.floor((endExclusive.getTime() - startDateValue.getTime()) / 86_400_000);
+  if (!Number.isFinite(days) || days < 1 || days > 3660) throw new Error("The selected date range is invalid or too large.");
+  return { start, end, startIso: startDateValue.toISOString(), endIso: endExclusive.toISOString(), days };
 }
 
-function formatTrendLabel(dateValue: string): string {
-  return new Date(dateValue).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-  });
+function trendLabel(key: string, granularity: "day" | "month") {
+  const date = new Date(`${granularity === "month" ? `${key}-01` : key}T00:00:00+04:00`);
+  return date.toLocaleDateString("en-GB", granularity === "month"
+    ? { month: "short", year: "numeric", timeZone: "Asia/Dubai" }
+    : { day: "numeric", month: "short", timeZone: "Asia/Dubai" });
 }
 
-function getItemRevenue(item: ReceiptItemRow): number {
-  return Number(item.total ?? item.price ?? 0);
+async function fetchByIds<Row>(
+  supabase: ReturnType<typeof createServerSupabaseClient>, table: string, columns: string, field: string, ids: string[],
+) {
+  const rows: Row[] = [];
+  for (let offset = 0; offset < ids.length; offset += ID_BATCH_SIZE) {
+    const chunk = ids.slice(offset, offset + ID_BATCH_SIZE);
+    const pageRows = await fetchAllPages<Row>(async (from, to) => {
+      const { data, error } = await supabase
+        .from(table).select(columns).in(field, chunk).order("id", { ascending: true }).range(from, to);
+      return { data: (data || []) as Row[], error };
+    }, PAGE_SIZE);
+    rows.push(...pageRows);
+  }
+  return rows;
 }
 
-function getErrorDetails(error: unknown) {
-  if (error instanceof Error) {
-    return {
-      message: error.message,
-      name: error.name,
-    };
+export async function POST(request: Request) {
+  const supabase = createServerSupabaseClient();
+  const { session, errorResponse } = await readAppSession(supabase);
+  if (!session) return errorResponse!;
+  if (!canAccessReports(session)) return Response.json({ error: "Forbidden." }, { status: 403 });
+
+  const body = await request.json().catch(() => null);
+  let range: ReturnType<typeof parseDubaiRange>;
+  try {
+    range = parseDubaiRange(body?.startDate, body?.endDate);
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : "Invalid date range." }, { status: 400 });
   }
 
-  if (error && typeof error === "object") {
-    const errorRecord = error as Record<string, unknown>;
-    return {
-      message: typeof errorRecord.message === "string" ? errorRecord.message : "Failed to load top services analytics.",
-      details: typeof errorRecord.details === "string" ? errorRecord.details : undefined,
-      hint: typeof errorRecord.hint === "string" ? errorRecord.hint : undefined,
-      code: typeof errorRecord.code === "string" ? errorRecord.code : undefined,
-    };
-  }
-
-  return {
-    message: typeof error === "string" ? error : "Failed to load top services analytics.",
-  };
-}
-
-export async function GET(request: Request) {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return Response.json({ error: "Supabase configuration is missing." }, { status: 500 });
-  }
-
-  const url = new URL(request.url);
-  const clinicId = url.searchParams.get("clinicId");
-  const serviceId = url.searchParams.get("serviceId");
-  const from = parseDateParam(url.searchParams.get("from"));
-  const to = parseDateParam(url.searchParams.get("to"));
-
-  if (!from || !to) {
-    return Response.json({ error: "Valid from and to query parameters are required." }, { status: 400 });
-  }
-
-  const supabase = createClient(supabaseUrl, supabaseAnonKey);
+  const clinicId = String(body?.clinicId || "").trim() || null;
+  const categoryFilter = String(body?.category || "").trim();
+  const serviceIdFilter = String(body?.serviceId || "").trim();
 
   try {
-    let receptionistIds: string[] | null = null;
+    const receipts = await fetchAllPages<ReceiptRow>((from, to) => {
+      let query = supabase.from("receipts")
+        .select("id, clinic_id, patient_id, created_at, transaction_type")
+        .gte("created_at", range.startIso).lt("created_at", range.endIso)
+        .order("created_at", { ascending: true }).order("id", { ascending: true }).range(from, to);
+      if (clinicId) query = query.eq("clinic_id", clinicId);
+      return query;
+    }, PAGE_SIZE);
 
-    if (clinicId) {
-      const { data: clinicReceptionists, error: receptionistsError } = await supabase
-        .from("receptionist")
-        .select("id")
-        .eq("clinic_id", clinicId);
+    const validReceipts = receipts.filter((receipt) => String(receipt.transaction_type || "regular") !== "plan_summary");
+    const receiptMap = new Map(validReceipts.map((receipt) => [receipt.id, receipt]));
+    const items = await fetchByIds<ReceiptItemRow>(supabase, "receipt_items",
+      "id, receipt_id, service_id, quantity, price, original_price, total, service_name_snapshot, taxable_amount",
+      "receipt_id", validReceipts.map((receipt) => receipt.id));
+    const serviceIds = [...new Set(items.map((item) => item.service_id).filter(Boolean))];
+    const services = await fetchByIds<ServiceRow>(supabase, "services", "id, name, display_name, category, category_id", "id", serviceIds);
+    const serviceMap = new Map(services.map((service) => [service.id, service]));
+    const refundItems = await fetchByIds<RefundItemRow>(supabase, "refund_items",
+      "id, receipt_item_id, amount, refunded_treatment_amount", "receipt_item_id", items.map((item) => item.id));
 
-      if (receptionistsError) {
-        throw receptionistsError;
-      }
-
-      receptionistIds = (clinicReceptionists || []).map((entry) => entry.id);
-
-      if (receptionistIds.length === 0) {
-        return Response.json({
-          summary: {
-            services: [],
-            totalRevenue: 0,
-            uniqueServices: 0,
-            mostPerformed: null,
-            highestRevenue: null,
-          },
-          detail: null,
-        });
-      }
+    const refundMinorByItem = new Map<string, number>();
+    for (const refund of refundItems) {
+      if (!refund.receipt_item_id) continue;
+      const treatment = refund.refunded_treatment_amount ?? refund.amount ?? 0;
+      refundMinorByItem.set(refund.receipt_item_id, (refundMinorByItem.get(refund.receipt_item_id) || 0) + toMinorUnits(Number(treatment)));
     }
 
-    let receiptsQuery = supabase
-      .from("receipts")
-      .select("id, patient_id, receptionist_id, created_at")
-      .gte("created_at", from.toISOString())
-      .lt("created_at", to.toISOString());
+    const granularity: "day" | "month" = range.days <= 92 ? "day" : "month";
+    const aggregates = new Map<string, ServiceAccumulator>();
+    let legacyPricingRows = 0;
 
-    if (receptionistIds) {
-      receiptsQuery = receiptsQuery.in("receptionist_id", receptionistIds);
-    }
-
-    const { data: receipts, error: receiptsError } = await receiptsQuery;
-
-    if (receiptsError) {
-      throw receiptsError;
-    }
-
-    const filteredReceipts = (receipts || []) as ReceiptRow[];
-    if (filteredReceipts.length === 0) {
-      return Response.json({
-        summary: {
-          services: [],
-          totalRevenue: 0,
-          uniqueServices: 0,
-          mostPerformed: null,
-          highestRevenue: null,
-        },
-        detail: null,
-      });
-    }
-
-    const receiptIds = filteredReceipts.map((receipt) => receipt.id);
-    const receiptMap = new Map(filteredReceipts.map((receipt) => [receipt.id, receipt]));
-
-    const { data: receiptItems, error: itemsError } = await supabase
-      .from("receipt_items")
-      .select("receipt_id, service_id, total, price")
-      .in("receipt_id", receiptIds);
-
-    if (itemsError) {
-      throw itemsError;
-    }
-
-    const serviceMap: Record<string, ServiceAggregate> = {};
-    const relevantItems = (receiptItems || []) as ReceiptItemRow[];
-    const serviceIds = Array.from(new Set(relevantItems.map((item) => item.service_id)));
-    const serviceNameMap = new Map<string, string>();
-
-    if (serviceIds.length > 0) {
-      const { data: services, error: servicesError } = await supabase
-        .from("services")
-        .select("id, name")
-        .in("id", serviceIds);
-
-      if (servicesError) {
-        throw servicesError;
-      }
-
-      for (const service of (services || []) as ServiceRow[]) {
-        if (service.name) {
-          serviceNameMap.set(service.id, service.name);
-        }
-      }
-    }
-
-    for (const item of relevantItems) {
-      const name = serviceNameMap.get(item.service_id) || "Unknown Service";
-      const aggregate = serviceMap[item.service_id] || {
-        id: item.service_id,
-        name,
-        count: 0,
-        revenue: 0,
-        patientIds: new Set<string>(),
-        doctorIds: new Set<string>(),
-      };
-
-      aggregate.count += 1;
-      aggregate.revenue += getItemRevenue(item);
-
+    for (const item of items) {
       const receipt = receiptMap.get(item.receipt_id);
-      if (receipt?.patient_id) {
-        aggregate.patientIds.add(receipt.patient_id);
-      }
+      if (!receipt) continue;
+      const service = serviceMap.get(item.service_id);
+      const category = String(service?.category || service?.category_id || "Uncategorized").trim() || "Uncategorized";
+      if (categoryFilter && category !== categoryFilter) continue;
+      if (serviceIdFilter && item.service_id !== serviceIdFilter) continue;
 
-      serviceMap[item.service_id] = aggregate;
-    }
-
-    const services = Object.values(serviceMap)
-      .map((service) => ({
-        id: service.id,
-        name: service.name,
-        count: service.count,
-        revenue: service.revenue,
-        patientCount: service.patientIds.size,
-        doctorCount: service.doctorIds.size,
-      }))
-      .sort((left, right) => right.revenue - left.revenue);
-
-    const totalRevenue = services.reduce((sum, service) => sum + service.revenue, 0);
-    const servicesWithShare = services.map((service, index) => ({
-      ...service,
-      revenueShare: totalRevenue > 0 ? (service.revenue / totalRevenue) * 100 : 0,
-      isTopPerformer: index === 0,
-    }));
-
-    const summary = {
-      services: servicesWithShare,
-      totalRevenue,
-      uniqueServices: servicesWithShare.length,
-      mostPerformed:
-        servicesWithShare.length > 0
-          ? servicesWithShare.reduce((best, current) => (current.count > best.count ? current : best), servicesWithShare[0])
-          : null,
-      highestRevenue: servicesWithShare[0] || null,
-    };
-
-    let detail = null;
-
-    if (serviceId && serviceMap[serviceId]) {
-      const selectedAggregate = serviceMap[serviceId];
-      const selectedItems = relevantItems.filter((item) => item.service_id === serviceId);
-      const patientIds = Array.from(selectedAggregate.patientIds);
-      const doctorIds = Array.from(selectedAggregate.doctorIds);
-
-      const [patientsResult, doctorsResult] = await Promise.all([
-        patientIds.length > 0
-          ? supabase.from("patients").select("id, name").in("id", patientIds)
-          : Promise.resolve({ data: [], error: null }),
-        doctorIds.length > 0
-          ? supabase.from("doctors").select("id, name").in("id", doctorIds)
-          : Promise.resolve({ data: [], error: null }),
-      ]);
-
-      if (patientsResult.error) {
-        throw patientsResult.error;
-      }
-      if (doctorsResult.error) {
-        throw doctorsResult.error;
-      }
-
-      const patientNameMap = new Map((patientsResult.data || []).map((patient) => [patient.id, patient.name]));
-      const doctorNameMap = new Map((doctorsResult.data || []).map((doctor) => [doctor.id, doctor.name]));
-
-      const trendMap = new Map<string, { date: string; label: string; revenue: number; count: number }>();
-
-      for (const item of selectedItems) {
-        const receipt = receiptMap.get(item.receipt_id);
-        if (!receipt) continue;
-
-        const dayKey = receipt.created_at.slice(0, 10);
-        const trendEntry = trendMap.get(dayKey) || {
-          date: dayKey,
-          label: formatTrendLabel(receipt.created_at),
-          revenue: 0,
-          count: 0,
-        };
-
-        trendEntry.revenue += getItemRevenue(item);
-        trendEntry.count += 1;
-        trendMap.set(dayKey, trendEntry);
-      }
-
-      detail = {
-        id: selectedAggregate.id,
-        name: selectedAggregate.name,
-        revenue: selectedAggregate.revenue,
-        count: selectedAggregate.count,
-        averagePrice: selectedAggregate.count > 0 ? selectedAggregate.revenue / selectedAggregate.count : 0,
-        patientCount: patientIds.length,
-        revenueShare: totalRevenue > 0 ? (selectedAggregate.revenue / totalRevenue) * 100 : 0,
-        patients: patientIds.map((patientId) => ({
-          id: patientId,
-          name: patientNameMap.get(patientId) || patientId,
-        })),
-        doctors: doctorIds.map((doctorId) => ({
-          id: doctorId,
-          name: doctorNameMap.get(doctorId) || doctorId,
-        })),
-        revenueTrend: Array.from(trendMap.values()).sort((left, right) => left.date.localeCompare(right.date)),
+      const quantity = Math.max(1, Number(item.quantity || 1));
+      const chargedMinor = toMinorUnits(Number(item.taxable_amount ?? item.total ?? (Number(item.price || 0) * quantity)));
+      if (item.taxable_amount == null) legacyPricingRows += 1;
+      const grossMinor = toMinorUnits(Number(item.original_price ?? item.price ?? 0) * quantity);
+      const safeGrossMinor = Math.max(grossMinor, chargedMinor);
+      const refundMinor = Math.min(chargedMinor, refundMinorByItem.get(item.id) || 0);
+      const day = new Date(receipt.created_at).toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" });
+      const bucket = granularity === "day" ? day : day.slice(0, 7);
+      const name = String(item.service_name_snapshot || service?.display_name || service?.name || "Unknown Service");
+      const aggregate = aggregates.get(item.service_id) || {
+        id: item.service_id, name, category, quantity: 0, grossMinor: 0, discountMinor: 0,
+        refundMinor: 0, patientIds: new Set<string>(), trendMinor: new Map<string, number>(),
       };
+      aggregate.quantity += quantity;
+      aggregate.grossMinor += safeGrossMinor;
+      aggregate.discountMinor += Math.max(0, safeGrossMinor - chargedMinor);
+      aggregate.refundMinor += refundMinor;
+      if (receipt.patient_id) aggregate.patientIds.add(receipt.patient_id);
+      aggregate.trendMinor.set(bucket, (aggregate.trendMinor.get(bucket) || 0) + chargedMinor - refundMinor);
+      aggregates.set(item.service_id, aggregate);
     }
 
-    return Response.json({ summary, detail });
-  } catch (error) {
-    const errorDetails = getErrorDetails(error);
-    console.error("Top services analytics error:", errorDetails);
-    return Response.json(
-      {
-        error: errorDetails.message,
-        details: errorDetails.details,
-        hint: errorDetails.hint,
-        code: errorDetails.code,
+    const totalNetMinor = [...aggregates.values()].reduce(
+      (sum, service) => sum + Math.max(0, service.grossMinor - service.discountMinor - service.refundMinor), 0);
+    const rows = [...aggregates.values()].map((service) => {
+      const netMinor = Math.max(0, service.grossMinor - service.discountMinor - service.refundMinor);
+      return {
+        id: service.id, name: service.name, category: service.category, quantity: service.quantity,
+        uniquePatients: service.patientIds.size, grossSales: fromMinorUnits(service.grossMinor),
+        discounts: fromMinorUnits(service.discountMinor), refunds: fromMinorUnits(service.refundMinor),
+        netRevenue: fromMinorUnits(netMinor), revenueShare: totalNetMinor > 0 ? (netMinor / totalNetMinor) * 100 : 0,
+        averageRevenuePerSale: service.quantity > 0 ? fromMinorUnits(Math.round(netMinor / service.quantity)) : 0,
+      };
+    }).sort((left, right) => right.netRevenue - left.netRevenue || left.name.localeCompare(right.name))
+      .map((row, index) => ({ ...row, rank: index + 1 }));
+
+    const categoryMap = new Map<string, number>();
+    for (const row of rows) categoryMap.set(row.category, (categoryMap.get(row.category) || 0) + toMinorUnits(row.netRevenue));
+    const selected = serviceIdFilter ? aggregates.get(serviceIdFilter) : null;
+    const trend = selected ? [...selected.trendMinor.entries()].sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => ({ key, label: trendLabel(key, granularity), revenue: fromMinorUnits(value) })) : [];
+    const allServiceOptions = services.map((service) => ({
+      id: service.id, name: String(service.display_name || service.name || "Unknown Service"),
+      category: String(service.category || service.category_id || "Uncategorized").trim() || "Uncategorized",
+    })).sort((left, right) => left.name.localeCompare(right.name));
+    const categories = [...new Set(allServiceOptions.map((service) => service.category))].sort();
+    const totalQuantity = rows.reduce((sum, row) => sum + row.quantity, 0);
+
+    return Response.json({
+      meta: { startDate: range.start, endDate: range.end, clinicId, granularity, legacyPricingRows },
+      summary: {
+        totalServiceRevenue: fromMinorUnits(totalNetMinor), topRevenueService: rows[0] || null,
+        servicesSold: rows.length, quantitySold: totalQuantity,
+        averageRevenuePerServiceSale: totalQuantity > 0 ? fromMinorUnits(Math.round(totalNetMinor / totalQuantity)) : 0,
       },
-      { status: 500 }
-    );
+      services: rows, categories, serviceOptions: allServiceOptions,
+      categoryRevenue: [...categoryMap.entries()].map(([category, minor]) => ({ category, revenue: fromMinorUnits(minor) }))
+        .sort((left, right) => right.revenue - left.revenue),
+      trend,
+    });
+  } catch (error) {
+    console.error("Service performance report error:", error);
+    return Response.json({ error: error instanceof Error ? error.message : "Unable to load service performance." }, { status: 500 });
   }
 }
