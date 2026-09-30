@@ -2329,7 +2329,7 @@ export default function ReceiptsPage() {
     }> = [];
     const treatmentPlansById = new Map<string, any>();
     const treatmentPlanVisitCounts = new Map<string, number>();
-    const treatmentPlanPaidToDate = new Map<string, number>();
+    const treatmentPlanRollups = new Map<string, ReturnType<typeof computeTreatmentPlanRollup>>();
     const relevantTreatmentPlanIds = new Set<string>();
     let treatmentPlanTabbyFeeTotal = 0;
     let treatmentPlanTamaraFeeTotal = 0;
@@ -2339,7 +2339,7 @@ export default function ReceiptsPage() {
 
     const { data: treatmentPlansCreatedData, error: treatmentPlansCreatedError } = await supabase
       .from("treatment_plans")
-      .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, created_at, completed_at, patients(name, patient_number)")
+      .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, patients(name, patient_number)")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -2375,7 +2375,7 @@ export default function ReceiptsPage() {
     let treatmentPlanInitialSalesTotal = 0;
     const { data: treatmentPlanPaymentRecordsData, error: treatmentPlanPaymentRecordsError } = await supabase
       .from("treatment_plan_payment_records")
-      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status), patients(name, patient_number)")
+      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid), patients(name, patient_number)")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -2417,7 +2417,7 @@ export default function ReceiptsPage() {
       if (missingPlanIds.length > 0) {
         const { data: missingPlansData, error: missingPlansError } = await supabase
           .from("treatment_plans")
-          .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, created_at, completed_at, patients(name, patient_number)")
+          .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, patients(name, patient_number)")
           .eq("clinic_id", activeClinic.id)
           .in("id", missingPlanIds)
           .order("created_at", { ascending: true });
@@ -2430,10 +2430,15 @@ export default function ReceiptsPage() {
         }
       }
 
-      const [allPlanPaymentsResult, allPlanVisitsResult] = await Promise.all([
+      const [allPlanPaymentRecordsResult, allLegacyPlanPaymentsResult, allPlanVisitsResult] = await Promise.all([
         supabase
           .from("treatment_plan_payment_records")
-          .select("treatment_plan_id, total_invoice_amount_settled, created_at")
+          .select("id, treatment_plan_id, total_invoice_amount_settled, status, legacy_treatment_plan_payment_id, created_at")
+          .in("treatment_plan_id", planIds)
+          .lte("created_at", endUtcIso),
+        supabase
+          .from("treatment_plan_payments")
+          .select("id, treatment_plan_id, amount, source_payment_record_id, notes, created_at")
           .in("treatment_plan_id", planIds)
           .lte("created_at", endUtcIso),
         supabase
@@ -2442,12 +2447,29 @@ export default function ReceiptsPage() {
           .in("treatment_plan_id", planIds),
       ]);
 
-      if (!allPlanPaymentsResult.error) {
-        (allPlanPaymentsResult.data || []).forEach((payment: any) => {
-          const planId = String(payment.treatment_plan_id || "");
-          treatmentPlanPaidToDate.set(planId, (treatmentPlanPaidToDate.get(planId) || 0) + Number(payment.total_invoice_amount_settled || 0));
-        });
+      if (allPlanPaymentRecordsResult.error) {
+        console.warn("Failed loading structured treatment-plan payments for report", allPlanPaymentRecordsResult.error);
       }
+      if (allLegacyPlanPaymentsResult.error) {
+        console.warn("Failed loading legacy treatment-plan payments for report", allLegacyPlanPaymentsResult.error);
+      }
+      const structuredPayments = (allPlanPaymentRecordsResult.data || []) as TreatmentPlanPaymentRecord[];
+      const legacyPayments = (allLegacyPlanPaymentsResult.data || []) as Array<{
+        id: string;
+        treatment_plan_id: string;
+        amount: number | null;
+        source_payment_record_id?: string | null;
+        notes?: string | null;
+        created_at?: string | null;
+      }>;
+      [...treatmentPlansById.values()].forEach((plan: any) => {
+        const planId = String(plan.id || "");
+        treatmentPlanRollups.set(planId, computeTreatmentPlanRollup(plan, {
+          structuredPayments: structuredPayments.filter((payment) => payment.treatment_plan_id === planId),
+          legacyPayments: legacyPayments.filter((payment) => payment.treatment_plan_id === planId),
+          asOf: endUtcIso,
+        }));
+      });
       if (!allPlanVisitsResult.error) {
         (allPlanVisitsResult.data || []).forEach((visit: any) => {
           const planId = String(visit.treatment_plan_id || "");
@@ -2459,7 +2481,8 @@ export default function ReceiptsPage() {
         const patient = Array.isArray(plan.patients) ? plan.patients[0] : plan.patients;
         const planId = String(plan.id || "");
         const totalAmount = Number(plan.total_amount || 0);
-        const paidToDate = treatmentPlanPaidToDate.get(planId) || 0;
+        const rollup = treatmentPlanRollups.get(planId) || computeTreatmentPlanRollup(plan, { asOf: endUtcIso });
+        const paidToDate = rollup.totalPaidToDate;
         const completedVisits = Math.max(
           treatmentPlanVisitCounts.get(planId) || 0,
           plan?.clinic_patient_file_id ? 1 : 0
@@ -2477,7 +2500,7 @@ export default function ReceiptsPage() {
           plan.status || "",
           totalAmount,
           paidToDate,
-          Math.max(0, totalAmount - paidToDate),
+          rollup.remainingBalance,
           `${completedVisits} / ${Number(plan.planned_visits || 1)}`,
           plan.notes || "",
         ]);
@@ -2517,8 +2540,12 @@ export default function ReceiptsPage() {
       const planId = String(payment.treatment_plan_id || "");
       const totalAmount = Number(plan?.total_amount || 0);
       const invoiceSettled = Number(payment.total_invoice_amount_settled || 0);
-      const paidAfterToday = treatmentPlanPaidToDate.get(planId) || invoiceSettled;
-      const remainingAfterToday = Math.max(0, totalAmount - paidAfterToday);
+      const rollup = treatmentPlanRollups.get(planId) || computeTreatmentPlanRollup(plan, {
+        structuredPayments: [payment],
+        asOf: endUtcIso,
+      });
+      const paidAfterToday = rollup.totalPaidToDate;
+      const remainingAfterToday = rollup.remainingBalance;
       const paymentAllocations = treatmentPlanAllocationsByPaymentId.get(String(payment.id || "")) || [];
       const allocationNotes = paymentAllocations
         .map((allocation) => {
