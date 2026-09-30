@@ -50,6 +50,7 @@ import {
 } from "../lib/receipt-refunds";
 import { buildTreatmentPlanPaymentRpcArgs } from "../lib/treatment-plan-payment-records";
 import { computeTreatmentPlanRollup } from "../lib/treatment-plan-rollup";
+import { canAddTreatmentPlanVisit, getTreatmentPlanCompletedVisitCount } from "../lib/treatment-plan-visits";
 import { mapRegularReceiptRenderLine, summarizeRegularReceiptForRender } from "../lib/regular-receipt-rendering";
 
 type Patient = {
@@ -701,7 +702,7 @@ export function SearchPatientModal({
   }
 
   function planCompletedVisits(plan: TreatmentPlan) {
-    return Math.max(planVisitsCount(plan.id), plan.clinic_patient_file_id ? 1 : 0);
+    return getTreatmentPlanCompletedVisitCount(planVisitsCount(plan.id), !!plan.clinic_patient_file_id);
   }
 
   function startPlanPayment(plan: TreatmentPlan) {
@@ -717,6 +718,10 @@ export function SearchPatientModal({
   }
 
   function startPlanVisit(plan: TreatmentPlan) {
+    if (!canAddTreatmentPlanVisit(plan.planned_visits, planCompletedVisits(plan))) {
+      alert("This treatment plan has reached its planned visit limit. Create a new add-on plan for further treatment.");
+      return;
+    }
     setVisitPlanId(plan.id);
     setVisitDoctorId("");
     setVisitNotes("");
@@ -1014,51 +1019,36 @@ export function SearchPatientModal({
 
   async function saveTreatmentVisit(plan: TreatmentPlan) {
     if (!selectedPatient) return;
-    const nextVisitNumber = planVisitsCount(plan.id) + 1;
-    if (nextVisitNumber > Number(plan.planned_visits || 1) + 20) {
-      alert("This visit count looks too high. Check the treatment plan first.");
+    if (!canAddTreatmentPlanVisit(plan.planned_visits, planCompletedVisits(plan))) {
+      alert("This treatment plan has reached its planned visit limit. Create a new add-on plan for further treatment.");
       return;
     }
 
     setSavingTreatmentVisit(true);
     try {
-      const { data, error } = await supabase
-        .from("treatment_plan_visits")
-        .insert([
-          {
-            treatment_plan_id: plan.id,
-            visit_number: nextVisitNumber,
-            doctor_id: visitDoctorId || null,
-            receptionist_id: receptionistId || null,
-            notes: visitNotes.trim() || null,
-          },
-        ])
-        .select()
-        .single();
-
-      if (error) {
-        console.error("Record treatment visit failed:", error);
-        alert(`Error: ${error.message || "Unknown error"}`);
+      const response = await fetch("/api/treatment-plan-visits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          treatmentPlanId: plan.id,
+          doctorId: visitDoctorId || null,
+          notes: visitNotes.trim() || null,
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.visit) {
+        alert(`Error: ${result.error || "Treatment-plan visit could not be saved."}`);
         return;
       }
 
-      const visit = data as TreatmentPlanVisit;
+      const visit = result.visit as TreatmentPlanVisit;
       setTreatmentPlanVisits((prev) => [visit, ...prev]);
+      if (result.plan) {
+        setTreatmentPlans((prev) => prev.map((item) => item.id === plan.id ? result.plan as TreatmentPlan : item));
+      }
       setVisitPlanId(null);
       setVisitDoctorId("");
       setVisitNotes("");
-
-      if (nextVisitNumber >= Number(plan.planned_visits || 1) && planRemaining(plan) <= 0.0049 && plan.status === "Active") {
-        const { data: updatedPlan } = await supabase
-          .from("treatment_plans")
-          .update({ status: "Completed", completed_at: new Date().toISOString() })
-          .eq("id", plan.id)
-          .select()
-          .single();
-        if (updatedPlan) {
-          setTreatmentPlans((prev) => prev.map((item) => item.id === plan.id ? updatedPlan as TreatmentPlan : item));
-        }
-      }
     } finally {
       setSavingTreatmentVisit(false);
     }
@@ -1657,6 +1647,7 @@ export function SearchPatientModal({
                       const completedVisits = planCompletedVisits(plan);
                       const remainingVisits = Math.max(0, Number(plan.planned_visits || 0) - completedVisits);
                       const isFullyPaid = remaining <= 0.0049;
+                      const canAddVisit = canAddTreatmentPlanVisit(plan.planned_visits, completedVisits);
                       return (
                         <div key={plan.id} className="rounded-2xl border border-cyan-200 bg-white p-4">
                           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1688,12 +1679,22 @@ export function SearchPatientModal({
                             </div>
                           </div>
                           <div className="mt-3 flex flex-wrap gap-2">
-                            <button
-                              onClick={() => startPlanVisit(plan)}
-                              className="rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-100"
-                            >
-                              Add Visit
-                            </button>
+                            {canAddVisit ? (
+                              <button
+                                onClick={() => startPlanVisit(plan)}
+                                className="rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-100"
+                              >
+                                Add Visit
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled
+                                className="cursor-not-allowed rounded-xl border border-slate-200 bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-500"
+                              >
+                                Visit Limit Reached
+                              </button>
+                            )}
                             {remaining > 0.0049 && (
                               <button
                                 onClick={() => startPlanPayment(plan)}
