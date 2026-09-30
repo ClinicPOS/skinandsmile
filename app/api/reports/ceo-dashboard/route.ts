@@ -3,11 +3,13 @@ import { extractLegacyCashAmount } from "../../../../lib/cash-deductions";
 import { computeTreatmentPlanRollup } from "../../../../lib/treatment-plan-rollup";
 import { createServerSupabaseClient, readAppSession } from "../../../../lib/api-session";
 import { canAccessReports } from "../../../../lib/session-auth";
+import { fetchAllPages } from "../../../../lib/paginated-fetch";
 
 export const dynamic = "force-dynamic";
 
 type ReceiptRow = {
   id: string;
+  clinic_id: string | null;
   patient_id: string | null;
   receptionist_id: string | null;
   doctor_id: string | null;
@@ -82,8 +84,11 @@ type OutstandingBalanceRow = {
 };
 
 type BalancePaymentRow = {
+  id?: string;
   outstanding_balance_id: string;
   amount: number | null;
+  receptionist_id?: string | null;
+  payment_method?: string | null;
   created_at: string;
 };
 
@@ -118,6 +123,8 @@ type TreatmentPlanPaymentRecordRow = {
 };
 
 type CashSupplementRow = {
+  clinic_id?: string | null;
+  outstanding_balance_id?: string | null;
   amount: number | null;
   receptionist_id: string | null;
   payment_method?: string | null;
@@ -363,99 +370,66 @@ export async function POST(request: Request) {
     const rows: RowType[] = [];
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
-      const { data, error } = await supabase
+      const chunkRows = await fetchAllPages<RowType>((from, to) => supabase
         .from(tableName)
         .select(selectClause)
-        .in(filterColumn, chunk);
-      if (error) throw error;
-      rows.push(...((data || []) as RowType[]));
+        .in(filterColumn, chunk)
+        .order("id", { ascending: true })
+        .range(from, to) as unknown as PromiseLike<{ data: RowType[] | null; error: { message?: string; code?: string } | null }>);
+      rows.push(...chunkRows);
     }
     return rows;
   };
 
-  const [clinicsRes, receptionistsRes, doctorsRes] = await Promise.all([
-    supabase.from("clinics").select("id, name").order("name", { ascending: true }),
-    supabase.from("receptionist").select("id, clinic_id"),
-    supabase.from("doctors").select("id, name, clinic_id"),
+  const [clinics, receptionists, doctors] = await Promise.all([
+    fetchAllPages<{ id: string; name: string }>((from, to) => supabase.from("clinics").select("id, name").order("id", { ascending: true }).range(from, to)),
+    fetchAllPages<ReceptionistRow>((from, to) => supabase.from("receptionist").select("id, clinic_id").order("id", { ascending: true }).range(from, to)),
+    fetchAllPages<DoctorRow>((from, to) => supabase.from("doctors").select("id, name, clinic_id").order("id", { ascending: true }).range(from, to)),
   ]);
-  if (clinicsRes.error || receptionistsRes.error || doctorsRes.error) {
-    return Response.json({ error: "Failed to load master data." }, { status: 500 });
-  }
-
-  const clinics = (clinicsRes.data || []) as Array<{ id: string; name: string }>;
-  const receptionists = (receptionistsRes.data || []) as ReceptionistRow[];
-  const doctors = (doctorsRes.data || []) as DoctorRow[];
   const receptionistClinicMap = new Map(receptionists.map((row) => [row.id, row.clinic_id || ""]));
   const clinicIds = clinicId ? [clinicId] : clinics.map((clinic) => clinic.id);
-  const selectedReceptionistIds = new Set(
-    receptionists.filter((row) => clinicIds.includes(String(row.clinic_id || ""))).map((row) => row.id)
-  );
-
   if (clinicId && !clinics.some((clinic) => clinic.id === clinicId)) {
     return Response.json({ error: "Invalid clinic filter." }, { status: 400 });
   }
-  if (selectedReceptionistIds.size === 0 && clinicId) {
-    return Response.json({
-      meta: { currentRange, compareRange, lastUpdatedAt: new Date().toISOString() },
-      overview: null,
-      clinicPerformance: [],
-      doctorPerformance: [],
-      trends: {
-        sales: { granularity: "day", points: [] },
-        monthly: [],
-        patientDemand: { historyDays: 0, message: "Not enough history.", dayOfWeek: [], dayOfMonthBuckets: [] },
-      },
-      payments: { methods: [], missingAllocationCoverage: true },
-      cashManagement: {
-        cashCollected: 0,
-        commissionsPaid: 0,
-        expensesPaid: 0,
-        totalCashDeductions: 0,
-        cashAfterDeductions: 0,
-        details: [],
-      },
-      attentionItems: ["No reception staff assigned to the selected clinic."],
-    });
-  }
+  const attributedClinicId = (row: { clinic_id?: string | null; receptionist_id?: string | null }) =>
+    row.clinic_id || receptionistClinicMap.get(row.receptionist_id || "") || "";
+  const belongsToSelectedClinics = (row: { clinic_id?: string | null; receptionist_id?: string | null }) =>
+    clinicIds.includes(attributedClinicId(row));
 
   const fetchReceipts = async (startIso: string, endIso: string) => {
-    let query = supabase
+    const rows = await fetchAllPages<ReceiptRow>((from, to) => supabase
       .from("receipts")
-      .select("id, patient_id, receptionist_id, doctor_id, subtotal, vat, total, total_before_gateway_fee, gateway_fee, amount_paid, discount_amount, birthday_discount_amount, discount_reason, payment_method, created_at, transaction_type")
+      .select("id, clinic_id, patient_id, receptionist_id, doctor_id, subtotal, vat, total, total_before_gateway_fee, gateway_fee, amount_paid, discount_amount, birthday_discount_amount, discount_reason, payment_method, created_at, transaction_type")
       .gte("created_at", startIso)
-      .lt("created_at", endIso);
-    if (selectedReceptionistIds.size > 0 && selectedReceptionistIds.size !== receptionists.length) {
-      query = query.in("receptionist_id", [...selectedReceptionistIds]);
-    }
-    const { data, error } = await query;
-    if (error) throw error;
-    return ((data || []) as ReceiptRow[]).filter((row) => String(row.transaction_type || "regular") !== "plan_summary");
+      .lt("created_at", endIso)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to));
+    return rows
+      .filter(belongsToSelectedClinics)
+      .filter((row) => String(row.transaction_type || "regular") !== "plan_summary");
   };
 
   const fetchRefunds = async (startIso: string, endIso: string) => {
-    const { data, error } = await supabase
+    return fetchAllPages<RefundRow>((from, to) => supabase
       .from("refunds")
       .select("id, receipt_id, total_amount, created_at")
       .gte("created_at", startIso)
-      .lt("created_at", endIso);
-    if (error) throw error;
-    return (data || []) as RefundRow[];
+      .lt("created_at", endIso)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to));
   };
 
   const fetchRefundItems = async (refundIds: string[]) => {
     if (refundIds.length === 0) return [] as RefundItemRow[];
-    const { data, error } = await supabase
-      .from("refund_items")
-      .select("refund_id, amount")
-      .in("refund_id", refundIds);
-    if (error) throw error;
-    return (data || []) as RefundItemRow[];
+    return fetchRowsByIdsInBatches<RefundItemRow>("refund_items", "id, refund_id, amount", "refund_id", refundIds);
   };
 
   let yearlyReceipts: ReceiptRow[] = [];
   let previousYearReceipts: ReceiptRow[] = [];
   let historyReceipts: ReceiptRow[] = [];
-  let historicalBeforeRows: Array<{ patient_id: string | null; receptionist_id: string | null; transaction_type?: string | null }> = [];
+  let historicalBeforeRows: Array<{ patient_id: string | null; clinic_id: string | null; receptionist_id: string | null; transaction_type?: string | null }> = [];
 
   const [currentReceipts, compareReceipts, currentRefunds, compareRefunds] = await Promise.all([
     fetchReceipts(currentRange.startUtcIso, currentRange.endUtcIso),
@@ -504,19 +478,43 @@ export async function POST(request: Request) {
 
   const sumReceiptCollectionAmount = (rows: ReceiptRow[]) => rows.reduce((sum, row) => sum + (row.amount_paid == null ? asNumber(row.total) : asNumber(row.amount_paid)), 0);
   const sumAmountRows = (rows: Array<{ amount: number | null }>) => rows.reduce((sum, row) => sum + asNumber(row.amount), 0);
-  const fetchCollectionSupplementRows = async (tableName: string, startIso: string, endIso: string) => {
-    if (selectedReceptionistIds.size === 0) return [] as CashSupplementRow[];
-    const { data, error } = await supabase
-      .from(tableName)
-      .select("amount, receptionist_id, payment_method, created_at")
-      .in("receptionist_id", [...selectedReceptionistIds])
-      .gte("created_at", startIso)
-      .lt("created_at", endIso);
-    if (error) {
-      if (isTableMissing(error)) return [];
+  const fetchCollectionSupplementRows = async (
+    tableName: "balance_payments" | "patient_credits" | "treatment_plan_payments",
+    startIso: string,
+    endIso: string
+  ) => {
+    try {
+      const selectClause = tableName === "balance_payments"
+        ? "id, outstanding_balance_id, amount, receptionist_id, payment_method, created_at"
+        : "id, clinic_id, amount, receptionist_id, payment_method, created_at";
+      const rows = await fetchAllPages<CashSupplementRow>((from, to) => supabase
+        .from(tableName)
+        .select(selectClause)
+        .gte("created_at", startIso)
+        .lt("created_at", endIso)
+        .order("created_at", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to) as unknown as PromiseLike<{ data: CashSupplementRow[] | null; error: { message?: string; code?: string } | null }>);
+
+      if (tableName !== "balance_payments") return rows.filter(belongsToSelectedClinics);
+
+      const balanceIds = [...new Set(rows.map((row) => row.outstanding_balance_id).filter((value): value is string => !!value))];
+      const balances = await fetchRowsByIdsInBatches<Pick<OutstandingBalanceRow, "id" | "clinic_id">>(
+        "outstanding_balances",
+        "id, clinic_id",
+        "id",
+        balanceIds
+      );
+      const balanceClinicMap = new Map(balances.map((row) => [row.id, row.clinic_id]));
+      return rows.flatMap((row) => {
+        const parentClinicId = balanceClinicMap.get(row.outstanding_balance_id || "");
+        const resolvedClinicId = parentClinicId || receptionistClinicMap.get(row.receptionist_id || "") || "";
+        return clinicIds.includes(resolvedClinicId) ? [{ ...row, clinic_id: resolvedClinicId }] : [];
+      });
+    } catch (error) {
+      if (isTableMissing(error)) return [] as CashSupplementRow[];
       throw error;
     }
-    return (data || []) as CashSupplementRow[];
   };
 
   const [currentBalancePayments, currentDeposits, currentTreatmentPlanPayments, compareBalancePayments, compareDeposits, compareTreatmentPlanPayments, yearlyBalancePayments, yearlyDeposits, yearlyTreatmentPlanPayments, previousYearBalancePaymentRows, previousYearDepositRows, previousYearTreatmentPlanPaymentRows] = await Promise.all([
@@ -572,18 +570,16 @@ export async function POST(request: Request) {
   let newPatients = 0;
   let returningPatients = 0;
   if (includeHistoricalData) {
-    const { data: historicalBeforeData, error: historicalBeforeError } = await supabase
+    const historicalBeforeData = await fetchAllPages<{ patient_id: string | null; clinic_id: string | null; receptionist_id: string | null; transaction_type?: string | null }>((from, to) => supabase
       .from("receipts")
-      .select("patient_id, receptionist_id, created_at, transaction_type")
-      .lt("created_at", currentRange.startUtcIso);
-    if (historicalBeforeError) return Response.json({ error: historicalBeforeError.message }, { status: 500 });
-    historicalBeforeRows = ((historicalBeforeData || []) as Array<{ patient_id: string | null; receptionist_id: string | null; transaction_type?: string | null }>)
+      .select("id, patient_id, clinic_id, receptionist_id, created_at, transaction_type")
+      .lt("created_at", currentRange.startUtcIso)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to));
+    historicalBeforeRows = historicalBeforeData
       .filter((row) => String(row.transaction_type || "regular") !== "plan_summary")
-      .filter((row) => {
-        if (!row.receptionist_id) return false;
-        const clinicOfReceptionist = receptionistClinicMap.get(row.receptionist_id) || "";
-        return clinicIds.includes(clinicOfReceptionist);
-      });
+      .filter(belongsToSelectedClinics);
     const previousPatientSet = new Set(historicalBeforeRows.map((row) => row.patient_id).filter((value): value is string => !!value));
     for (const patientId of currentPatientIds) {
       if (previousPatientSet.has(patientId)) returningPatients += 1;
@@ -597,30 +593,27 @@ export async function POST(request: Request) {
   let eventRows: EventRow[] = [];
   let targetDataAvailable = true;
   try {
-    const [targetsRes, scheduleRes, eventsRes] = await Promise.all([
-      supabase
+    [targetRows, scheduleRows, eventRows] = await Promise.all([
+      fetchAllPages<TargetRow>((from, to) => supabase
         .from("clinic_monthly_targets")
-        .select("clinic_id, target_year, target_month, net_sales_target"),
-      supabase
+        .select("id, clinic_id, target_year, target_month, net_sales_target")
+        .order("id", { ascending: true })
+        .range(from, to)),
+      fetchAllPages<ScheduleRow>((from, to) => supabase
         .from("clinic_operating_schedule")
-        .select("clinic_id, weekday, is_open"),
-      supabase
+        .select("id, clinic_id, weekday, is_open")
+        .order("id", { ascending: true })
+        .range(from, to)),
+      fetchAllPages<EventRow>((from, to) => supabase
         .from("clinic_calendar_events")
-        .select("clinic_id, applies_to_all_clinics, start_date, end_date, event_type, is_closed_day"),
+        .select("id, clinic_id, applies_to_all_clinics, start_date, end_date, event_type, is_closed_day")
+        .order("id", { ascending: true })
+        .range(from, to)),
     ]);
-    if (targetsRes.error || scheduleRes.error || eventsRes.error) {
-      if (isTableMissing(targetsRes.error || scheduleRes.error || eventsRes.error)) {
-        targetDataAvailable = false;
-      } else {
-        return Response.json({ error: "Failed loading target configuration." }, { status: 500 });
-      }
-    } else {
-      targetRows = (targetsRes.data || []) as TargetRow[];
-      scheduleRows = (scheduleRes.data || []) as ScheduleRow[];
-      eventRows = (eventsRes.data || []) as EventRow[];
-    }
   } catch (error) {
-    if (!isTableMissing(error)) throw error;
+    if (!isTableMissing(error)) {
+      return Response.json({ error: "Failed loading target configuration." }, { status: 500 });
+    }
     targetDataAvailable = false;
   }
 
@@ -699,17 +692,17 @@ export async function POST(request: Request) {
 
   const clinicPerformance = clinicIds.map((id) => {
     const name = clinics.find((clinic) => clinic.id === id)?.name || "Unknown Clinic";
-    const clinicReceipts = currentReceipts.filter((row) => receptionistClinicMap.get(row.receptionist_id || "") === id);
-    const clinicCompareReceipts = compareReceipts.filter((row) => receptionistClinicMap.get(row.receptionist_id || "") === id);
+    const clinicReceipts = currentReceipts.filter((row) => attributedClinicId(row) === id);
+    const clinicCompareReceipts = compareReceipts.filter((row) => attributedClinicId(row) === id);
     const clinicPatients = new Set(clinicReceipts.map((row) => row.patient_id).filter(Boolean)).size;
     const clinicReceiptCollections = sumReceiptCollectionAmount(clinicReceipts);
     const clinicCompareReceiptCollections = sumReceiptCollectionAmount(clinicCompareReceipts);
-    const clinicBalancePayments = currentBalancePayments.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
-    const clinicCompareBalancePayments = compareBalancePayments.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
-    const clinicDeposits = currentDeposits.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
-    const clinicCompareDeposits = compareDeposits.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
-    const clinicTreatmentPlanPayments = currentTreatmentPlanPayments.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
-    const clinicCompareTreatmentPlanPayments = compareTreatmentPlanPayments.filter((row) => row.receptionist_id && receptionistClinicMap.get(row.receptionist_id) === id);
+    const clinicBalancePayments = currentBalancePayments.filter((row) => attributedClinicId(row) === id);
+    const clinicCompareBalancePayments = compareBalancePayments.filter((row) => attributedClinicId(row) === id);
+    const clinicDeposits = currentDeposits.filter((row) => attributedClinicId(row) === id);
+    const clinicCompareDeposits = compareDeposits.filter((row) => attributedClinicId(row) === id);
+    const clinicTreatmentPlanPayments = currentTreatmentPlanPayments.filter((row) => attributedClinicId(row) === id);
+    const clinicCompareTreatmentPlanPayments = compareTreatmentPlanPayments.filter((row) => attributedClinicId(row) === id);
     const clinicCollections = clinicReceiptCollections + sumAmountRows(clinicBalancePayments) + sumAmountRows(clinicDeposits) + sumAmountRows(clinicTreatmentPlanPayments);
     const clinicCompareCollections = clinicCompareReceiptCollections + sumAmountRows(clinicCompareBalancePayments) + sumAmountRows(clinicCompareDeposits) + sumAmountRows(clinicCompareTreatmentPlanPayments);
     const expected = targetDataAvailable
@@ -735,78 +728,61 @@ export async function POST(request: Request) {
 
   // Outstanding (snapshot at period end).
   const outstandingWindowEnd = currentRange.endUtcIso > compareRange.endUtcIso ? currentRange.endUtcIso : compareRange.endUtcIso;
-  const [outstandingRowsRes, planRowsRes] = await Promise.all([
-    supabase
+  const [outstandingRows, planRows] = await Promise.all([
+    fetchAllPages<OutstandingBalanceRow>((from, to) => supabase
       .from("outstanding_balances")
       .select("id, clinic_id, original_amount, created_at")
       .in("clinic_id", clinicIds)
-      .lt("created_at", outstandingWindowEnd),
-    supabase
+      .lt("created_at", outstandingWindowEnd)
+      .order("id", { ascending: true })
+      .range(from, to)),
+    fetchAllPages<TreatmentPlanRow>((from, to) => supabase
       .from("treatment_plans")
       .select("id, clinic_id, total_amount, is_legacy, historical_amount_paid, created_at")
       .in("clinic_id", clinicIds)
-      .lt("created_at", outstandingWindowEnd),
+      .lt("created_at", outstandingWindowEnd)
+      .order("id", { ascending: true })
+      .range(from, to)),
   ]);
-  if (outstandingRowsRes.error || planRowsRes.error) {
-    return Response.json({ error: "Failed loading outstanding balance data." }, { status: 500 });
-  }
-  const outstandingRows = (outstandingRowsRes.data || []) as OutstandingBalanceRow[];
-  const planRows = (planRowsRes.data || []) as TreatmentPlanRow[];
   const outstandingIds = outstandingRows.map((row) => row.id);
   const planIds = planRows.map((row) => row.id);
 
   const fetchBalancePayments = async () => {
-    if (outstandingIds.length === 0) return [] as BalancePaymentRow[];
-    const chunkSize = 500;
-    const rows: BalancePaymentRow[] = [];
-    for (let index = 0; index < outstandingIds.length; index += chunkSize) {
-      const chunk = outstandingIds.slice(index, index + chunkSize);
-      const { data, error } = await supabase
-        .from("balance_payments")
-        .select("outstanding_balance_id, amount, created_at")
-        .in("outstanding_balance_id", chunk)
-        .lt("created_at", outstandingWindowEnd);
-      if (error) throw error;
-      rows.push(...((data || []) as BalancePaymentRow[]));
-    }
-    return rows;
+    const rows = await fetchRowsByIdsInBatches<BalancePaymentRow>(
+      "balance_payments",
+      "id, outstanding_balance_id, amount, created_at",
+      "outstanding_balance_id",
+      outstandingIds,
+      500
+    );
+    return rows.filter((row) => row.created_at < outstandingWindowEnd);
   };
 
   const fetchPlanPayments = async () => {
-    if (planIds.length === 0) return [] as TreatmentPlanPaymentRow[];
-    const chunkSize = 500;
-    const rows: TreatmentPlanPaymentRow[] = [];
-    for (let index = 0; index < planIds.length; index += chunkSize) {
-      const chunk = planIds.slice(index, index + chunkSize);
-      const { data, error } = await supabase
-        .from("treatment_plan_payments")
-        .select("id, treatment_plan_id, clinic_id, amount, payment_method, notes, source_payment_record_id, created_at")
-        .in("treatment_plan_id", chunk)
-        .lt("created_at", outstandingWindowEnd);
-      if (error) throw error;
-      rows.push(...((data || []) as TreatmentPlanPaymentRow[]));
-    }
-    return rows;
+    const rows = await fetchRowsByIdsInBatches<TreatmentPlanPaymentRow>(
+      "treatment_plan_payments",
+      "id, treatment_plan_id, clinic_id, amount, payment_method, notes, source_payment_record_id, created_at",
+      "treatment_plan_id",
+      planIds,
+      500
+    );
+    return rows.filter((row) => !row.created_at || row.created_at < outstandingWindowEnd);
   };
 
   const fetchPlanPaymentRecords = async () => {
-    if (planIds.length === 0) return [] as TreatmentPlanPaymentRecordRow[];
-    const chunkSize = 500;
-    const rows: TreatmentPlanPaymentRecordRow[] = [];
-    for (let index = 0; index < planIds.length; index += chunkSize) {
-      const chunk = planIds.slice(index, index + chunkSize);
-      const { data, error } = await supabase
-        .from("treatment_plan_payment_records")
-        .select("id, treatment_plan_id, total_invoice_amount_settled, status, legacy_treatment_plan_payment_id, created_at")
-        .in("treatment_plan_id", chunk)
-        .lt("created_at", outstandingWindowEnd);
-      if (error) {
-        if (isTableMissing(error)) return [] as TreatmentPlanPaymentRecordRow[];
-        throw error;
-      }
-      rows.push(...((data || []) as TreatmentPlanPaymentRecordRow[]));
+    try {
+      const rows = await fetchRowsByIdsInBatches<TreatmentPlanPaymentRecordRow>(
+        "treatment_plan_payment_records",
+        "id, treatment_plan_id, total_invoice_amount_settled, status, legacy_treatment_plan_payment_id, created_at",
+        "treatment_plan_id",
+        planIds,
+        500
+      );
+      return rows.filter((row) => !row.created_at || row.created_at < outstandingWindowEnd);
+    } catch (error) {
+      if (isTableMissing(error)) return [] as TreatmentPlanPaymentRecordRow[];
+      throw error;
     }
-    return rows;
   };
 
   const [balancePaymentRows, planPaymentRows, planPaymentRecordRows] = await Promise.all([fetchBalancePayments(), fetchPlanPayments(), fetchPlanPaymentRecords()]);
@@ -948,7 +924,9 @@ export async function POST(request: Request) {
   const monthlyTrend = includeHistoricalData ? Array.from({ length: 12 }, (_, index) => {
     const monthNumber = index + 1;
     const monthStart = new Date(`${selectedYear}-${String(monthNumber).padStart(2, "0")}-01T00:00:00+04:00`);
-    const nextMonth = new Date(`${selectedYear}-${String(monthNumber + 1).padStart(2, "0")}-01T00:00:00+04:00`);
+    const nextMonthYear = monthNumber === 12 ? selectedYear + 1 : selectedYear;
+    const nextMonthNumber = monthNumber === 12 ? 1 : monthNumber + 1;
+    const nextMonth = new Date(`${nextMonthYear}-${String(nextMonthNumber).padStart(2, "0")}-01T00:00:00+04:00`);
     const monthKeyValue = `${selectedYear}-${String(monthNumber).padStart(2, "0")}`;
     const monthReceipts = yearlyReceipts.filter((row) => row.created_at >= monthStart.toISOString() && row.created_at < nextMonth.toISOString());
     const previousMonthReceipts = previousYearReceipts.filter((row) => {
@@ -1040,15 +1018,18 @@ export async function POST(request: Request) {
   let allocationRefundRows: PaymentAllocationRefundRow[] = [];
   let missingAllocationCoverage = false;
   try {
-    let paymentRecordsQuery = supabase
+    paymentRows = await fetchAllPages<PaymentRecordRow>((from, to) => {
+      let query = supabase
       .from("payment_records")
       .select("id, clinic_id, receipt_id, receptionist_id, total_payment_fee_amount, total_customer_charged_amount, status, created_at")
       .gte("created_at", currentRange.startUtcIso)
       .lt("created_at", currentRange.endUtcIso);
-    if (clinicId) paymentRecordsQuery = paymentRecordsQuery.eq("clinic_id", clinicId);
-    const recordsRes = await paymentRecordsQuery;
-    if (recordsRes.error) throw recordsRes.error;
-    paymentRows = (recordsRes.data || []) as PaymentRecordRow[];
+      if (clinicId) query = query.eq("clinic_id", clinicId);
+      return query
+        .order("created_at", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to);
+    });
     const paymentIds = paymentRows.map((row) => row.id);
     if (paymentIds.length > 0) {
       const [allocationData, allocationRefundData] = await Promise.all([
@@ -1088,24 +1069,26 @@ export async function POST(request: Request) {
     let currentCashDeductionRows: CashDeductionRow[] = [];
     let compareCashDeductionRows: CashDeductionRow[] = [];
     try {
-      const [currentDeductionsRes, compareDeductionsRes] = await Promise.all([
-        supabase
+      [currentCashDeductionRows, compareCashDeductionRows] = await Promise.all([
+        fetchAllPages<CashDeductionRow>((from, to) => supabase
           .from("cash_deductions")
           .select("id, clinic_id, register_session_id, business_date, type, paid_to_name, description, reference_number, amount, status, created_at, created_by, voided_at, voided_by, void_reason")
           .in("clinic_id", clinicIds)
           .gte("business_date", currentRangeStartDubai)
           .lte("business_date", currentRangeEndDubai)
-          .order("created_at", { ascending: false }),
-        supabase
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to)),
+        fetchAllPages<CashDeductionRow>((from, to) => supabase
           .from("cash_deductions")
           .select("id, clinic_id, register_session_id, business_date, type, paid_to_name, description, reference_number, amount, status, created_at, created_by, voided_at, voided_by, void_reason")
           .in("clinic_id", clinicIds)
           .gte("business_date", compareRangeStartDubai)
           .lte("business_date", compareRangeEndDubai)
-          .order("created_at", { ascending: false }),
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to)),
       ]);
-      if (!currentDeductionsRes.error) currentCashDeductionRows = (currentDeductionsRes.data || []) as CashDeductionRow[];
-      if (!compareDeductionsRes.error) compareCashDeductionRows = (compareDeductionsRes.data || []) as CashDeductionRow[];
     } catch (error) {
       if (!isTableMissing(error)) throw error;
     }
@@ -1150,26 +1133,22 @@ export async function POST(request: Request) {
         .filter(Boolean)
     );
     const detailRegisterSessionIds = new Set<string>(currentCashDeductionRows.map((row) => String(row.register_session_id || "")).filter(Boolean));
-    const [detailReceptionistsRes, detailRegisterSessionsRes] = await Promise.all([
+    const [detailReceptionists, detailRegisterSessions] = await Promise.all([
       detailReceptionistIds.size > 0
-        ? supabase.from("receptionist").select("id, name").in("id", [...detailReceptionistIds])
-        : Promise.resolve({ data: [], error: null }),
+        ? fetchRowsByIdsInBatches<{ id: string; name: string | null }>("receptionist", "id, name", "id", [...detailReceptionistIds])
+        : Promise.resolve([]),
       detailRegisterSessionIds.size > 0
-        ? supabase.from("cash_register_sessions").select("id, receptionist_id, opened_at, closed_at").in("id", [...detailRegisterSessionIds])
-        : Promise.resolve({ data: [], error: null }),
+        ? fetchRowsByIdsInBatches<CashRegisterSessionRow>("cash_register_sessions", "id, receptionist_id, opened_at, closed_at", "id", [...detailRegisterSessionIds])
+        : Promise.resolve([]),
     ]);
     const detailReceptionistMap = new Map<string, string>();
-    if (!detailReceptionistsRes.error) {
-      ((detailReceptionistsRes.data || []) as Array<{ id: string; name: string | null }>).forEach((row) => {
-        detailReceptionistMap.set(String(row.id), String(row.name || ""));
-      });
-    }
+    detailReceptionists.forEach((row) => {
+      detailReceptionistMap.set(String(row.id), String(row.name || ""));
+    });
     const registerSessionMap = new Map<string, CashRegisterSessionRow>();
-    if (!detailRegisterSessionsRes.error) {
-      ((detailRegisterSessionsRes.data || []) as CashRegisterSessionRow[]).forEach((row) => {
-        registerSessionMap.set(String(row.id), row);
-      });
-    }
+    detailRegisterSessions.forEach((row) => {
+      registerSessionMap.set(String(row.id), row);
+    });
 
     const cashDeductionDetails = currentCashDeductionRows.map((row) => ({
       id: row.id,
