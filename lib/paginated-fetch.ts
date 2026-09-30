@@ -17,7 +17,9 @@ export async function fetchAllPages<T>(
       const message = typeof error.message === "string" && error.message.trim().length > 0
         ? error.message
         : "Failed to fetch paginated rows.";
-      throw new Error(message);
+      const paginatedError = new Error(message) as Error & { code?: string };
+      if (error.code) paginatedError.code = error.code;
+      throw paginatedError;
     }
 
     if (!data || data.length === 0) {
