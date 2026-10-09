@@ -2,7 +2,9 @@ import fs from 'node:fs';import vm from 'node:vm';import ts from 'typescript';im
 const compiled=ts.transpileModule(fs.readFileSync('lib/session-storage.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 const env={NEXT_PUBLIC_SUPABASE_URL:'https://test.invalid',SUPABASE_SESSION_SECRET_KEY:'sb_secret_fake_test_only'};
 let called;const module={exports:{}};
-vm.runInNewContext(compiled,{module,exports:module.exports,require:name=>{assert.equal(name,'server-only');return {};},process:{env},fetch:async(url,options)=>{called={url,options};return {ok:true};}});
+const headerModule={exports:{}};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/server-api-key-headers.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{module:headerModule,exports:headerModule.exports});
+vm.runInNewContext(compiled,{module,exports:module.exports,require:name=>{if(name==='./server-api-key-headers')return headerModule.exports;assert.equal(name,'server-only');return {};},process:{env},fetch:async(url,options)=>{called={url,options};return {ok:true};}});
 let config=module.exports.sessionStorageConfiguration();assert.equal(config.headers.apikey,env.SUPABASE_SESSION_SECRET_KEY);assert.equal(config.headers.Authorization,undefined);
 await module.exports.sessionStorageFetch('?select=token');assert.equal(called.options.cache,'no-store');assert.equal(called.options.headers.Authorization,undefined);assert.equal(called.options.headers.apikey,env.SUPABASE_SESSION_SECRET_KEY);
 env.SUPABASE_SESSION_SECRET_KEY='eyJ.fake_legacy_test_only';config=module.exports.sessionStorageConfiguration();assert.equal(config.headers.Authorization,'Bearer '+env.SUPABASE_SESSION_SECRET_KEY);

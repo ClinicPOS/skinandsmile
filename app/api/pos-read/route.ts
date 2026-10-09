@@ -2,6 +2,7 @@ import {createProtectedDataClient} from '../../../lib/protected-data-server';
 import {readAppSession} from '../../../lib/api-session';
 import {readNamedAccountAccess} from '../../../lib/account-access';
 import {isUuid} from '../../../lib/patient-mutation-validation';
+import {serverApiKeyHeaders} from '../../../lib/server-api-key-headers';
 export const dynamic='force-dynamic';
 const direct=new Set(['receipts','outstanding_balances','patient_credits','treatment_plans','treatment_plan_payments','treatment_plan_payment_records','payment_records','payment_allocation_refunds','cash_deductions','birthday_greetings','service_favorites','doctors','services','receptionist']);
 const parents:Record<string,{join:string;filter:string}>={
@@ -65,7 +66,7 @@ export async function POST(request:Request){
  try{
   const url=process.env.NEXT_PUBLIC_SUPABASE_URL,key=process.env.SUPABASE_SERVER_SECRET_KEY;
   if(!url||!key)throw Error('Protected data is not configured');
-  const headers={apikey:key,Authorization:`Bearer ${key}`};
+  const headers=serverApiKeyHeaders(key);
   const outputHeaders:Record<string,string>={...headers};
   if(typeof body.range==='string'&&/^\d+-\d+$/.test(body.range)){outputHeaders.Range=body.range;outputHeaders['Range-Unit']='items';}
   if(body.accept==='application/vnd.pgrst.object+json')outputHeaders.Accept=body.accept;
