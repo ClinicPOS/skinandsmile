@@ -85,12 +85,13 @@ export function BackendShell({ children }: BackendShellProps) {
 
   const filteredNavigation = useMemo(() => {
     const keyword = navSearch.trim().toLowerCase();
-    if (!keyword) return backendNavigation;
-    return backendNavigation.filter((item) => {
+    const available=backendNavigation.filter(item=>!item.ownerOnly||accessSession?.role==='owner');
+    if (!keyword) return available;
+    return available.filter((item) => {
       const haystack = [item.label, ...(item.keywords || [])].join(" ").toLowerCase();
       return haystack.includes(keyword);
     });
-  }, [navSearch]);
+  }, [navSearch,accessSession]);
 
   const groupedNavigation = useMemo(() => ({
     core: filteredNavigation.filter((item) => item.group === "core"),

@@ -1,9 +1,11 @@
 "use client";
+import {savePosPreference} from "../../lib/pos-preference-client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { useClinicAccess } from "../../lib/clinic-access";
 import { supabase } from "../../lib/supabase";
+import { loadClinicBirthdays } from "../../lib/patient-read-client";
 import { getDubaiBusinessDate } from "../../lib/cash-deductions";
 import { getActiveReceptionistIdFromRegisterSession } from "../../lib/clinic-patient-files";
 
@@ -83,19 +85,14 @@ export default function BirthdaysPage() {
     }
     setLoading(true);
     try {
-      const [{ data, error }, clinicRes] = await Promise.all([
-        supabase.rpc("get_clinic_birthday_patients", {
-          p_clinic_id: activeClinicId,
-          p_target_date: dubaiDateKey,
-        }),
+      const [{ data }, clinicRes] = await Promise.all([
+        loadClinicBirthdays(activeClinicId, dubaiDateKey).then(result => ({ data: result.patients, error: null })),
         supabase.from("clinics").select("name").eq("id", activeClinicId).maybeSingle(),
       ]);
-      if (error) {
-        alert(`Could not load birthdays: ${error.message}`);
-        return;
-      }
       setRows((data || []) as BirthdayPatientRow[]);
       setClinicName(String(clinicRes.data?.name || accessSession?.clinicName || "Clinic"));
+    } catch (error) {
+      setRows([]); alert(error instanceof Error ? error.message : "Birthdays could not be loaded.");
     } finally {
       setLoading(false);
     }
@@ -129,11 +126,7 @@ export default function BirthdaysPage() {
         receptionist_id: receptionistId,
       };
 
-      const { data, error } = await supabase
-        .from("birthday_greetings")
-        .insert([payload])
-        .select("greeted_at, receptionist_id, receptionist(name)")
-        .single();
+      const { data, error } = await savePosPreference({kind:"greeting",patientId:row.patient_id});
 
       if (error && error.code !== "23505") {
         alert(`Could not mark greeted: ${error.message}`);

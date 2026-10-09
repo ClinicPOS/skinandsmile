@@ -1,13 +1,16 @@
+import {doctorRevenue} from "../../../../lib/doctor-revenue";
 import { buildComparisonRange, buildDashboardRange, DashboardPeriod, percentageChange, statusFromTarget } from "../../../../lib/ceo-dashboard";
 import { extractLegacyCashAmount } from "../../../../lib/cash-deductions";
 import { computeTreatmentPlanRollup } from "../../../../lib/treatment-plan-rollup";
 import { createServerSupabaseClient, readAppSession } from "../../../../lib/api-session";
 import { canAccessReports } from "../../../../lib/session-auth";
+import {createProtectedDataClient} from '../../../../lib/protected-data-server';
 import { fetchAllPages } from "../../../../lib/paginated-fetch";
 
 export const dynamic = "force-dynamic";
 
 type ReceiptRow = {
+  collected_amount?:number;
   id: string;
   clinic_id: string | null;
   patient_id: string | null;
@@ -37,11 +40,13 @@ type RefundRow = {
   receipt_id: string;
   total_amount: number | null;
   created_at: string;
+  payment_method?:string|null;
 };
 
 type RefundItemRow = {
   refund_id: string;
   amount: number | null;
+  refunded_treatment_amount?:number|null;
 };
 
 type PaymentRecordRow = {
@@ -68,6 +73,7 @@ type PaymentAllocationRow = {
 };
 
 type PaymentAllocationRefundRow = {
+  refund_id:string;
   payment_id: string;
   payment_allocation_id: string;
   refunded_treatment_amount: number | null;
@@ -99,6 +105,8 @@ type TreatmentPlanRow = {
   is_legacy?: boolean | null;
   historical_amount_paid?: number | null;
   created_at?: string | null;
+  status?: "Active" | "Completed" | "Cancelled";
+  cancelled_at?: string | null;
 };
 
 type TreatmentPlanPaymentRow = {
@@ -123,6 +131,8 @@ type TreatmentPlanPaymentRecordRow = {
 };
 
 type CashSupplementRow = {
+  id?:string;
+  source_payment_record_id?:string|null;
   clinic_id?: string | null;
   outstanding_balance_id?: string | null;
   amount: number | null;
@@ -163,6 +173,8 @@ type DoctorRow = {
 };
 
 type ReceiptItemRow = {
+  id: string;
+  taxable_amount: number | null;
   receipt_id: string;
   doctor_id: string | null;
   total: number | null;
@@ -352,12 +364,15 @@ export async function POST(request: Request) {
   const compareRangeStartDubai = dubaiDateOnly(new Date(compareRange.startUtcIso));
   const compareRangeEndDubai = addDays(dubaiDateOnly(new Date(compareRange.endUtcIso)), -1);
 
-  const supabase = createServerSupabaseClient();
+  let supabase = createServerSupabaseClient();
   const { session, errorResponse } = await readAppSession(supabase);
   if (!session) return errorResponse!;
-  if (!canAccessReports(session)) {
+  const clinicManager=session.userRole==='clinic_manager';
+  if(clinicManager&&(!clinicId||clinicId!==session.clinicId||!session.permissions?.includes('reports')))return Response.json({error:'Reports are limited to your assigned clinic.'},{status:403});
+  if (!clinicManager&&!canAccessReports(session)) {
     return Response.json({ error: "Forbidden. CEO dashboard access is limited to CEO and IT administrator roles." }, { status: 403 });
   }
+  supabase=createProtectedDataClient();
 
   const fetchRowsByIdsInBatches = async <RowType,>(
     tableName: string,
@@ -382,9 +397,9 @@ export async function POST(request: Request) {
   };
 
   const [clinics, receptionists, doctors] = await Promise.all([
-    fetchAllPages<{ id: string; name: string }>((from, to) => supabase.from("clinics").select("id, name").order("id", { ascending: true }).range(from, to)),
-    fetchAllPages<ReceptionistRow>((from, to) => supabase.from("receptionist").select("id, clinic_id").order("id", { ascending: true }).range(from, to)),
-    fetchAllPages<DoctorRow>((from, to) => supabase.from("doctors").select("id, name, clinic_id").order("id", { ascending: true }).range(from, to)),
+    fetchAllPages<{ id: string; name: string }>((from, to) => {let query=supabase.from("clinics").select("id, name").order("id", { ascending: true });if(clinicManager)query=query.eq('id',clinicId!);return query.range(from,to);}),
+    fetchAllPages<ReceptionistRow>((from, to) => {let query=supabase.from("receptionist").select("id, clinic_id").order("id", { ascending: true });if(clinicManager)query=query.eq('clinic_id',clinicId!);return query.range(from,to);}),
+    fetchAllPages<DoctorRow>((from, to) => {let query=supabase.from("doctors").select("id, name, clinic_id").order("id", { ascending: true });if(clinicManager)query=query.eq('clinic_id',clinicId!);return query.range(from,to);}),
   ]);
   const receptionistClinicMap = new Map(receptionists.map((row) => [row.id, row.clinic_id || ""]));
   const clinicIds = clinicId ? [clinicId] : clinics.map((clinic) => clinic.id);
@@ -399,31 +414,41 @@ export async function POST(request: Request) {
   const fetchReceipts = async (startIso: string, endIso: string) => {
     const rows = await fetchAllPages<ReceiptRow>((from, to) => supabase
       .from("receipts")
-      .select("id, clinic_id, patient_id, receptionist_id, doctor_id, subtotal, vat, total, total_before_gateway_fee, gateway_fee, amount_paid, discount_amount, birthday_discount_amount, discount_reason, payment_method, created_at, transaction_type")
+      .select("id, clinic_id, patient_id, receptionist_id, doctor_id, subtotal, vat, total, total_before_gateway_fee, gateway_fee, amount_paid, discount_amount, birthday_discount_amount, discount_reason, payment_method, created_at, transaction_type").neq("status","VOIDED")
       .gte("created_at", startIso)
       .lt("created_at", endIso)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(from, to));
-    return rows
+    const scoped=rows
       .filter(belongsToSelectedClinics)
       .filter((row) => String(row.transaction_type || "regular") !== "plan_summary");
+    const collections=new Map<string,number>();
+    for(let offset=0;offset<scoped.length;offset+=100){
+      const payments=await fetchAllPages<{receipt_id:string;total_customer_charged_amount:number|null}>((from,to)=>supabase.from('payment_records').select('id,receipt_id,total_customer_charged_amount').in('receipt_id',scoped.slice(offset,offset+100).map(row=>row.id)).neq('status','cancelled').gte('created_at',startIso).lt('created_at',endIso).order('id').range(from,to));
+      for(const row of payments)collections.set(row.receipt_id,(collections.get(row.receipt_id)||0)+asNumber(row.total_customer_charged_amount));
+    }
+    return scoped.map(row=>({...row,collected_amount:collections.get(row.id)||asNumber(row.amount_paid??row.total)}));
   };
 
+  const refundClinicMap=new Map<string,string>();
   const fetchRefunds = async (startIso: string, endIso: string) => {
-    return fetchAllPages<RefundRow>((from, to) => supabase
+    const rows=await fetchAllPages<RefundRow>((from, to) => supabase
       .from("refunds")
-      .select("id, receipt_id, total_amount, created_at")
+      .select("id, receipt_id, total_amount, payment_method, created_at")
       .gte("created_at", startIso)
       .lt("created_at", endIso)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(from, to));
+    const parents=await fetchRowsByIdsInBatches<ReceiptRow&{status:string|null}>('receipts','id,clinic_id,receptionist_id,status','id',[...new Set(rows.map(row=>row.receipt_id))]);
+    const allowed=new Set(parents.filter(row=>belongsToSelectedClinics(row)&&row.status!=='VOIDED').map(row=>{refundClinicMap.set(row.id,attributedClinicId(row));return row.id;}));
+    return rows.filter(row=>allowed.has(row.receipt_id));
   };
 
   const fetchRefundItems = async (refundIds: string[]) => {
     if (refundIds.length === 0) return [] as RefundItemRow[];
-    return fetchRowsByIdsInBatches<RefundItemRow>("refund_items", "id, refund_id, amount", "refund_id", refundIds);
+    return fetchRowsByIdsInBatches<RefundItemRow>("refund_items", "id, refund_id, amount, refunded_treatment_amount", "refund_id", refundIds);
   };
 
   let yearlyReceipts: ReceiptRow[] = [];
@@ -448,8 +473,8 @@ export async function POST(request: Request) {
 
   const currentReceiptMap = new Map(currentReceipts.map((row) => [row.id, row]));
   const compareReceiptMap = new Map(compareReceipts.map((row) => [row.id, row]));
-  const currentRefundsFiltered = currentRefunds.filter((refund) => currentReceiptMap.has(refund.receipt_id));
-  const compareRefundsFiltered = compareRefunds.filter((refund) => compareReceiptMap.has(refund.receipt_id));
+  const currentRefundsFiltered = currentRefunds;
+  const compareRefundsFiltered = compareRefunds;
 
   let currentRefundItems: RefundItemRow[] = [];
   let compareRefundItems: RefundItemRow[] = [];
@@ -465,7 +490,7 @@ export async function POST(request: Request) {
   const groupedRefundTreatment = (rows: RefundItemRow[]) => {
     const byRefund = new Map<string, number>();
     for (const row of rows) {
-      byRefund.set(row.refund_id, (byRefund.get(row.refund_id) || 0) + asNumber(row.amount));
+      byRefund.set(row.refund_id, (byRefund.get(row.refund_id) || 0) + asNumber(row.refunded_treatment_amount??row.amount));
     }
     return byRefund;
   };
@@ -476,7 +501,7 @@ export async function POST(request: Request) {
   const currentRefundTreatment = currentRefundsFiltered.reduce((sum, row) => sum + (currentRefundTreatmentByRefund.get(row.id) || 0), 0);
   const compareRefundTreatment = compareRefundsFiltered.reduce((sum, row) => sum + (compareRefundTreatmentByRefund.get(row.id) || 0), 0);
 
-  const sumReceiptCollectionAmount = (rows: ReceiptRow[]) => rows.reduce((sum, row) => sum + (row.amount_paid == null ? asNumber(row.total) : asNumber(row.amount_paid)), 0);
+  const sumReceiptCollectionAmount = (rows: ReceiptRow[]) => rows.reduce((sum, row) => sum + asNumber(row.collected_amount??row.amount_paid??row.total), 0);
   const sumAmountRows = (rows: Array<{ amount: number | null }>) => rows.reduce((sum, row) => sum + asNumber(row.amount), 0);
   const fetchCollectionSupplementRows = async (
     tableName: "balance_payments" | "patient_credits" | "treatment_plan_payments",
@@ -486,7 +511,7 @@ export async function POST(request: Request) {
     try {
       const selectClause = tableName === "balance_payments"
         ? "id, outstanding_balance_id, amount, receptionist_id, payment_method, created_at"
-        : "id, clinic_id, amount, receptionist_id, payment_method, created_at";
+        : "id, clinic_id, amount, receptionist_id, payment_method, created_at"+(tableName==='treatment_plan_payments'?',source_payment_record_id':'');
       const rows = await fetchAllPages<CashSupplementRow>((from, to) => supabase
         .from(tableName)
         .select(selectClause)
@@ -496,7 +521,12 @@ export async function POST(request: Request) {
         .order("id", { ascending: true })
         .range(from, to) as unknown as PromiseLike<{ data: CashSupplementRow[] | null; error: { message?: string; code?: string } | null }>);
 
-      if (tableName !== "balance_payments") return rows.filter(belongsToSelectedClinics);
+      if(tableName==='treatment_plan_payments'){
+        const modern=await fetchAllPages<{id:string;clinic_id:string|null;receptionist_id:string|null;total_customer_charged_amount:number|null;legacy_treatment_plan_payment_id:string|null;payment_method_summary:string|null;created_at:string}>((from,to)=>supabase.from('treatment_plan_payment_records').select('id,clinic_id,receptionist_id,total_customer_charged_amount,legacy_treatment_plan_payment_id,payment_method_summary,created_at').neq('status','cancelled').gte('created_at',startIso).lt('created_at',endIso).order('id').range(from,to));
+        const scoped=modern.filter(belongsToSelectedClinics),covered=new Set(scoped.map(row=>row.legacy_treatment_plan_payment_id).filter(Boolean));
+        return [...rows.filter(belongsToSelectedClinics).filter(row=>!row.source_payment_record_id&&!(row.id && covered.has(row.id))),...scoped.map(row=>({...row,amount:row.total_customer_charged_amount,payment_method:row.payment_method_summary}))];
+      }
+      if (tableName !== "balance_payments") return rows.filter(belongsToSelectedClinics).filter(row=>tableName!=='patient_credits'||asNumber(row.amount)>0);
 
       const balanceIds = [...new Set(rows.map((row) => row.outstanding_balance_id).filter((value): value is string => !!value))];
       const balances = await fetchRowsByIdsInBatches<Pick<OutstandingBalanceRow, "id" | "clinic_id">>(
@@ -541,10 +571,11 @@ export async function POST(request: Request) {
     + sumAmountRows(compareDeposits)
     + sumAmountRows(compareTreatmentPlanPayments);
 
-  const currentNetSales = currentCollectionsEod;
-  const compareNetSales = compareCollectionsEod;
-  const currentCollections = currentCollectionsEod;
-  const compareCollections = compareCollectionsEod;
+  const returnedAmount=(rows:RefundRow[])=>rows.reduce((sum,row)=>sum+asNumber(row.total_amount),0);
+  const currentNetSales = currentCollectionsEod-returnedAmount(currentRefunds);
+  const compareNetSales = compareCollectionsEod-returnedAmount(compareRefunds);
+  const currentCollections = currentNetSales;
+  const compareCollections = compareNetSales;
   const currentBirthdayDiscountTotal = currentReceipts.reduce((sum, row) => {
     if (String(row.discount_reason || "").trim() !== "Birthday Discount 5%") return sum;
     const explicitAmount = asNumber(row.birthday_discount_amount);
@@ -572,7 +603,7 @@ export async function POST(request: Request) {
   if (includeHistoricalData) {
     const historicalBeforeData = await fetchAllPages<{ patient_id: string | null; clinic_id: string | null; receptionist_id: string | null; transaction_type?: string | null }>((from, to) => supabase
       .from("receipts")
-      .select("id, patient_id, clinic_id, receptionist_id, created_at, transaction_type")
+      .select("id, patient_id, clinic_id, receptionist_id, created_at, transaction_type").neq("status","VOIDED")
       .lt("created_at", currentRange.startUtcIso)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
@@ -628,7 +659,7 @@ export async function POST(request: Request) {
     targetsByClinicMonth.set(`${row.clinic_id}:${month}`, asNumber(row.net_sales_target));
   }
 
-  const receiptCollectionAmount = (row: ReceiptRow) => row.amount_paid == null ? asNumber(row.total) : asNumber(row.amount_paid);
+  const receiptCollectionAmount = (row: ReceiptRow) => asNumber(row.collected_amount??row.amount_paid??row.total);
 
   const salesTrend = includeHistoricalData
     ? selectedRangeDays.length <= 31
@@ -660,7 +691,7 @@ export async function POST(request: Request) {
               netSales: dayReceipts.reduce((sum, row) => sum + receiptCollectionAmount(row), 0)
                 + sumAmountRows(dayBalancePayments)
                 + sumAmountRows(dayDeposits)
-                + sumAmountRows(dayTreatmentPlanPayments),
+                + sumAmountRows(dayTreatmentPlanPayments)-returnedAmount(currentRefunds.filter(row=>row.created_at>=startIso&&row.created_at<endIso)),
               target: targetResult.hasAnyTarget ? targetResult.expectedTarget : null,
               previousYear: null,
               belowTarget: null as boolean | null,
@@ -703,8 +734,8 @@ export async function POST(request: Request) {
     const clinicCompareDeposits = compareDeposits.filter((row) => attributedClinicId(row) === id);
     const clinicTreatmentPlanPayments = currentTreatmentPlanPayments.filter((row) => attributedClinicId(row) === id);
     const clinicCompareTreatmentPlanPayments = compareTreatmentPlanPayments.filter((row) => attributedClinicId(row) === id);
-    const clinicCollections = clinicReceiptCollections + sumAmountRows(clinicBalancePayments) + sumAmountRows(clinicDeposits) + sumAmountRows(clinicTreatmentPlanPayments);
-    const clinicCompareCollections = clinicCompareReceiptCollections + sumAmountRows(clinicCompareBalancePayments) + sumAmountRows(clinicCompareDeposits) + sumAmountRows(clinicCompareTreatmentPlanPayments);
+    const clinicCollections = clinicReceiptCollections + sumAmountRows(clinicBalancePayments) + sumAmountRows(clinicDeposits) + sumAmountRows(clinicTreatmentPlanPayments)-returnedAmount(currentRefunds.filter(row=>refundClinicMap.get(row.receipt_id)===id));
+    const clinicCompareCollections = clinicCompareReceiptCollections + sumAmountRows(clinicCompareBalancePayments) + sumAmountRows(clinicCompareDeposits) + sumAmountRows(clinicCompareTreatmentPlanPayments)-returnedAmount(compareRefunds.filter(row=>refundClinicMap.get(row.receipt_id)===id));
     const expected = targetDataAvailable
       ? expectedTargetForRange(id, currentRange.startUtcIso, currentRange.endUtcIso, targetsByClinicMonth, scheduleByClinic, eventRows)
       : { expectedTarget: 0, hasAnyTarget: false };
@@ -738,7 +769,7 @@ export async function POST(request: Request) {
       .range(from, to)),
     fetchAllPages<TreatmentPlanRow>((from, to) => supabase
       .from("treatment_plans")
-      .select("id, clinic_id, total_amount, is_legacy, historical_amount_paid, created_at")
+      .select("id, clinic_id, total_amount, is_legacy, historical_amount_paid, created_at, status, cancelled_at")
       .in("clinic_id", clinicIds)
       .lt("created_at", outstandingWindowEnd)
       .order("id", { ascending: true })
@@ -817,6 +848,8 @@ export async function POST(request: Request) {
           total_amount: asNumber(row.total_amount),
           is_legacy: !!row.is_legacy,
           historical_amount_paid: asNumber(row.historical_amount_paid),
+          status: row.status,
+          cancelled_at: row.cancelled_at,
         },
         {
           structuredPayments: planPaymentRecordsByPlanId.get(row.id) || [],
@@ -834,6 +867,17 @@ export async function POST(request: Request) {
 
   // Doctor performance.
   let doctorPerformanceWarning: string | null = null;
+  let treatmentPlanRankingPending={visits:0,missingDoctor:0};
+  if(includeHistoricalData){
+    try{
+      const pendingVisits=await fetchAllPages<{id:string;doctor_id:string|null;created_at:string}>((from,to)=>{
+        let query=supabase.from('treatment_plan_visits').select('id,doctor_id,created_at,treatment_plans!inner(clinic_id)').gte('created_at',currentRange.startUtcIso).lt('created_at',currentRange.endUtcIso);
+        if(clinicId)query=query.eq('treatment_plans.clinic_id',clinicId);
+        return query.order('created_at').order('id').range(from,to);
+      });
+      treatmentPlanRankingPending={visits:pendingVisits.length,missingDoctor:pendingVisits.filter(visit=>!visit.doctor_id).length};
+    }catch{doctorPerformanceWarning='Treatment-plan visit attribution could not be checked. Doctor ranking does not include treatment-plan value.';}
+  }
   let doctorPerformance: Array<{
     doctorId: string;
     doctorName: string;
@@ -843,83 +887,28 @@ export async function POST(request: Request) {
     netSales: number;
     averageNetSalesPerPatient: number;
   }> = [];
-  if (includeHistoricalData && currentReceipts.length > 0) {
-    const receiptIds = currentReceipts.map((row) => row.id);
-    let items: ReceiptItemRow[] = [];
+  if (includeHistoricalData && (currentReceipts.length > 0 || currentRefunds.length > 0)) {
     try {
-      items = await fetchRowsByIdsInBatches<ReceiptItemRow>(
-        "receipt_items",
-        "receipt_id, doctor_id, total",
-        "receipt_id",
-        receiptIds,
-        100
-      );
-    } catch (receiptItemsError) {
-      const errorCode = String((receiptItemsError as { code?: string }).code || "");
-      if (isTableMissing(receiptItemsError)) {
-        doctorPerformanceWarning = "Doctor performance was calculated from receipt-level doctor assignments because receipt item tables are not yet available. Item-level attribution may be incomplete.";
-      } else if (errorCode === "42501") {
-        doctorPerformanceWarning = "Doctor performance was calculated from receipt-level doctor assignments because receipt item access is restricted. Item-level attribution may be incomplete.";
-      } else {
-        doctorPerformanceWarning = "Doctor performance was calculated from receipt-level doctor assignments because item-level attribution could not be loaded completely.";
-      }
-      console.error("Doctor performance query failed", receiptItemsError);
-    }
-    // Build a map from receiptId → doctor_id (from receipt_items rows that have it set)
-    const itemDoctorByReceipt = new Map<string, string>();
-    for (const item of items) {
-      if (item.doctor_id) itemDoctorByReceipt.set(item.receipt_id, item.doctor_id);
-    }
-
-    const doctorMap = new Map<string, {
-      doctorId: string;
-      doctorName: string;
-      clinicId: string | null;
-      receiptIds: Set<string>;
-      patientIds: Set<string>;
-      netSales: number;
-    }>();
-
-    // Aggregate per receipt. doctor_id comes from receipt_items if set,
-    // otherwise falls back to receipts.doctor_id (which is always populated).
-    for (const receipt of currentReceipts) {
-      const doctorId = itemDoctorByReceipt.get(receipt.id) || receipt.doctor_id;
-      if (!doctorId) continue;
-      const doctor = doctors.find((row) => row.id === doctorId);
-      const current = doctorMap.get(doctorId) || {
-        doctorId,
-        doctorName: doctor?.name || "Unknown Doctor",
-        clinicId: doctor?.clinic_id || null,
-        receiptIds: new Set<string>(),
-        patientIds: new Set<string>(),
-        netSales: 0,
-      };
-      current.receiptIds.add(receipt.id);
-      if (receipt.patient_id) current.patientIds.add(receipt.patient_id);
-      // Net sales for this receipt
-      const receiptNetSales = (() => {
-        const subtotal = receipt.subtotal == null ? null : asNumber(receipt.subtotal);
-        const discount = asNumber(receipt.discount_amount);
-        const vat = asNumber(receipt.vat);
-        const totalBeforeFee = receipt.total_before_gateway_fee == null
-          ? Math.max(0, asNumber(receipt.total) - asNumber(receipt.gateway_fee))
-          : asNumber(receipt.total_before_gateway_fee);
-        return subtotal != null ? Math.max(0, subtotal - discount) : Math.max(0, totalBeforeFee - vat);
-      })();
-      current.netSales += receiptNetSales;
-      doctorMap.set(doctorId, current);
-    }
-    doctorPerformance = [...doctorMap.values()].map((row) => ({
-      doctorId: row.doctorId,
-      doctorName: row.doctorName,
-      clinicName: clinics.find((clinic) => clinic.id === row.clinicId)?.name || "Unassigned",
-      uniquePatients: row.patientIds.size,
-      completedVisits: row.receiptIds.size,
-      netSales: row.netSales,
-      averageNetSalesPerPatient: row.patientIds.size > 0 ? row.netSales / row.patientIds.size : 0,
-    })).sort((left, right) => right.netSales - left.netSales);
+      const refundReceiptIds=[...new Set(currentRefunds.map(row=>row.receipt_id))].filter(id=>!currentReceiptMap.has(id));
+      const previousRefundReceipts=refundReceiptIds.length?await fetchRowsByIdsInBatches<ReceiptRow>('receipts','id,clinic_id,patient_id,receptionist_id,doctor_id,subtotal,discount_amount,total,vat,gateway_fee,total_before_gateway_fee,status','id',refundReceiptIds,100):[];
+      const rankingReceipts=[...currentReceipts,...previousRefundReceipts.filter(row=>belongsToSelectedClinics(row)&&(row as ReceiptRow&{status:string}).status!=='VOIDED')];
+      const ids=new Set(rankingReceipts.map(row=>row.id));
+      const rankingRefundIds=currentRefunds.filter(row=>ids.has(row.receipt_id)).map(row=>row.id);
+      const [items,refundItems]=await Promise.all([
+        fetchRowsByIdsInBatches<ReceiptItemRow>('receipt_items','id,receipt_id,doctor_id,total,taxable_amount','receipt_id',[...ids],100),
+        rankingRefundIds.length?fetchRowsByIdsInBatches<{receipt_item_id:string;refunded_treatment_amount:number|null;amount:number|null}>('refund_items','id,receipt_item_id,refunded_treatment_amount,amount','refund_id',rankingRefundIds,100):Promise.resolve([]),
+      ]);
+      const attributed=doctorRevenue(rankingReceipts,items,refundItems,new Set(currentReceipts.map(row=>row.id)));
+      const unresolved=attributed.unresolved+[...attributed.rows.keys()].filter(id=>!doctors.some(doctor=>doctor.id===id)).length;
+      if(unresolved){doctorPerformanceWarning='Doctor ranking is pending review: '+unresolved+' line/refund records have incomplete doctor or refund-value attribution. Resolve them before using rankings for awards.';}
+      else doctorPerformance=[...attributed.rows].map(([doctorId,row])=>{
+        const doctor=doctors.find(d=>d.id===doctorId);
+        return {doctorId,doctorName:doctor?.name||'Unknown Doctor',clinicName:clinics.find(c=>c.id===doctor?.clinic_id)?.name||'Unassigned',uniquePatients:row.patientIds.size,completedVisits:row.receiptIds.size,netSales:row.netSales,averageNetSalesPerPatient:row.patientIds.size?row.netSales/row.patientIds.size:0};
+      }).sort((a,b)=>b.netSales-a.netSales);
+    }catch{doctorPerformanceWarning='Doctor ranking could not be verified. Do not use this report for awards until attribution loads successfully.';}
   }
 
+  const [yearRefunds,previousYearRefunds]=includeHistoricalData?await Promise.all([fetchRefunds(yearRange.startIso,yearRange.endIso),fetchRefunds(yearRange.previousStartIso,yearRange.previousEndIso)]):[[],[]];
   // Monthly trends.
   const monthlyTrend = includeHistoricalData ? Array.from({ length: 12 }, (_, index) => {
     const monthNumber = index + 1;
@@ -942,11 +931,11 @@ export async function POST(request: Request) {
     const netSales = sumReceiptCollectionAmount(monthReceipts)
       + sumAmountRows(monthBalancePayments)
       + sumAmountRows(monthDeposits)
-      + sumAmountRows(monthTreatmentPlanPayments);
+      + sumAmountRows(monthTreatmentPlanPayments)-returnedAmount(yearRefunds.filter(row=>row.created_at>=monthStart.toISOString()&&row.created_at<nextMonth.toISOString()));
     const previousYearSales = sumReceiptCollectionAmount(previousMonthReceipts)
       + sumAmountRows(previousYearBalancePayments)
       + sumAmountRows(previousYearDeposits)
-      + sumAmountRows(previousYearTreatmentPlanPayments);
+      + sumAmountRows(previousYearTreatmentPlanPayments)-returnedAmount(previousYearRefunds.filter(row=>Number(dubaiDateOnly(new Date(row.created_at)).slice(5,7))===monthNumber));
     const targetForMonth = clinicIds.reduce((sum, id) => sum + (targetsByClinicMonth.get(`${id}:${monthKeyValue}`) || 0), 0);
     return {
       month: new Date(`${selectedYear}-${String(monthNumber).padStart(2, "0")}-01`).toLocaleDateString("en-US", { month: "short" }),
@@ -1022,6 +1011,7 @@ export async function POST(request: Request) {
       let query = supabase
       .from("payment_records")
       .select("id, clinic_id, receipt_id, receptionist_id, total_payment_fee_amount, total_customer_charged_amount, status, created_at")
+      .neq('status','cancelled')
       .gte("created_at", currentRange.startUtcIso)
       .lt("created_at", currentRange.endUtcIso);
       if (clinicId) query = query.eq("clinic_id", clinicId);
@@ -1051,19 +1041,27 @@ export async function POST(request: Request) {
       allocationRows = allocationData;
       allocationRefundRows = allocationRefundData;
     }
+    // Refunds belong to their return date, including returns of older payments.
+    allocationRefundRows=await fetchAllPages<PaymentAllocationRefundRow>((from,to)=>supabase.from('payment_allocation_refunds')
+      .select('id,refund_id,payment_id,payment_allocation_id,refunded_treatment_amount,total_returned_amount,reversed_fee_amount,created_at')
+      .in('clinic_id',clinicIds).eq('status','completed').gte('created_at',currentRange.startUtcIso).lt('created_at',currentRange.endUtcIso)
+      .order('id').range(from,to));
+    const refundAllocations=await fetchRowsByIdsInBatches<PaymentAllocationRow>('payment_allocations','id,payment_id,method_group,method_variant,treatment_net_amount,fee_amount,refunded_treatment_amount,refunded_fee_amount,customer_charged_amount','id',[...new Set(allocationRefundRows.map(row=>row.payment_allocation_id))]);
+    const refundAllocationMap=new Map(refundAllocations.map(row=>[row.id,row]));
     const methodMap = new Map<string, { method: string; amount: number; count: number }>();
     for (const allocation of allocationRows) {
       const method = normalizeMethodGroup(allocation.method_group);
       if (method === "unknown") continue;
-      const treatmentNet = Math.max(0, asNumber(allocation.treatment_net_amount) - asNumber(allocation.refunded_treatment_amount));
+      const treatmentNet = asNumber(allocation.treatment_net_amount);
       const current = methodMap.get(method) || { method, amount: 0, count: 0 };
       current.amount += treatmentNet;
       current.count += 1;
       methodMap.set(method, current);
     }
+    for(const refund of allocationRefundRows){const allocation=refundAllocationMap.get(refund.payment_allocation_id);if(!allocation)throw Error('Refund payment method could not be verified');const method=normalizeMethodGroup(allocation.method_group);const row=methodMap.get(method)||{method,amount:0,count:0};row.amount-=asNumber(refund.refunded_treatment_amount);methodMap.set(method,row);}
     const paymentMethods = ["cash", "card", "bank_transfer", "tabby", "tamara"].map((method) => methodMap.get(method) || { method, amount: 0, count: 0 });
 
-    const paymentFeesCollected = allocationRows.reduce((sum, row) => sum + Math.max(0, asNumber(row.fee_amount) - asNumber(row.refunded_fee_amount)), 0);
+    const paymentFeesCollected = allocationRows.reduce((sum, row) => sum + asNumber(row.fee_amount), 0)-allocationRefundRows.reduce((sum,row)=>sum+asNumber(row.reversed_fee_amount),0);
     const customerCollections = paymentRows.reduce((sum, row) => sum + asNumber(row.total_customer_charged_amount), 0);
     const customerRefunds = allocationRefundRows.reduce((sum, row) => sum + asNumber(row.total_returned_amount), 0);
     let currentCashDeductionRows: CashDeductionRow[] = [];
@@ -1125,7 +1123,10 @@ export async function POST(request: Request) {
       return sum + extractLegacyCashAmount(String(row.payment_method || ""), asNumber(row.amount));
     }, 0);
     const cashCollected = structuredCashCollections + fallbackReceiptCashCollections + balanceCashCollections + depositCashCollections + treatmentPlanCashCollections;
-    const cashAfterDeductions = cashCollected - totalCashDeductions;
+    const modernRefundIds=new Set(allocationRefundRows.map(row=>row.refund_id));
+    const cashReturned=allocationRefundRows.reduce((sum,row)=>sum+(normalizeMethodGroup(refundAllocationMap.get(row.payment_allocation_id)?.method_group||'')==='cash'?asNumber(row.total_returned_amount):0),0)
+      +currentRefunds.filter(row=>!modernRefundIds.has(row.id)).reduce((sum,row)=>sum+extractLegacyCashAmount(row.payment_method||'',asNumber(row.total_amount)),0);
+    const cashAfterDeductions = cashCollected - cashReturned - totalCashDeductions;
 
     const detailReceptionistIds = new Set<string>(
       currentCashDeductionRows
@@ -1199,6 +1200,7 @@ export async function POST(request: Request) {
     if (currentReceipts.length === 0) {
       attentionItems.push("No completed visits recorded in the selected period.");
     }
+    if(treatmentPlanRankingPending.visits>0)attentionItems.push(`${treatmentPlanRankingPending.visits} treatment-plan visits have no ranking value assigned yet. They are excluded from doctor revenue ranking until stage values are approved.${treatmentPlanRankingPending.missingDoctor?` ${treatmentPlanRankingPending.missingDoctor} historical visits also have no doctor recorded.`:''}`);
     if (doctorPerformanceWarning) {
       attentionItems.push(doctorPerformanceWarning);
     }
@@ -1222,8 +1224,9 @@ export async function POST(request: Request) {
         netCollectionsAfterDeductions: currentCollections - totalCashDeductions,
         netCollectionsAfterDeductionsCompare: compareCollections - compareTotalCashDeductions,
         targetProgress: overviewTargetAttainment,
-        customerCollections: currentCollections,
-        customerCollectionsCompare: compareCollections,
+        customerCollections: currentCollectionsEod,
+        customerCollectionsCompare: compareCollectionsEod,
+        refundsReturned:returnedAmount(currentRefunds),
         birthdayDiscounts: currentBirthdayDiscountTotal,
         birthdayDiscountsCompare: compareBirthdayDiscountTotal,
         outstandingBalance: currentOutstanding,
@@ -1244,6 +1247,7 @@ export async function POST(request: Request) {
       },
       clinicPerformance,
       doctorPerformance,
+      treatmentPlanRankingPending,
       trends: {
         sales: salesTrend,
         monthly: monthlyTrend,

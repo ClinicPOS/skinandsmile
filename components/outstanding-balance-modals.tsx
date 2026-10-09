@@ -1,6 +1,7 @@
 "use client";
+import {createPosEntry,completePosEntry} from "../lib/pos-entry-client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { supabase } from "../lib/supabase";
 import type { Clinic, Patient, OutstandingBalance, BalancePayment } from "../lib/types";
 import { rollupBalance } from "../lib/outstanding-balances";
@@ -78,10 +79,7 @@ export function AddOutstandingBalanceModal({
 
     setSaving(true);
     try {
-      const { data, error } = await supabase
-        .from("outstanding_balances")
-        .insert([
-          {
+      const { data, error } = await createPosEntry("legacy_balance", {
             patient_id: patient.id,
             clinic_id: clinicId,
             original_date: originalDate,
@@ -89,16 +87,14 @@ export function AddOutstandingBalanceModal({
             reason: reason.trim() || null,
             reference_number: reference.trim() || null,
             created_by: createdBy ?? null,
-          },
-        ])
-        .select()
-        .single();
+          });
 
       if (error) {
         console.error("Add outstanding balance failed:", error);
         alert(`Error: ${error.message || "Unknown error"}`);
         return;
       }
+      completePosEntry(data);
       onSaved?.(data as OutstandingBalance);
       onClose();
     } finally {
@@ -228,9 +224,11 @@ export function CollectBalancePaymentModal({
   const [method, setMethod] = useState<string>("Cash");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
+  const paymentRequest = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isOpen || !rollup) return;
+    paymentRequest.current = null;
     setAmount(rollup.remaining > 0 ? rollup.remaining.toFixed(2) : "");
     setMethod("Cash");
     setNotes("");
@@ -248,28 +246,12 @@ export function CollectBalancePaymentModal({
 
     setSaving(true);
     try {
-      const { data, error } = await supabase
-        .from("balance_payments")
-        .insert([
-          {
-            outstanding_balance_id: balance.id,
-            amount: amt,
-            payment_method: method,
-            receptionist_id: receptionistId,
-            register_session_id: registerSessionId,
-            notes: notes.trim() || null,
-          },
-        ])
-        .select()
-        .single();
-
-      if (error) {
-        console.error("Collect balance payment failed:", error);
-        alert(`Error: ${error.message || "Unknown error"}`);
-        return;
-      }
-      const payment = data as BalancePayment;
-      const remainingAfter = Math.max(0, rollup.remaining - amt);
+      paymentRequest.current ||= crypto.randomUUID();
+      const response = await fetch("/api/balance-payments", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:paymentRequest.current,balanceId:balance.id,registerSessionId,amount:amt,method,notes:notes.trim()})});
+      const result = await response.json();
+      if(!response.ok){alert(result.error || "Payment was not saved.");return;}
+      const payment = result.payment as BalancePayment;
+      const remainingAfter = Number(result.remainingAfter);
       onCollected?.(payment, { balance, patient, clinic, remainingAfter });
       onClose();
     } finally {

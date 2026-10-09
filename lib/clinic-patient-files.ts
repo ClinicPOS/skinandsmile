@@ -1,4 +1,3 @@
-import { supabase } from "./supabase";
 
 export type ClinicPatientFileRecord = {
   id: string;
@@ -15,90 +14,29 @@ export type EnsureClinicPatientFileResult = {
   clinicFileCreated: boolean;
 };
 
-export async function nextClinicFileNumber(clinicId: string): Promise<string> {
-  const { data, error } = await supabase.rpc("next_clinic_file_number", {
-    p_clinic_id: clinicId,
-  });
-  if (error) {
-    throw new Error(error.message || "Failed to get next clinic file number");
-  }
-  return String(data || "").trim();
-}
-
-export async function getClinicPatientFile(
-  clinicId: string,
-  patientId: string
-): Promise<ClinicPatientFileRecord | null> {
-  const { data, error } = await supabase
-    .from("clinic_patient_files")
-    .select("id, clinic_id, patient_id, file_no, mrn")
-    .eq("clinic_id", clinicId)
-    .eq("patient_id", patientId)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(error.message || "Failed to load clinic patient file");
-  }
-
-  return (data as ClinicPatientFileRecord | null) || null;
-}
-
-export async function createClinicPatientFile(payload: {
-  clinicId: string;
-  patientId: string;
-  fileNo: string;
-  mrn?: string | null;
-  clinicalNotes?: string | null;
-}): Promise<ClinicPatientFileRecord> {
-  const { data, error } = await supabase
-    .from("clinic_patient_files")
-    .insert([
-      {
-        clinic_id: payload.clinicId,
-        patient_id: payload.patientId,
-        file_no: payload.fileNo,
-        mrn: payload.mrn ?? null,
-        clinical_notes: payload.clinicalNotes ?? null,
-      },
-    ])
-    .select("id, clinic_id, patient_id, file_no, mrn")
-    .single();
-
-  if (error || !data) {
-    throw new Error(error?.message || "Failed to create clinic patient file");
-  }
-
-  return data as ClinicPatientFileRecord;
-}
-
 export async function ensurePatientClinicFile(payload: {
   clinicId: string;
   patientId: string;
   mrn?: string | null;
   fileNo?: string | null;
 }): Promise<EnsureClinicPatientFileResult> {
-  const { data, error } = await supabase.rpc("ensure_patient_clinic_file", {
-    p_patient_id: payload.patientId,
-    p_clinic_id: payload.clinicId,
-    p_mrn_input: payload.mrn ?? null,
-    p_file_no: payload.fileNo ?? null,
+  const response = await fetch(`/api/patients/${encodeURIComponent(payload.patientId)}/clinic-link`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      clinicId: payload.clinicId,
+      mrn: payload.mrn ?? null,
+      fileNo: payload.fileNo ?? null,
+    }),
   });
-  if (error || !data) {
-    throw new Error(error?.message || "Failed to ensure clinic patient file");
-  }
-
-  const result = data as {
-    patient_id: string;
-    clinic_patient_file_id: string;
-    file_no: string;
-    clinic_file_created: boolean;
-  };
+  const result = await response.json().catch(() => null);
+  if (!response.ok || !result?.clinicPatientFileId) throw new Error(result?.error || "Failed to ensure clinic patient file");
 
   return {
-    patientId: String(result.patient_id || ""),
-    clinicPatientFileId: String(result.clinic_patient_file_id || ""),
-    fileNo: String(result.file_no || ""),
-    clinicFileCreated: Boolean(result.clinic_file_created),
+    patientId: String(result.patientId || ""),
+    clinicPatientFileId: String(result.clinicPatientFileId || ""),
+    fileNo: String(result.fileNo || ""),
+    clinicFileCreated: Boolean(result.clinicFileCreated),
   };
 }
 

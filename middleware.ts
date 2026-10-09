@@ -6,7 +6,7 @@ import {
   isReportsOnlySession,
 } from "./lib/session-auth";
 
-const PUBLIC_PAGE_PATHS = new Set(["/login"]);
+const PUBLIC_PAGE_PATHS = new Set(["/login", "/login/staff"]);
 const PUBLIC_API_PREFIXES = ["/api/auth/"];
 const PUBLIC_REPORTS_API_PATHS = new Set([
   "/api/reports/login",
@@ -21,6 +21,8 @@ const REPORTS_ONLY_ALLOWED_API_PATHS = new Set([
 
 function isPublicPath(pathname: string) {
   return PUBLIC_PAGE_PATHS.has(pathname)
+    // This route permits only clinic names without login; all other reads verify sessions itself.
+    || pathname === '/api/pos-read'
     || pathname.startsWith("/images/")
     || pathname.startsWith("/fonts/")
     || PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))
@@ -70,6 +72,11 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
+  if(session.userRole==='clinic_manager'){
+    if(pathname==='/clinic-admin'||pathname.startsWith('/api/workspace/')||pathname==='/api/reports/ceo-dashboard')return NextResponse.next();
+    if(isApiPath(pathname))return NextResponse.json({error:'Forbidden'},{status:403});
+    return NextResponse.redirect(new URL('/clinic-admin',request.url));
+  }
   if (isReportsOnlySession(session)) {
     if (isReportsPage(pathname)) {
       return NextResponse.next();

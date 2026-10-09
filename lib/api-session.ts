@@ -4,7 +4,7 @@ import {
   APP_AUTH_COOKIE_NAME,
   type ActiveSession,
   type ActiveSessionRecord,
-  normalizeSessionMode,
+  fetchActiveSession,
 } from "./session-auth";
 
 export type AppSessionRecord = ActiveSessionRecord;
@@ -20,7 +20,7 @@ export function createServerSupabaseClient(): SupabaseClient {
 }
 
 export async function readAppSession(
-  supabase: SupabaseClient
+  _supabase: SupabaseClient
 ): Promise<{ session: AppSession | null; errorResponse?: Response }> {
   const cookieStore = await cookies();
   const sessionToken = cookieStore.get(APP_AUTH_COOKIE_NAME)?.value || "";
@@ -31,33 +31,25 @@ export async function readAppSession(
     };
   }
 
-  const { data, error } = await supabase
-    .from("active_sessions")
-    .select("token, session_mode, clinic_id, user_role, receptionist_id")
-    .eq("token", sessionToken)
-    .maybeSingle();
-
-  if (error || !data) {
+  let validatedSession: AppSession | null;
+  try {
+    validatedSession = await fetchActiveSession(sessionToken);
+  } catch {
     return {
       session: null,
-      errorResponse: Response.json({ error: "Unauthorized session." }, { status: 401 }),
+      errorResponse: Response.json({ error: "Session verification is unavailable. Please try again." }, { status: 503 }),
     };
   }
-
-  const row = data as AppSessionRecord;
+  if (!validatedSession) {
+    return { session: null, errorResponse: Response.json({ error: "Session expired or invalid. Please sign in again." }, { status: 401 }) };
+  }
   return {
-    session: {
-      token: row.token,
-      sessionMode: normalizeSessionMode(row.session_mode),
-      clinicId: row.clinic_id ? String(row.clinic_id) : null,
-      userRole: String(row.user_role || "").toLowerCase(),
-      receptionistId: row.receptionist_id ? String(row.receptionist_id) : null,
-    },
+    session: validatedSession,
   };
 }
 
 export function ensureClinicScopeAccess(session: AppSession, clinicId: string): Response | null {
-  if (session.sessionMode === "clinic" && session.clinicId !== clinicId) {
+  if ((session.sessionMode === "clinic"||session.userRole==='clinic_manager') && session.clinicId !== clinicId) {
     return Response.json({ error: "Forbidden for this clinic." }, { status: 403 });
   }
   return null;
@@ -67,7 +59,7 @@ export function ensureManagerSession(session: AppSession): Response | null {
   if (session.sessionMode !== "manager") {
     return Response.json({ error: "Forbidden." }, { status: 403 });
   }
-  const allowedRoles = new Set(["it_admin", "ceo"]);
+  const allowedRoles = new Set(["it_admin", "ceo", "owner"]);
   if (!allowedRoles.has(session.userRole)) {
     return Response.json({ error: "Forbidden." }, { status: 403 });
   }

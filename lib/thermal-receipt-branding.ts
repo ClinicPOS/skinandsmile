@@ -296,9 +296,11 @@ export function buildThermalReceiptCss(settings: ResolvedThermalReceiptSettings)
 }
 
 export function buildThermalLogoHtml(logoPath: string, alt: string, wrapId = "logo-wrap") {
+  const escapeAttribute=(value:string)=>value.replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll("'",'&#39;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+  const safeId=/^[a-zA-Z0-9_-]+$/.test(wrapId)?wrapId:'logo-wrap';
   return `
-    <div class="logo-wrap" id="${wrapId}">
-      <img class="logo" src="${logoPath}" alt="${alt}" loading="eager" decoding="async" onerror="document.getElementById('${wrapId}').style.display='none'" />
+    <div class="logo-wrap" id="${safeId}">
+      <img class="logo" src="${escapeAttribute(logoPath)}" alt="${escapeAttribute(alt)}" loading="eager" decoding="async" onerror="document.getElementById('${safeId}').style.display='none'" />
     </div>
   `;
 }

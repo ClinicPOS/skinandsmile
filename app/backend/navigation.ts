@@ -3,9 +3,12 @@ export type BackendNavItem = {
   label: string;
   keywords?: string[];
   group: "core" | "branding" | "security";
+  ownerOnly?:boolean;
 };
 
 export const backendNavigation: BackendNavItem[] = [
+  {href:'/backend/managers',label:'Managers & Access',keywords:['owner','permissions'],group:'security',ownerOnly:true},
+  {href:'/backend/clinic-workspace',label:'Clinic Workspace',keywords:['dashboard'],group:'core',ownerOnly:true},
   { href: "/backend", label: "Overview", keywords: ["home", "dashboard", "summary"], group: "core" },
   { href: "/backend/clinics", label: "Clinics", keywords: ["branches"], group: "core" },
   { href: "/backend/patients", label: "Patients", keywords: ["patient"], group: "core" },
@@ -20,6 +23,8 @@ export const backendNavigation: BackendNavItem[] = [
   { href: "/backend/receipt-branding", label: "Thermal Receipt & Reprint", keywords: ["thermal", "receipt", "reprint"], group: "branding" },
   { href: "/backend/a4-invoice-design", label: "A4 Invoice Design", keywords: ["a4", "invoice", "pdf"], group: "branding" },
   { href: "/backend/access", label: "Access & PINs", keywords: ["sessions", "security", "pins"], group: "security" },
+  { href: "/backend/activity-log", label: "Activity Log", keywords: ["audit", "history", "changes"], group: "security" },
+  { href: "/backend/correction-approvers", label: "Correction Approvers", keywords: ["manager", "approval", "leave", "backup"], group: "security" },
   { href: "/backend/system-settings", label: "System Settings", keywords: ["export", "register", "settings"], group: "security" },
 ];
 

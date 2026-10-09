@@ -1,3 +1,7 @@
+import { createProtectedDataClient } from "../../../lib/protected-data-server";
+import { readAppSession, ensureClinicScopeAccess, ensureManagerSession } from "../../../lib/api-session";
+import { sessionStorageFetch } from "../../../lib/session-storage";
+import { validateActiveSession } from "../../../lib/session-auth";
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -269,7 +273,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Supabase configuration is missing." }, { status: 500 });
   }
 
-  const supabase = createClient(supabaseUrl, supabaseAnonKey);
+  const supabase = createProtectedDataClient();
 
   const body = await req.json().catch(() => null);
   const action = String(body?.action || "preview") as ExportAction;
@@ -285,22 +289,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
-  const { data: sessionData, error: sessionError } = await supabase
-    .from("active_sessions")
-    .select("*")
-    .eq("token", sessionToken)
-    .maybeSingle();
-
-  if (sessionError || !sessionData) {
-    return NextResponse.json({ error: "Unauthorized session." }, { status: 401 });
-  }
-
-  const session = sessionData as SessionRow;
-  const sessionMode = String(session.session_mode || "").toLowerCase() || "manager";
-  const scopedClinicId = String(session.clinic_id || "");
-  if (sessionMode === "clinic" && scopedClinicId && scopedClinicId !== clinicId) {
-    return NextResponse.json({ error: "You are not allowed to export this clinic." }, { status: 403 });
-  }
+  const {session: verifiedSession, errorResponse} = await readAppSession(supabase);
+  if (!verifiedSession) return errorResponse!;
+  if (verifiedSession.sessionMode !== 'clinic' && ensureManagerSession(verifiedSession)) return NextResponse.json({error:'Forbidden.'},{status:403});
+  const scopeError = ensureClinicScopeAccess(verifiedSession, clinicId);
+  if (scopeError) return scopeError;
+  const sessionMode = verifiedSession.sessionMode;
+  const session: SessionRow = {token:sessionToken,user_role:verifiedSession.userRole};
 
   const { data: clinicData, error: clinicError } = await supabase
     .from("clinics")
@@ -365,15 +360,17 @@ export async function POST(req: NextRequest) {
       auditStarted = true;
     }
 
+    const patientClient = createProtectedDataClient();
+
     const expectedPatientCount = await countExact(() =>
-      supabase
+      patientClient
         .from("clinic_patient_files")
         .select("id", { count: "exact", head: true })
         .eq("clinic_id", clinicId)
     );
 
     const clinicFiles = await fetchAllRows<ClinicPatientFileRow>((from, to) =>
-      supabase
+      patientClient
         .from("clinic_patient_files")
         .select("id, clinic_id, patient_id, file_no, mrn, clinical_notes, legacy_source, is_active, created_at, updated_at")
         .eq("clinic_id", clinicId)
@@ -392,7 +389,7 @@ export async function POST(req: NextRequest) {
 
     const patientRows: PatientRow[] = [];
     for (const ids of chunk(patientIds, IN_CHUNK)) {
-      const { data, error } = await supabase
+      const { data, error } = await patientClient
         .from("patients")
         .select("id, name, phone, email, date_of_birth, sex, nationality, emirates_id, passport_number, notes, created_at")
         .in("id", ids);
@@ -402,7 +399,7 @@ export async function POST(req: NextRequest) {
     const patientById = new Map(patientRows.map((row) => [row.id, row]));
 
     const noteRows = await fetchAllRows<PatientNoteRow>((from, to) =>
-      supabase
+      createProtectedDataClient()
         .from("patient_notes")
         .select("id, patient_file_id, note, created_at")
         .eq("clinic_id", clinicId)

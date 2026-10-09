@@ -1,0 +1,18 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import ts from 'typescript';
+const module={exports:{}};
+const source=ts.transpileModule(fs.readFileSync('lib/doctor-revenue.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+vm.runInThisContext('(function(module,exports){'+source+'\n})')(module,module.exports);
+const {doctorRevenue}=module.exports;
+const receipt={id:'r',doctor_id:'fallback',patient_id:'p',subtotal:300,discount_amount:30,total:304.76,vat:13.5,gateway_fee:21.26,total_before_gateway_fee:283.5};
+const items=[{id:'a',receipt_id:'r',doctor_id:'first',total:100,taxable_amount:90},{id:'b',receipt_id:'r',doctor_id:'second',total:200,taxable_amount:180}];
+let result=doctorRevenue([receipt],items,[],new Set(['r']));
+assert.equal(result.rows.get('first').netSales,90);assert.equal(result.rows.get('second').netSales,180);assert.equal(result.unresolved,0);
+result=doctorRevenue([receipt],items,[{receipt_item_id:'a',refunded_treatment_amount:45,amount:47.25}],new Set(['r']));
+assert.equal(result.rows.get('first').netSales,45);assert.equal(result.rows.get('second').netSales,180);
+result=doctorRevenue([receipt],items,[{receipt_item_id:'b',refunded_treatment_amount:180,amount:189}],new Set());
+assert.equal(result.rows.get('second').netSales,-180,'This month refunds of an older receipt reduce this month credit');assert.equal(result.rows.has('first'),false);
+result=doctorRevenue([{...receipt,subtotal:0.03,discount_amount:0}],items,[],new Set(['r']));
+assert.equal([...result.rows.values()].reduce((sum,row)=>sum+row.netSales,0),0.03,'Cent allocation preserves the exact discounted total');
+result=doctorRevenue([receipt],items,[{receipt_item_id:'a',refunded_treatment_amount:null,amount:105}],new Set(['r']));assert.equal(result.unresolved,1,'Legacy refund without VAT breakdown must be reviewed');
+result=doctorRevenue([{...receipt,doctor_id:null}],items.map(row=>({...row,doctor_id:null})),[],new Set(['r']));assert.equal(result.unresolved,2,'Never invent a doctor for unattributed work');
+console.log('PASS: mixed doctors, discounted service value, VAT/fee exclusion, partial refunds, prior-period refunds, exact cents and unresolved attribution.');

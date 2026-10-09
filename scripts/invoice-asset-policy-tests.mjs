@@ -1,0 +1,10 @@
+import fs from 'node:fs';import vm from 'node:vm';import ts from 'typescript';import assert from 'node:assert/strict';
+const module={exports:{}};
+vm.runInThisContext('(function(module,exports){'+ts.transpileModule(fs.readFileSync('lib/invoice-asset-policy.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText+'})')(module,module.exports);
+const allowed=(url,type='image',method='GET')=>module.exports.invoiceAssetAllowed(url,type,method,'http://127.0.0.1:3001','http://127.0.0.1:54321');
+assert.equal(allowed('http://127.0.0.1:3001/images/logo.png'),true);
+assert.equal(allowed('http://127.0.0.1:54321/storage/v1/object/public/logo/a.png'),true);
+for(const url of ['http://127.0.0.1:54321/rest/v1/patients','http://127.0.0.1:3001/api/patients','http://127.0.0.1:1/private','https://example.com/track','file:///C:/Windows/win.ini','http://127.0.0.1:3001/images/../api/private'])assert.equal(allowed(url),false);
+assert.equal(allowed('http://127.0.0.1:3001/images/logo.png','script'),false);
+assert.equal(allowed('http://127.0.0.1:3001/images/logo.png','image','POST'),false);
+console.log('PASS: invoice assets allow static logos/fonts only and deny private routes, arbitrary origins, file access, scripts and writes.');

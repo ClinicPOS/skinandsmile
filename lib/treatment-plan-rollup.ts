@@ -122,7 +122,7 @@ export function computeTreatmentPlanPaidComponents(
 }
 
 export function computeTreatmentPlanRollup(
-  plan: Pick<TreatmentPlan, "id" | "total_amount" | "is_legacy" | "historical_amount_paid">,
+  plan: Pick<TreatmentPlan, "id" | "total_amount" | "is_legacy" | "historical_amount_paid"> & Partial<Pick<TreatmentPlan,"status"|"cancelled_at">>,
   options?: {
     structuredPayments?: StructuredPaymentLike[];
     legacyPayments?: LegacyPaymentLike[];
@@ -130,7 +130,9 @@ export function computeTreatmentPlanRollup(
   }
 ): TreatmentPlanRollup {
   const paid = computeTreatmentPlanPaidComponents(plan, options);
-  const remainingBalance = Math.max(0, asNumber(plan.total_amount) - paid.totalPaidToDate);
+  const asOf=asTimestamp(options?.asOf),cancelledAt=asTimestamp(plan.cancelled_at);
+  const cancelled=plan.status==='Cancelled'&&(asOf===null||cancelledAt===null||cancelledAt<=asOf);
+  const remainingBalance = cancelled?0:Math.max(0, asNumber(plan.total_amount) - paid.totalPaidToDate);
   return {
     ...paid,
     remainingBalance,

@@ -5,6 +5,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { buildThermalReceiptHtml } from "../../../lib/build-thermal-receipt-html";
 import { getReceiptLogoPath, printHtmlWhenImagesReady, receiptLogoOptions } from "../../../lib/receipt-branding";
 import { supabase } from "../../../lib/supabase";
+import {saveClinicDesign} from '../../../lib/backend-catalog-client';
 import type { Clinic } from "../../../lib/types";
 import {
   buildThermalLogoHtml,
@@ -323,7 +324,7 @@ function ReceiptBrandingPageContent() {
     };
 
     setIsSaving(true);
-    const { error } = await supabase.from("clinics").update(payload).eq("id", selectedClinicId);
+    const { error } = await saveClinicDesign(selectedClinicId,payload);
     setIsSaving(false);
 
     if (error) {

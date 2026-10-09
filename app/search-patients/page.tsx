@@ -1,6 +1,6 @@
-﻿"use client";
+"use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { getActiveClinicIdFromRegisterSession } from "../../lib/clinic-patient-files";
@@ -25,6 +25,7 @@ export default function SearchPatientsPage() {
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [selectedClinicId, setSelectedClinicId] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  const searchRequest = useRef(0);
 
   const loadClinicsAndPatients = useCallback(async () => {
     if (!isLoaded) return;
@@ -59,44 +60,22 @@ export default function SearchPatientsPage() {
   }, [query, selectedClinicId]);
 
   async function loadPatients(clinicId: string, search?: string) {
+    const requestId = ++searchRequest.current;
     const trimmed = (search || "").trim();
     setIsSearching(true);
 
     try {
-      let q = supabase
-        .from("clinic_patient_files")
-        .select("file_no, patients!inner(id, name, phone)")
-        .eq("clinic_id", clinicId)
-        .order("file_no", { ascending: true })
-        .limit(200);
-
-      if (trimmed) {
-        // Search by file number exact match first, then name/phone contains
-        if (/^\d+$/.test(trimmed)) {
-          q = q.eq("file_no", trimmed);
-        } else {
-          q = q.or(`name.ilike.%${trimmed}%,phone.ilike.%${trimmed}%`, { referencedTable: "patients" });
-        }
-      }
-
-      const { data } = await q;
-
-      const mapped = ((data || []) as Array<{ file_no: string; patients: { id: string; name: string; phone: string | null } | { id: string; name: string; phone: string | null }[] }>)
-        .map((row) => {
-          const p = Array.isArray(row.patients) ? row.patients[0] : row.patients;
-          if (!p?.id) return null;
-          return {
-            id: p.id as string,
-            name: String(p.name || ""),
-            phone: (p.phone as string | null) ?? null,
-            clinic_file_no: String(row.file_no || ""),
-          } as Patient;
-        })
-        .filter((row): row is Patient => row !== null);
-
-      setPatients(mapped);
+      const params = new URLSearchParams({ clinicId, q: trimmed });
+      const response = await fetch(`/api/patients/search?${params}`, { cache: "no-store" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Patient search failed.");
+      if (requestId === searchRequest.current) setPatients(result.patients || []);
+    } catch (error) {
+      if (requestId !== searchRequest.current) return;
+      setPatients([]);
+      alert(error instanceof Error ? error.message : "Patient search failed. Please try again.");
     } finally {
-      setIsSearching(false);
+      if (requestId === searchRequest.current) setIsSearching(false);
     }
   }
 
@@ -116,6 +95,8 @@ export default function SearchPatientsPage() {
             value={selectedClinicId}
             onChange={async (e) => {
               const clinicId = e.target.value;
+              searchRequest.current++;
+              setIsSearching(false);
               setSelectedClinicId(clinicId);
               setPatients([]);
               if (clinicId) await loadPatients(clinicId, query);

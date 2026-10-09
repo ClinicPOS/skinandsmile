@@ -1,7 +1,12 @@
 "use client";
+import {createPosEntry,completePosEntry} from "../lib/pos-entry-client";
+import {saveTreatmentPlanPayment} from "../lib/treatment-plan-payment-client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { requestReceiptRefund } from "../lib/refund-request-client";
+import { ReceiptVoidButton } from "./receipt-void-button";
 import { supabase } from "../lib/supabase";
+import { loadClinicHistoryPatients } from "../lib/patient-read-client";
 import { receptionistIdsForClinic } from "../lib/clinic-scope";
 import type {
   OutstandingBalance,
@@ -39,8 +44,8 @@ import {
   calculateSnapshotItemsRefundTotal,
   buildSnapshotRefundItemRows,
   classifyReceiptSnapshotStatus,
-  createAllocationBackedRefund,
-  createLegacyBackedRefund,
+
+
   getReceiptItemRefundSnapshot,
   getReceiptItemRemainingRefundable,
   getRemainingAllocationAmounts,
@@ -62,6 +67,7 @@ type Patient = {
 };
 
 type Receipt = {
+  status?: string; original_receipt_id?: string | null; replacement_receipt_id?: string | null; void_reason?: string | null;
   id: string;
   receipt_number?: number | null;
   patient_id: string;
@@ -176,6 +182,7 @@ type LookupItem = {
   standard_price?: number | null;
   pricing_type?: string | null;
   clinic_id?: string | null;
+  is_active?: boolean;
 };
 
 type FullPatient = {
@@ -373,6 +380,7 @@ export function SearchPatientModal({
   const [visitDoctorId, setVisitDoctorId] = useState("");
   const [visitNotes, setVisitNotes] = useState("");
   const [savingTreatmentVisit, setSavingTreatmentVisit] = useState(false);
+  const visitRequest = useRef<{ fingerprint: string; id: string } | null>(null);
   const [paymentPlanId, setPaymentPlanId] = useState<string | null>(null);
   const [planPaymentAmount, setPlanPaymentAmount] = useState("");
   const [planPaymentMode, setPlanPaymentMode] = useState<PlanPaymentMode>("Cash");
@@ -586,9 +594,7 @@ export function SearchPatientModal({
         legacyOriginalRef.trim() ? `Original Ref: ${legacyOriginalRef.trim()}` : "",
       ].filter(Boolean).join(" | ") || null;
 
-      const { data: planData, error: planError } = await supabase
-        .from("treatment_plans")
-        .insert([{
+      const { data: planData, error: planError } = await createPosEntry("plan", {
           patient_id: selectedPatient.id,
           clinic_id: clinic.id,
           service_id: legacyServiceId || null,
@@ -598,28 +604,18 @@ export function SearchPatientModal({
           notes: notesText,
           payment_arrangement: legacyPaymentArrangement || null,
           historical_amount_paid: historicalPaid,
+          historical_visits: visitsCompleted,
+          historical_visit_date: legacyStartDate || null,
           is_legacy: true,
           created_by: receptionistId,
           status: "Active",
-        }])
-        .select()
-        .single();
+        });
 
       if (planError || !planData) {
         alert(`Error creating legacy plan: ${planError?.message || "Unknown error"}`);
         return;
       }
 
-      // Add completed visits as historical visit records
-      for (let i = 0; i < visitsCompleted; i++) {
-        await supabase.from("treatment_plan_visits").insert([{
-          treatment_plan_id: planData.id,
-          visit_number: i + 1,
-          visit_date: legacyStartDate || new Date().toISOString().slice(0, 10),
-          receptionist_id: receptionistId,
-          notes: "Imported historical visit",
-        }]);
-      }
       if (visitsCompleted > 0) {
         const { data: importedVisits } = await supabase
           .from("treatment_plan_visits")
@@ -637,8 +633,7 @@ export function SearchPatientModal({
         const paymentDraft = newPlanAllocationDraft(method.methodVariant, paymentToday.toFixed(2));
         paymentDraft.cardNetwork = method.cardNetwork || "";
         const allocations = buildPaymentAllocations([paymentDraft], paymentToday, paymentToday, 0);
-        const { error: paymentTodayError } = await supabase
-          .rpc("create_treatment_plan_payment_record_with_allocations", buildTreatmentPlanPaymentRpcArgs({
+        const { error: paymentTodayError } = await saveTreatmentPlanPayment(buildTreatmentPlanPaymentRpcArgs({
             treatmentPlanId: planData.id,
             patientId: selectedPatient.id,
             clinicId: clinic.id,
@@ -646,8 +641,7 @@ export function SearchPatientModal({
             registerSessionId,
             paymentNotePrefix: `Legacy import payment today (${method.methodLabel}): ${title}`,
             allocations,
-          }))
-          .single();
+          }));
         if (paymentTodayError) {
           alert(`Legacy plan saved, but today's payment could not be recorded: ${paymentTodayError.message || "Unknown error"}`);
         } else {
@@ -674,6 +668,7 @@ export function SearchPatientModal({
         }
       }
 
+      completePosEntry(planData);
       setTreatmentPlans((prev) => [planData as TreatmentPlan, ...prev]);
       resetLegacyForm();
     } finally {
@@ -750,12 +745,7 @@ export function SearchPatientModal({
     setExpandedProfileSections(new Set());
     resetTreatmentPlanForms();
 
-    let notesQuery = supabase
-      .from("patient_notes")
-      .select("*")
-      .eq("patient_id", patient.id)
-      .order("created_at", { ascending: false });
-    if (clinicId) notesQuery = notesQuery.eq("clinic_id", clinicId);
+    const notesQuery = loadPatientNotes(patient.id);
 
     let plansQuery = supabase
       .from("treatment_plans")
@@ -766,7 +756,7 @@ export function SearchPatientModal({
 
     const [notesResult, doctorsResult, receptionistsResult, clinicsResult, allReceptionistsResult, receiptsResult, servicesResult, plansResult, historicalVisitsResult] = await Promise.all([
       notesQuery,
-      supabase.from("doctors").select("id, name"),
+      supabase.from("doctors").select("id, name, clinic_id, is_active"),
       supabase.from("receptionist").select("id, name"),
       supabase.from("clinics").select("id, name"),
       clinicId
@@ -859,6 +849,7 @@ export function SearchPatientModal({
       paymentRecordsData = (paymentRecordsResult.data as TreatmentPlanPaymentRecord[]) || [];
     }
 
+    if (notesResult.error) alert("Clinical notes could not be loaded. Please refresh before adding or editing notes.");
     setNotes((notesResult.data as PatientNote[]) || []);
     setProfileReceipts(scopedProfileReceipts);
     setProfileReceiptItems(profileItemsData);
@@ -899,25 +890,31 @@ export function SearchPatientModal({
 
   async function saveNewNote() {
     if (!newNoteText.trim() || !selectedPatient) return;
+    if (isSavingNote) return;
     setIsSavingNote(true);
-    const { error } = await supabase.from("patient_notes").insert({
-      patient_id: selectedPatient.id,
-      note: newNoteText.trim(),
-      clinic_id: clinicId ?? null,
-    });
-    if (!error) {
-      let refetch = supabase
-        .from("patient_notes")
-        .select("*")
-        .eq("patient_id", selectedPatient.id)
-        .order("created_at", { ascending: false });
-      if (clinicId) refetch = refetch.eq("clinic_id", clinicId);
-      const { data } = await refetch;
-      setNotes((data as PatientNote[]) || []);
-      setNewNoteText("");
-      setShowAddNote(false);
+    try {
+      const response = await fetch("/api/patient-notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patientId: selectedPatient.id,
+          note: newNoteText.trim(),
+          clinicId: clinicId ?? null,
+        }),
+      });
+      if (response.ok) {
+        await refetchNotes(selectedPatient.id);
+        setNewNoteText("");
+        setShowAddNote(false);
+      } else {
+        const payload = await response.json().catch(() => null);
+        alert(payload?.error || "Patient note could not be saved.");
+      }
+    } catch {
+      alert("Could not confirm the note change. Refresh the patient notes before retrying.");
+    } finally {
+      setIsSavingNote(false);
     }
-    setIsSavingNote(false);
   }
 
   async function saveTreatmentPlan() {
@@ -932,10 +929,7 @@ export function SearchPatientModal({
 
     setSavingTreatmentPlan(true);
     try {
-      const { data, error } = await supabase
-        .from("treatment_plans")
-        .insert([
-          {
+      const { data, error } = await createPosEntry("plan", {
             patient_id: selectedPatient.id,
             clinic_id: clinic.id,
             service_id: selectedService?.id || null,
@@ -944,10 +938,7 @@ export function SearchPatientModal({
             planned_visits: plannedVisits,
             notes: newPlanNotes.trim() || null,
             created_by: receptionistId,
-          },
-        ])
-        .select()
-        .single();
+          });
 
       if (error) {
         console.error("Create treatment plan failed:", error);
@@ -955,6 +946,7 @@ export function SearchPatientModal({
         return;
       }
 
+      completePosEntry(data);
       setTreatmentPlans((prev) => [data as TreatmentPlan, ...prev]);
       setShowNewTreatmentPlan(false);
       setNewPlanServiceId("");
@@ -1019,6 +1011,8 @@ export function SearchPatientModal({
 
   async function saveTreatmentVisit(plan: TreatmentPlan) {
     if (!selectedPatient) return;
+    if (savingTreatmentVisit) return;
+    if(!visitDoctorId){alert('Select the doctor who actually performed this visit.');return;}
     if (!canAddTreatmentPlanVisit(plan.planned_visits, planCompletedVisits(plan))) {
       alert("This treatment plan has reached its planned visit limit. Create a new add-on plan for further treatment.");
       return;
@@ -1026,11 +1020,19 @@ export function SearchPatientModal({
 
     setSavingTreatmentVisit(true);
     try {
+      const fingerprint = JSON.stringify([plan.id, visitDoctorId || null, visitNotes.trim() || null]);
+      if (visitRequest.current?.fingerprint !== fingerprint) {
+        const storageKey = `pos-visit-request:${plan.id}`;
+        const id = sessionStorage.getItem(storageKey) || crypto.randomUUID();
+        sessionStorage.setItem(storageKey, id);
+        visitRequest.current = { fingerprint, id };
+      }
       const response = await fetch("/api/treatment-plan-visits", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           treatmentPlanId: plan.id,
+          requestId: visitRequest.current.id,
           doctorId: visitDoctorId || null,
           notes: visitNotes.trim() || null,
         }),
@@ -1042,13 +1044,17 @@ export function SearchPatientModal({
       }
 
       const visit = result.visit as TreatmentPlanVisit;
-      setTreatmentPlanVisits((prev) => [visit, ...prev]);
+      setTreatmentPlanVisits((prev) => [visit, ...prev.filter(item => item.id !== visit.id)]);
       if (result.plan) {
         setTreatmentPlans((prev) => prev.map((item) => item.id === plan.id ? result.plan as TreatmentPlan : item));
       }
       setVisitPlanId(null);
       setVisitDoctorId("");
       setVisitNotes("");
+      sessionStorage.removeItem(`pos-visit-request:${plan.id}`);
+      visitRequest.current = null;
+    } catch {
+      alert("Visit saving could not be confirmed. Try Save Visit again with the same details; it will reuse the same request ID.");
     } finally {
       setSavingTreatmentVisit(false);
     }
@@ -1076,8 +1082,7 @@ export function SearchPatientModal({
     setSavingTreatmentPayment(true);
     try {
       const allocations = buildPaymentAllocations(planPaymentDrafts, invoiceAmount, invoiceAmount, 0);
-      const { data, error } = await supabase
-        .rpc("create_treatment_plan_payment_record_with_allocations", buildTreatmentPlanPaymentRpcArgs({
+      const { data, error } = await saveTreatmentPlanPayment(buildTreatmentPlanPaymentRpcArgs({
           treatmentPlanId: plan.id,
           patientId: selectedPatient.id,
           clinicId: clinic.id,
@@ -1085,8 +1090,7 @@ export function SearchPatientModal({
           registerSessionId,
           paymentNotePrefix: `Plan payment: ${plan.title}`,
           allocations,
-        }))
-        .single();
+        }));
 
       if (error) {
         console.error("Collect treatment plan payment failed:", error);
@@ -1110,12 +1114,18 @@ export function SearchPatientModal({
       if (refreshedPaymentsResult.error) {
         alert(`Payment saved, but reloading treatment plan payments failed: ${refreshedPaymentsResult.error.message || "Unknown error"}`);
       } else {
-        setTreatmentPlanPayments((refreshedPaymentsResult.data as TreatmentPlanPayment[]) || []);
+        setTreatmentPlanPayments((prev) => [
+          ...((refreshedPaymentsResult.data as TreatmentPlanPayment[]) || []),
+          ...prev.filter((payment) => payment.treatment_plan_id !== plan.id),
+        ]);
       }
       if (refreshedRecordsResult.error) {
         alert(`Payment saved, but reloading structured treatment plan payments failed: ${refreshedRecordsResult.error.message || "Unknown error"}`);
       } else {
-        setTreatmentPlanPaymentRecords((refreshedRecordsResult.data as TreatmentPlanPaymentRecord[]) || []);
+        setTreatmentPlanPaymentRecords((prev) => [
+          ...((refreshedRecordsResult.data as TreatmentPlanPaymentRecord[]) || []),
+          ...prev.filter((payment) => payment.treatment_plan_id !== plan.id),
+        ]);
       }
       setPaymentPlanId(null);
       setPlanPaymentAmount("");
@@ -1154,15 +1164,19 @@ export function SearchPatientModal({
     }
   }
 
+  async function loadPatientNotes(patientId: string) {
+    const query = new URLSearchParams({ patientId });
+    if (clinicId) query.set("clinicId", clinicId);
+    const response = await fetch("/api/patient-notes?" + query, { cache: "no-store" });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !Array.isArray(payload?.notes)) return { data: [] as PatientNote[], error: new Error(payload?.error || "Clinical notes could not be loaded.") };
+    return { data: payload.notes as PatientNote[], error: null };
+  }
+
   async function refetchNotes(patientId: string) {
-    let q = supabase
-      .from("patient_notes")
-      .select("*")
-      .eq("patient_id", patientId)
-      .order("created_at", { ascending: false });
-    if (clinicId) q = q.eq("clinic_id", clinicId);
-    const { data } = await q;
-    setNotes((data as PatientNote[]) || []);
+    const result = await loadPatientNotes(patientId);
+    if (result.error) throw result.error;
+    setNotes(result.data);
   }
 
   function startEditNote(note: PatientNote) {
@@ -1177,24 +1191,41 @@ export function SearchPatientModal({
 
   async function saveEditNote() {
     if (!editingNoteId || !editingNoteText.trim() || !selectedPatient) return;
+    if (isSavingNote) return;
     setIsSavingNote(true);
-    const { error } = await supabase
-      .from("patient_notes")
-      .update({ note: editingNoteText.trim() })
-      .eq("id", editingNoteId);
-    if (!error) {
-      await refetchNotes(selectedPatient.id);
-      cancelEditNote();
+    try {
+      const response = await fetch(`/api/patient-notes/${encodeURIComponent(editingNoteId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: editingNoteText.trim() }),
+      });
+      if (response.ok) {
+        await refetchNotes(selectedPatient.id);
+        cancelEditNote();
+      } else {
+        const payload = await response.json().catch(() => null);
+        alert(payload?.error || "Patient note could not be updated.");
+      }
+    } catch {
+      alert("Could not confirm the note change. Refresh the patient notes before retrying.");
+    } finally {
+      setIsSavingNote(false);
     }
-    setIsSavingNote(false);
   }
 
   async function deleteNote(noteId: string) {
     if (!selectedPatient) return;
     if (!confirm("Delete this note? This cannot be undone.")) return;
-    const { error } = await supabase.from("patient_notes").delete().eq("id", noteId);
-    if (!error) {
-      await refetchNotes(selectedPatient.id);
+    try {
+      const response = await fetch(`/api/patient-notes/${encodeURIComponent(noteId)}`, { method: "DELETE" });
+      if (response.ok) {
+        await refetchNotes(selectedPatient.id);
+      } else {
+        const payload = await response.json().catch(() => null);
+        alert(payload?.error || "Patient note could not be deleted.");
+      }
+    } catch {
+      alert("Could not confirm deletion. Refresh the patient notes before retrying.");
     }
   }
 
@@ -1709,14 +1740,14 @@ export function SearchPatientModal({
                             <div className="mt-3 space-y-2 rounded-2xl border border-cyan-100 bg-cyan-50 p-3">
                               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                 <div>
-                                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Doctor</label>
+                                  <label className="mb-1 block text-xs font-semibold uppercase text-slate-500">Doctor who performed this visit (required)</label>
                                   <select
                                     value={visitDoctorId}
                                     onChange={(e) => setVisitDoctorId(e.target.value)}
                                     className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                                   >
-                                    <option value="">Not selected</option>
-                                    {doctors.map((doctor) => (
+                                    <option value="">Select actual doctor</option>
+                                    {doctors.filter((doctor) => doctor.is_active !== false && (!clinicId || doctor.clinic_id === clinicId)).map((doctor) => (
                                       <option key={doctor.id} value={doctor.id}>{doctor.name}</option>
                                     ))}
                                   </select>
@@ -1738,7 +1769,7 @@ export function SearchPatientModal({
                               <div className="flex gap-2">
                                 <button
                                   onClick={() => saveTreatmentVisit(plan)}
-                                  disabled={savingTreatmentVisit}
+                                  disabled={savingTreatmentVisit || !visitDoctorId}
                                   className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50"
                                 >
                                   {savingTreatmentVisit ? "Saving…" : "Save Visit"}
@@ -2461,6 +2492,7 @@ export function ReceiptHistoryModal({
   const [loadingItemsFor, setLoadingItemsFor] = useState<string | null>(null);
 
   const [view, setView] = useState<"list" | "refund">("list");
+  const refundRequestOperation = useRef(crypto.randomUUID());
   const [refundTargetReceipt, setRefundTargetReceipt] = useState<Receipt | null>(null);
   const [refundItems, setRefundItems] = useState<any[]>([]);
   const [priorRefundItemsMap, setPriorRefundItemsMap] = useState<Record<string, any[]>>({});
@@ -2482,7 +2514,15 @@ export function ReceiptHistoryModal({
       setPriorRefundItemsMap({});
       setPaymentRecordIdsMap({});
       setPaymentAllocationsMap({});
-      loadHistory();
+      void loadHistory().catch(() => {
+        setPatients([]);
+        setReceipts([]);
+        setTreatmentPlans([]);
+        setTreatmentPlanPayments([]);
+        setLegacyTreatmentPlanPayments([]);
+        setTreatmentPlanAllocations([]);
+        alert("Unable to load clinic history. Please try again.");
+      });
     }
   }, [isOpen]);
 
@@ -2533,9 +2573,9 @@ export function ReceiptHistoryModal({
 
     const [receiptResult, patientResult, servicesResult, doctorsResult, receptionistsResult, treatmentPlanResult, treatmentPlanPaymentResult, legacyTreatmentPlanPaymentsResult, treatmentPlanAllocationResult] = await Promise.all([
       supabase.from("receipts").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
-      fetchAllRows("patients", "id, name, phone, patient_number"),
+      loadClinicHistoryPatients(clinicId),
       supabase.from("services").select("id, name"),
-      supabase.from("doctors").select("id, name"),
+      supabase.from("doctors").select("id, name, clinic_id, is_active"),
       supabase.from("receptionist").select("id, name"),
       supabase.from("treatment_plans").select("*").in("created_by", receptionistIds).order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payment_records").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
@@ -2545,25 +2585,6 @@ export function ReceiptHistoryModal({
 
     const loadedReceipts = (receiptResult.data as Receipt[]) || [];
     const loadedPatients = ((patientResult as Patient[]) || []).map((p) => ({ ...p }));
-    const patientIds = [...new Set([
-      ...loadedReceipts.map((r) => String(r.patient_id || "")).filter(Boolean),
-      ...((treatmentPlanPaymentResult.data as TreatmentPlanPaymentRecord[]) || []).map((r) => String(r.patient_id || "")).filter(Boolean),
-    ])];
-    if (patientIds.length > 0) {
-      const { data: clinicFiles } = await supabase
-        .from("clinic_patient_files")
-        .select("patient_id, file_no")
-        .eq("clinic_id", clinicId)
-        .in("patient_id", patientIds);
-      const fileNoByPatientId = new Map<string, string>();
-      (clinicFiles || []).forEach((f: any) => {
-        fileNoByPatientId.set(String(f.patient_id), String(f.file_no || ""));
-      });
-      loadedPatients.forEach((p) => {
-        p.clinic_file_no = fileNoByPatientId.get(String(p.id)) || null;
-      });
-    }
-
     setReceipts(loadedReceipts);
     setPatients(loadedPatients);
     setServices((servicesResult.data as LookupItem[]) || []);
@@ -2795,6 +2816,7 @@ export function ReceiptHistoryModal({
         setPriorRefundItemsMap((prev) => ({ ...prev, [receipt.id]: [] }));
       }
     }
+    refundRequestOperation.current = crypto.randomUUID();
     setRefundTargetReceipt(receipt);
     setRefundItems(items);
     setCheckedItems({});
@@ -2934,173 +2956,27 @@ export function ReceiptHistoryModal({
   }
 
   async function processRefund() {
-    if (!refundTargetReceipt) return;
-    if (!refundReason.trim()) { alert("Please enter a reason."); return; }
-
-    // Mixed/incomplete receipt: block with explicit error.
-    if (receiptSnapshotStatus === "mixed") {
-      alert("This receipt contains incomplete historical pricing data and cannot be refunded automatically. Please contact an administrator.");
-      return;
-    }
-
-    if (receiptSnapshotStatus === "snapshot") {
-      // For snapshot receipts, item selection is required.
-      const hasCheckedNonFullyRefunded = refundAll
-        ? Object.values(itemRemainingMap).some((r) => !r.isFullyRefunded)
-        : Object.values(itemRemainingMap).some((r) => checkedItems[r.receiptItemId] && !r.isFullyRefunded);
-      if (!hasCheckedNonFullyRefunded) {
-        alert("Select at least one item to refund.");
-        setIsProcessingRefund(false);
-        return;
-      }
-    } else if (!refundAll && selectedRefundItemRows.length === 0) {
-      alert("Select at least one item.");
-      return;
-    }
-
-    if (refundMode === "admin_review") {
-      alert("This receipt has a payment record but no payment allocations. Refund is blocked for safety. Please ask admin to review this receipt.");
-      return;
-    }
-
+    if (!refundTargetReceipt || isProcessingRefund) return;
     setIsProcessingRefund(true);
-    const totalRefund = calcRefundTotal();
-    const maxRefundable = maxRefundableFor(refundTargetReceipt);
-
-    if (totalRefund <= 0) {
-      alert("Nothing left to refund — everything the patient paid has already been refunded.");
-      setIsProcessingRefund(false);
-      return;
-    }
-    if (totalRefund > maxRefundable + 0.0049) {
-      alert(`Refund exceeds what the patient actually paid. Maximum refundable is AED ${maxRefundable.toFixed(2)}.`);
-      setIsProcessingRefund(false);
-      return;
-    }
-
-    // Build refund item rows.
-    let baseRefundItemRows: ReturnType<typeof buildSnapshotRefundItemRows>;
-    if (receiptSnapshotStatus === "snapshot") {
-      const targetRemaining = refundAll
-        ? Object.values(itemRemainingMap).filter((r) => !r.isFullyRefunded)
-        : Object.values(itemRemainingMap).filter((r) => checkedItems[r.receiptItemId] && !r.isFullyRefunded);
-      const snapshotArgs = targetRemaining.map((remaining) => {
-        const item = refundItems.find((i: any) => i.id === remaining.receiptItemId);
-        const snapshot = getReceiptItemRefundSnapshot(item)!;
-        return { snapshot, remaining, serviceId: item?.service_id ?? null };
-      });
-      try {
-        baseRefundItemRows = buildSnapshotRefundItemRows(snapshotArgs);
-      } catch (err) {
-        alert(`Refund data error: ${err instanceof Error ? err.message : String(err)}`);
-        setIsProcessingRefund(false);
-        return;
-      }
-    } else {
-      baseRefundItemRows = selectedRefundItemRows.map((item: any) => ({
-        receipt_item_id: item.id,
-        service_id: item.service_id,
-        service_name: item.service_name_snapshot || services.find((s: any) => s.id === item.service_id)?.name || "Unknown",
-        amount: Number(item.total || item.price || 0),
-      }));
-    }
-
-    let result:
-      | { kind: "modern"; refundData: any; warningMessage?: string }
-      | { kind: "legacy"; refundData: any };
-    if (refundMode === "legacy") {
-      try {
-        const legacyResult = await createLegacyBackedRefund({
-          supabase,
-          receiptId: refundTargetReceipt.id,
-          receptionistId: refundTargetReceipt.receptionist_id,
-          refundedBy: null,
-          reason: refundReason.trim(),
-          totalAmount: totalRefund,
-          paymentMethod: refundTargetReceipt.payment_method || "Legacy receipt refund",
-          refundItemRows: baseRefundItemRows,
-        });
-        result = { kind: "legacy", refundData: legacyResult.refundData };
-      } catch (error) {
-        alert(`Error: ${error instanceof Error ? error.message : String(error)}`);
-        setIsProcessingRefund(false);
-        return;
-      }
-    } else {
-      const { requests, error } = buildAllocationRefundRequests({
-        allocations: refundTargetAllocations,
-        selectedAllocationIds: selectedRefundAllocationIds,
-        requestedAmountsByAllocationId: refundAllocationAmountInputs,
-        expectedRefundAmount: totalRefund,
-      });
-      if (error) {
-        alert(error);
-        setIsProcessingRefund(false);
-        return;
-      }
-      try {
-        const modernResult = await createAllocationBackedRefund({
-          supabase,
-          receiptId: refundTargetReceipt.id,
-          receptionistId: refundTargetReceipt.receptionist_id,
-          processedBy: refundTargetReceipt.receptionist_id,
-          refundedBy: null,
-          reason: refundReason.trim(),
-          requests,
-          refundItemRows: baseRefundItemRows,
-        });
-        result = { kind: "modern", refundData: modernResult.refundData, warningMessage: modernResult.warningMessage };
-      } catch (error) {
-        alert(`Error: ${error instanceof Error ? error.message : String(error)}`);
-        setIsProcessingRefund(false);
-        return;
-      }
-    }
-
-    // A fully refunded partial-payment receipt shouldn't keep chasing the
-    // patient for the remainder — remove its auto-created outstanding balance,
-    // unless payments were already collected against it (needs manual review).
-    if (refundAll && refundTargetReceipt.amount_paid != null) {
-      const { data: linkedBalances } = await supabase
-        .from("outstanding_balances")
-        .select("id")
-        .eq("receipt_id", refundTargetReceipt.id);
-      const balanceIds = (linkedBalances || []).map((b: any) => b.id);
-      if (balanceIds.length > 0) {
-        const { data: collected } = await supabase
-          .from("balance_payments")
-          .select("id")
-          .in("outstanding_balance_id", balanceIds)
-          .limit(1);
-        if ((collected || []).length === 0) {
-          await supabase.from("outstanding_balances").delete().in("id", balanceIds);
-        } else {
-          alert("Note: this receipt's outstanding balance already has collected payments, so it was kept. Review it in the Backend page.");
-        }
-      }
-    }
-
-    setRefundsMap((prev) => ({
-      ...prev,
-      [refundTargetReceipt.id]: [result.refundData, ...(prev[refundTargetReceipt.id] || [])],
-    }));
-    setIsProcessingRefund(false);
-    if (result.kind === "modern" && result.warningMessage) {
-      alert(result.warningMessage);
-    }
-    setView("list");
-    alert(`Refund of AED ${Number(result.refundData.total_amount || totalRefund).toFixed(2)} processed successfully.`);
+    try {
+      const itemIds = refundAll ? refundItems.filter((item: any) => !itemRemainingMap[item.id]?.isFullyRefunded).map((item: any) => item.id) : selectedRefundItemRows.map((item: any) => item.id);
+      const allocationAmounts = Object.fromEntries(selectedRefundAllocationIds.map(id => [id, refundAllocationAmountInputs[id] || ""]));
+      await requestReceiptRefund({receiptId:refundTargetReceipt.id,reason:refundReason.trim(),itemIds,allocationAmounts,operationId:refundRequestOperation.current});
+      setView("list");
+      alert("Refund request saved. A manager must approve it. Open My refund requests to confirm after returning the money.");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Could not request refund.");
+    } finally { setIsProcessingRefund(false); }
   }
-
   async function reprintReceipt(receipt: Receipt) {
     let receiptItems = receiptItemsMap[receipt.id] || [];
-    
+
     // Load items if not already in the map
     if (receiptItems.length === 0) {
       const { data } = await supabase.from("receipt_items").select("*").eq("receipt_id", receipt.id);
       receiptItems = data || [];
     }
-    
+
     const receptionist = allReceptionists.find((r) => r.id === receipt.receptionist_id);
     const receiptDate = receipt.created_at ? new Date(receipt.created_at) : new Date();
     const dateValue = receiptDate.toLocaleDateString("en-GB");
@@ -3111,7 +2987,7 @@ export function ReceiptHistoryModal({
       : patient?.patient_number
       ? `#${String(patient.patient_number).padStart(5, "0")}`
       : "-";
-    
+
     const renderLines = receiptItems.map((item) => {
       const service = services.find((s) => s.id === item.service_id);
       return mapRegularReceiptRenderLine(item, {
@@ -3180,7 +3056,7 @@ export function ReceiptHistoryModal({
     const patient = patients.find((p) => p.id === receipt.patient_id);
     const doctorName = doctors.find((d) => d.id === receipt.doctor_id)?.name || null;
     let receiptItems = receiptItemsMap[receipt.id] || [];
-    
+
     if (receiptItems.length === 0) {
       const { data } = await supabase.from("receipt_items").select("*").eq("receipt_id", receipt.id);
       receiptItems = data || [];
@@ -3265,7 +3141,7 @@ export function ReceiptHistoryModal({
               >
                 ← Back
               </button>
-              <h2 className="text-base font-semibold text-slate-900">Process Refund</h2>
+              <h2 className="text-base font-semibold text-slate-900">Request Refund</h2>
             </>
           ) : (
             <h2 className="text-lg font-semibold text-slate-900">Receipt History</h2>
@@ -3351,7 +3227,7 @@ export function ReceiptHistoryModal({
                                 >
                                   Print A4 Invoice
                                 </button>
-                                
+
                               </div>
                             </div>
                           );
@@ -3376,7 +3252,7 @@ export function ReceiptHistoryModal({
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-2">
                                   <span className="text-sm font-semibold text-slate-900">{formatReceiptNo(receipt)}</span>
-                                  {hasRefund && (
+                                  {receipt.status==="VOIDED"&&<span className="rounded bg-slate-200 px-2 text-xs">VOIDED</span>}{hasRefund && (
                                     <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">Refunded</span>
                                   )}
                                   {receipt.amount_paid != null &&
@@ -3399,7 +3275,8 @@ export function ReceiptHistoryModal({
                             </button>
 
                             {isExpanded && (
-                              <div className="border-t border-slate-100 bg-slate-50 px-4 pb-4">
+                              <div className="border-t border-slate-100 bg-slate-50 px-4 pb-4">{items&&receipt.status!=="VOIDED"&&<ReceiptVoidButton receiptId={receipt.id}/>}
+
                                 {isLoading ? (
                                   <p className="py-4 text-center text-xs text-slate-400">Loading items…</p>
                                 ) : items ? (
@@ -3445,7 +3322,7 @@ export function ReceiptHistoryModal({
                                         {downloadingRegularReceiptId === receipt.id ? "Generating…" : "Print A4 Invoice"}
                                       </button>
                                       <button
-                                        onClick={() => startRefund(receipt)}
+                                        disabled={receipt.status==="VOIDED"} onClick={() => startRefund(receipt)}
                                         className="flex-1 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-400"
                                       >
                                         Refund
@@ -3630,7 +3507,7 @@ export function ReceiptHistoryModal({
                   }
                   className="flex-1 rounded-2xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-amber-400 disabled:opacity-50"
                 >
-                  {isProcessingRefund ? "Processing…" : "Process Refund"}
+                  {isProcessingRefund ? "Processing…" : "Request Refund"}
                 </button>
                 <button
                   onClick={() => setView("list")}
@@ -3666,14 +3543,20 @@ export function TreatmentHistoryModal({
 
   useEffect(() => {
     if (isOpen) {
-      loadHistory();
+      void loadHistory().catch(() => {
+        setPatients([]);
+        setReceipts([]);
+        setReceiptItems([]);
+        setSelectedPatientId("");
+        alert("Unable to load treatment history. Please try again.");
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, clinicId]);
 
   async function loadHistory() {
     const [patientResult, allReceiptsResult, serviceResult, receptionistsResult] = await Promise.all([
-      supabase.from("patients").select("id, name, phone").order("name", { ascending: true }),
+      loadClinicHistoryPatients(clinicId).then(data => ({ data })),
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
       supabase.from("services").select("id, name"),
       clinicId

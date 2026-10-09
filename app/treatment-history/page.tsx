@@ -1,7 +1,8 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
+import { loadClinicPatientRecords } from "../../lib/patient-read-client";
 import { supabase } from "../../lib/supabase";
 import { receptionistIdsForClinic } from "../../lib/clinic-scope";
 import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
@@ -16,6 +17,7 @@ type Clinic = { id: string; name: string };
 type ReceptionistBrief = { id: string; clinic_id: string | null };
 
 type Receipt = {
+  status?: string;
   id: string;
   patient_id: string;
   receptionist_id?: string | null;
@@ -66,40 +68,53 @@ export default function TreatmentHistoryPage() {
   }, [loadClinics]);
 
   async function loadData(clinicId: string) {
-    const [patientResult, receiptResult, serviceResult, itemResult, receptionistResult] = await Promise.all([
-      supabase.from("clinic_patient_files").select("file_no, patient_id, patients(id, name, phone)").eq("clinic_id", clinicId).order("file_no", { ascending: true }),
-      supabase.from("receipts").select("id, patient_id, receptionist_id, subtotal, vat, total, created_at, notes").order("created_at", { ascending: false }),
-      supabase.from("services").select("id, name").order("name", { ascending: true }),
-      supabase.from("receipt_items").select("receipt_id, service_id, quantity, total"),
-      supabase.from("receptionist").select("id, clinic_id"),
-    ]);
+    try {
+      const [patientResult, receiptResult, serviceResult, itemResult, receptionistResult] = await Promise.all([
+        loadClinicPatientRecords(clinicId).then(records => {
+          const byId = new Map(records.patients.map(patient => [patient.id, patient]));
+          const files = [...records.files].sort((a, b) => a.file_no < b.file_no ? -1 : a.file_no > b.file_no ? 1 : 0);
+          return { data: files.map(file => ({ file_no: file.file_no, patients: byId.get(file.patient_id) })) };
+        }),
+        supabase.from("receipts").select("id, patient_id, receptionist_id, subtotal, vat, total, created_at, notes, status").order("created_at", { ascending: false }),
+        supabase.from("services").select("id, name").order("name", { ascending: true }),
+        supabase.from("receipt_items").select("receipt_id, service_id, quantity, total"),
+        supabase.from("receptionist").select("id, clinic_id"),
+      ]);
 
-    const mappedPatients = ((patientResult.data || []) as Array<{ file_no: string; patients: { id: string; name: string; phone: string | null } | { id: string; name: string; phone: string | null }[] }>)
-      .map((row) => {
-        const p = Array.isArray(row.patients) ? row.patients[0] : row.patients;
-        if (!p?.id) return null;
-        return {
-          id: p.id as string,
-          name: String(p.name || ""),
-          phone: (p.phone as string | null) ?? null,
-          clinic_file_no: String(row.file_no || ""),
-        } as Patient;
-      })
-      .filter((p): p is Patient => p !== null);
+      const mappedPatients = ((patientResult.data || []) as Array<{ file_no: string; patients: { id: string; name: string; phone: string | null } | { id: string; name: string; phone: string | null }[] }>)
+        .map((row) => {
+          const p = Array.isArray(row.patients) ? row.patients[0] : row.patients;
+          if (!p?.id) return null;
+          return {
+            id: p.id as string,
+            name: String(p.name || ""),
+            phone: (p.phone as string | null) ?? null,
+            clinic_file_no: String(row.file_no || ""),
+          } as Patient;
+        })
+        .filter((p): p is Patient => p !== null);
 
-    setPatients(mappedPatients);
-    const receptionistRows = (receptionistResult.data as ReceptionistBrief[]) || [];
-    const clinicReceptionistIds = new Set(receptionistIdsForClinic(receptionistRows, clinicId));
-    setReceipts(
-      ((receiptResult.data as Receipt[]) || []).filter((receipt) =>
-        clinicReceptionistIds.has(String((receipt as Receipt & { receptionist_id?: string }).receptionist_id || ""))
-      )
-    );
-    setServices((serviceResult.data as Service[]) || []);
-    setReceiptItems((itemResult.data as ReceiptItem[]) || []);
+      setPatients(mappedPatients);
+      const receptionistRows = (receptionistResult.data as ReceptionistBrief[]) || [];
+      const clinicReceptionistIds = new Set(receptionistIdsForClinic(receptionistRows, clinicId));
+      setReceipts(
+        ((receiptResult.data as Receipt[]) || []).filter((receipt) =>
+          clinicReceptionistIds.has(String((receipt as Receipt & { receptionist_id?: string }).receptionist_id || ""))
+        )
+      );
+      setServices((serviceResult.data as Service[]) || []);
+      setReceiptItems((itemResult.data as ReceiptItem[]) || []);
 
-    if (!selectedPatientId && mappedPatients.length) {
-      setSelectedPatientId(mappedPatients[0].id);
+      if (!selectedPatientId && mappedPatients.length) {
+        setSelectedPatientId(mappedPatients[0].id);
+      }
+    }
+    catch (error) {
+      setPatients([]);
+      setSelectedPatientId("");
+      setReceipts([]);
+      setReceiptItems([]);
+      alert(error instanceof Error ? error.message : "Treatment history could not be loaded.");
     }
   }
 
@@ -215,7 +230,7 @@ export default function TreatmentHistoryPage() {
                       <div className="flex items-start justify-between gap-4">
                         <div>
                           <p className="text-sm font-semibold text-slate-900">
-                            Visit #{receipt.id.slice(0, 8)}
+                            Visit #{receipt.id.slice(0, 8)} {receipt.status === "VOIDED" && <span className="ml-2 rounded bg-slate-200 px-2 py-1 text-xs">VOIDED — excluded from collections</span>}
                           </p>
                           <p className="mt-1 text-sm text-slate-500">
                             {receipt.created_at ? new Date(receipt.created_at).toLocaleString() : "No date"}

@@ -1,4 +1,6 @@
 "use client";
+import {createPosEntry,completePosEntry} from "../lib/pos-entry-client";
+import {saveTreatmentPlanPayment} from "../lib/treatment-plan-payment-client";
 
 import { useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
@@ -356,9 +358,7 @@ export function PosPlanCheckoutModal({
     setSaving(true);
     try {
       const visits = parseInt(plannedVisits, 10);
-      const { data: planData, error: planError } = await supabase
-        .from("treatment_plans")
-        .insert([{
+      const { data: planData, error: planError } = await createPosEntry("plan", {
           patient_id: patientId,
           clinic_id: clinicId,
           clinic_patient_file_id: clinicPatientFileId || null,
@@ -370,9 +370,7 @@ export function PosPlanCheckoutModal({
           payment_arrangement: paymentArrangement,
           created_by: receptionistId,
           status: "Active",
-        }])
-        .select()
-        .single();
+        });
 
       if (planError || !planData) {
         alert(`Error creating treatment plan: ${planError?.message || "Unknown error"}`);
@@ -392,8 +390,7 @@ export function PosPlanCheckoutModal({
         }
 
         const allocations = buildPaymentAllocations(paymentAllocationDrafts, amountTodayNum, amountTodayNum, 0);
-        const { data: pmtData, error: pmtError } = await supabase
-          .rpc("create_treatment_plan_payment_record_with_allocations", buildTreatmentPlanPaymentRpcArgs({
+        const { data: pmtData, error: pmtError } = await saveTreatmentPlanPayment(buildTreatmentPlanPaymentRpcArgs({
             treatmentPlanId: planData.id,
             patientId,
             clinicId,
@@ -401,8 +398,7 @@ export function PosPlanCheckoutModal({
             registerSessionId,
             paymentNotePrefix: `Initial payment for plan: ${planTitle.trim()}`,
             allocations,
-          }))
-          .single();
+          }));
 
         if (pmtError) {
           alert(`Plan created but payment failed: ${pmtError.message || "Unknown error"}`);
@@ -439,6 +435,7 @@ export function PosPlanCheckoutModal({
         }
       }
 
+      completePosEntry(planData);
       onSaved(planData as TreatmentPlan, savedPayments);
     } finally {
       setSaving(false);

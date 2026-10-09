@@ -1,9 +1,13 @@
+import { recordLoginAttempt } from "../../../../lib/login-log";
+import {consumeLoginAttempt,clearLoginAttempts,loginAttemptKey} from '../../../../lib/login-attempt-limits';
+import {isUuid} from '../../../../lib/patient-mutation-validation';
+import { sessionStorageFetch } from "../../../../lib/session-storage";
 import { NextRequest, NextResponse } from "next/server";
 
 const MAX_ATTEMPTS = 3;
 const LOCKOUT_DURATIONS = [5 * 60, 10 * 60];
 const ACCEPTED_PASSWORDS = Array.from(
-  new Set(["safarmedical2026", process.env.APP_PASSWORD, "4B4096Z"].filter(Boolean))
+  new Set([process.env.APP_PASSWORD].filter(Boolean))
 );
 
 interface AttemptState {
@@ -26,25 +30,16 @@ function encodeState(state: AttemptState): string {
 }
 
 async function logAttempt(req: NextRequest, success: boolean) {
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-  const userAgent = req.headers.get("user-agent") ?? "unknown";
-  await fetch(
-    `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/login_logs`,
-    {
-      method: "POST",
-      headers: {
-        apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!}`,
-        "Content-Type": "application/json",
-        Prefer: "return=minimal",
-      },
-      body: JSON.stringify({ ip, user_agent: userAgent, success }),
-    }
-  );
+  await recordLoginAttempt(req, success);
 }
 
 export async function POST(req: NextRequest) {
-  const { password, selectedScope } = await req.json();
+  const body=await req.json().catch(()=>null),password=body?.password,selectedScope=body?.selectedScope;
+  if(selectedScope==='manager')return NextResponse.json({error:'Use Owner & Manager Login with your individual account.'},{status:403});
+  if(typeof password!=='string'||password.length>256||!isUuid(selectedScope))return NextResponse.json({error:'Choose your clinic and enter the password.'},{status:400});
+  if(!ACCEPTED_PASSWORDS.length)return NextResponse.json({error:'Receptionist login is not configured. Contact the owner.'},{status:503});
+  const attemptKey=loginAttemptKey('clinic-password',req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()||'local');
+  try{const attempt=await consumeLoginAttempt(attemptKey,10);if(!attempt.allowed)return NextResponse.json({error:'locked',remaining:attempt.remaining},{status:429});}catch{return NextResponse.json({error:'Login verification is unavailable. Try again.'},{status:503});}
   const raw = req.cookies.get("login-state")?.value;
   const state = parseState(raw);
   const now = Date.now();
@@ -95,29 +90,12 @@ export async function POST(req: NextRequest) {
     user_role: sessionMode === "manager" ? "it_admin" : "receptionist",
   };
 
-  const sessionRes = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/active_sessions`, {
-    method: "POST",
-    headers: {
-      apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!}`,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify(sessionPayload),
-  });
+  const sessionRes = await sessionStorageFetch("", { method: "POST", body: JSON.stringify(sessionPayload) });
   if (!sessionRes.ok) {
-    await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/active_sessions`, {
-      method: "POST",
-      headers: {
-        apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!}`,
-        "Content-Type": "application/json",
-        Prefer: "return=minimal",
-      },
-      body: JSON.stringify({ token, ip, user_agent: userAgent }),
-    });
+    return NextResponse.json({ error: "Could not start a secure session. Please sign in again." }, { status: 503 });
   }
 
+  try{await clearLoginAttempts(attemptKey);}catch{await sessionStorageFetch(`?token=eq.${token}`,{method:'DELETE'});return NextResponse.json({error:'Login could not be confirmed. Try again.'},{status:503});}
   const response = NextResponse.json({ ok: true });
   const thirtyDaysMs = 60 * 60 * 24 * 30 * 1000;
   response.cookies.set("app-auth", token, {

@@ -5,12 +5,13 @@ import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { clearClinicAccessSession, getClinicAccessLabel, useClinicAccess } from "../lib/clinic-access";
-import { supabase } from "../lib/supabase";
+import { loadClinicBirthdays } from "../lib/patient-read-client";
 import { getDubaiBusinessDate } from "../lib/cash-deductions";
 
 const navigation = [
   { href: "/receipts", label: "POS" },
   { href: "/add-patient", label: "Add Patient" },
+  { href: "/refunds", label: "Corrections & refunds" },
   { href: "/backend", label: "Backend" },
   { href: "/reports", label: "Reports" },
 ];
@@ -34,6 +35,13 @@ export function AppFrame({
   const isManager = accessSession?.mode === "manager";
   const isPosWorkspace = workspaceType === "pos";
   const [birthdayRemainingCount, setBirthdayRemainingCount] = useState(0);
+  const [switching,setSwitching]=useState(false);
+  const [switchError,setSwitchError]=useState('');
+  async function switchClinic(){
+    if(switching)return;setSwitching(true);setSwitchError('');
+    try{const response=await fetch('/api/auth/logout',{method:'POST'});if(!response.ok)throw Error('Could not sign out. Please try again.');clearClinicAccessSession();window.location.assign('/login');}
+    catch(error){setSwitchError(error instanceof Error?error.message:'Could not sign out.');setSwitching(false);}
+  }
 
   const refreshBirthdayCount = useCallback(async () => {
     if (!accessSession || accessSession.mode !== "clinic" || !accessSession.clinicId) {
@@ -41,22 +49,19 @@ export function AppFrame({
       return;
     }
 
-    const { data, error } = await supabase.rpc("get_clinic_birthday_remaining_count", {
-      p_clinic_id: accessSession.clinicId,
-      p_target_date: getDubaiBusinessDate(),
-    });
-    if (error) {
-      console.warn("Failed loading birthday bell count", error);
+    try {
+      const result = await loadClinicBirthdays(accessSession.clinicId, getDubaiBusinessDate(), "count");
+      setBirthdayRemainingCount(Math.max(0, Number(result.count || 0)));
+    } catch {
       setBirthdayRemainingCount(0);
-      return;
     }
-    setBirthdayRemainingCount(Math.max(0, Number(data || 0)));
   }, [accessSession]);
 
   const visibleNavigation = useMemo(() => {
     if (isManager) return navigation;
     return [
       { href: "/receipts", label: "POS" },
+      { href: "/refunds", label: "Corrections & refunds" },
       { href: "/birthdays", label: `🔔 ${birthdayRemainingCount}` },
     ];
   }, [birthdayRemainingCount, isManager]);
@@ -146,13 +151,15 @@ export function AppFrame({
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <Link
-                href="/login"
-                onClick={() => clearClinicAccessSession()}
+              <button
+                type="button"
+                disabled={switching}
+                onClick={switchClinic}
                 className="shrink-0 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-teal-300 hover:text-teal-800"
               >
-                Switch Clinic
-              </Link>
+                {switching?'Signing out…':'Switch Clinic'}
+              </button>
+              {switchError&&<p role="alert" className="text-sm text-red-700">{switchError}</p>}
               <img
                 src="/images/logo3.png"
                 alt="Skin and Smile logo"

@@ -1,4 +1,5 @@
 import { createServerSupabaseClient, ensureManagerSession, readAppSession } from "../../../lib/api-session";
+import {createProtectedDataClient} from '../../../lib/protected-data-server';
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -10,6 +11,7 @@ export async function POST(request: Request) {
 
   const managerError = ensureManagerSession(session);
   if (managerError) return managerError;
+  if(session.userRole!=='owner'||!session.accountId)return Response.json({error:'Your individual owner login is required.'},{status:403});
 
   const body = await request.json().catch(() => null);
   const clinicId = String(body?.clinicId || "").trim();
@@ -22,12 +24,7 @@ export async function POST(request: Request) {
     enable_commissions: !!body?.enableCommissions,
   };
 
-  const { data, error } = await supabase
-    .from("clinics")
-    .update(payload)
-    .eq("id", clinicId)
-    .select("id, enable_expenses, enable_commissions")
-    .single();
+  const { data, error } = await createProtectedDataClient().rpc('manage_clinic_catalog',{p_account_id:session.accountId,p_clinic_id:clinicId,p_kind:'clinics',p_action:'update',p_entity_id:clinicId,p_data:payload,p_reason:'Owner changed expense and commission controls'});
 
   if (error || !data) {
     return Response.json({ error: error?.message || "Failed updating clinic settings." }, { status: 500 });

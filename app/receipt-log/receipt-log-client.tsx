@@ -22,6 +22,7 @@ import {
   type ReceiptItemRemainingRefundable,
 } from "../../lib/receipt-refunds";
 import { supabase } from "../../lib/supabase";
+import { loadClinicHistoryPatients } from "../../lib/patient-read-client";
 import { printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { generateInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { buildThermalReceiptHtml, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
@@ -64,7 +65,7 @@ export default function ReceiptLogClient() {
   const [lastRefund, setLastRefund] = useState<any | null>(null);
   const [refundedItems, setRefundedItems] = useState<any[]>([]);
   const [lastRefundBreakdown, setLastRefundBreakdown] = useState<any[]>([]);
-  const [isDeleting, setIsDeleting] = useState(false);
+  const isDeleting = false;
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
 
   async function fetchAllRows(table: string, select: string): Promise<any[]> {
@@ -93,8 +94,8 @@ export default function ReceiptLogClient() {
     setIsLoading(true);
     const [receiptsRes, patientsRes, receptionistsRes, clinicsRes, doctorsRes, servicesRes, refundsRes] = await Promise.allSettled([
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
-      fetchAllRows("patients", "id, name, phone, patient_number"),
-      supabase.from("receptionist").select("*"),
+      loadClinicHistoryPatients(allowedClinicId),
+      supabase.from("receptionist").select("id,name,clinic_id,shift"),
       supabase.from("clinics").select("*"),
       supabase.from("doctors").select("*"),
       supabase.from("services").select("id, name, price, standard_price, pricing_type"),
@@ -102,6 +103,7 @@ export default function ReceiptLogClient() {
     ]);
     if (receiptsRes.status === "fulfilled") setReceipts(receiptsRes.value.data || []);
     if (patientsRes.status === "fulfilled") setPatients(patientsRes.value || []);
+    else { setPatients([]); alert("Patient names could not be loaded. Please refresh."); }
     if (receptionistsRes.status === "fulfilled") setReceptionists(receptionistsRes.value.data || []);
     if (clinicsRes.status === "fulfilled") {
       const clinicRows = filterClinicsForAccess((clinicsRes.value.data || []) as any[], accessSession);
@@ -308,183 +310,9 @@ export default function ReceiptLogClient() {
   );
 
   async function processRefund() {
-    if (!selectedReceipt) return;
-    if (!refundReason.trim()) { alert("Please enter a reason."); return; }
-
-    // Block mixed/incomplete receipts.
-    if (receiptSnapshotStatus === "mixed") {
-      alert("This receipt contains incomplete historical pricing data and cannot be refunded automatically. Please contact an administrator.");
-      return;
-    }
-
-    if (receiptSnapshotStatus === "snapshot") {
-      const hasChecked = refundAll
-        ? Object.values(itemRemainingMap).some((r) => !r.isFullyRefunded)
-        : Object.values(itemRemainingMap).some((r) => checkedItems[r.receiptItemId] && !r.isFullyRefunded);
-      if (!hasChecked) { alert("Select at least one item to refund."); return; }
-    } else if (!refundAll && Object.values(checkedItems).filter(Boolean).length === 0) {
-      alert("Select at least one item.");
-      return;
-    }
-
-    if (refundMode === "admin_review") {
-      alert("This receipt has a payment record but no payment allocations. Refund is blocked for safety. Please ask admin to review this receipt.");
-      return;
-    }
-
-    setIsProcessing(true);
-
-    const maxRefundable = maxRefundableAmount;
-    const totalRefund = refundTargetAmount;
-
-    if (totalRefund <= 0) {
-      if (refundMode === "modern") {
-        alert("Nothing left to refund — all invoice allocations were already refunded.");
-      } else {
-        const paidAmount = Number(selectedReceipt.amount_paid ?? selectedReceipt.total ?? 0);
-        const previouslyRefunded = receiptRefunds.reduce((sum, row) => sum + Number(row.total_amount || 0), 0);
-        alert(`Nothing left to refund — AED ${previouslyRefunded.toFixed(2)} of the AED ${paidAmount.toFixed(2)} paid has already been refunded.`);
-      }
-      setIsProcessing(false);
-      return;
-    }
-    if (totalRefund > maxRefundable + 0.0049) {
-      if (refundMode === "modern") {
-        alert(`Refund exceeds remaining refundable invoice allocations. Maximum refundable is AED ${maxRefundable.toFixed(2)}.`);
-      } else {
-        const paidAmount = Number(selectedReceipt.amount_paid ?? selectedReceipt.total ?? 0);
-        const previouslyRefunded = receiptRefunds.reduce((sum, row) => sum + Number(row.total_amount || 0), 0);
-        alert(`Refund exceeds what the patient actually paid. Maximum refundable is AED ${maxRefundable.toFixed(2)} (paid AED ${paidAmount.toFixed(2)}, already refunded AED ${previouslyRefunded.toFixed(2)}).`);
-      }
-      setIsProcessing(false);
-      return;
-    }
-
-    // Build refund item rows (snapshot or legacy).
-    let baseRefundItemRows: any[];
-    if (receiptSnapshotStatus === "snapshot") {
-      const targetRemaining = refundAll
-        ? Object.values(itemRemainingMap).filter((r) => !r.isFullyRefunded)
-        : Object.values(itemRemainingMap).filter((r) => checkedItems[r.receiptItemId] && !r.isFullyRefunded);
-      const snapshotArgs = targetRemaining.map((remaining) => {
-        const item = receiptItems.find((i: any) => String(i.id) === remaining.receiptItemId);
-        const snapshot = getReceiptItemRefundSnapshot(item)!;
-        return { snapshot, remaining, serviceId: item?.service_id ?? null };
-      });
-      try {
-        baseRefundItemRows = buildSnapshotRefundItemRows(snapshotArgs);
-      } catch (err) {
-        alert(`Refund data error: ${err instanceof Error ? err.message : String(err)}`);
-        setIsProcessing(false);
-        return;
-      }
-    } else {
-      baseRefundItemRows = selectedRefundItems.map((item: any) => ({
-        receipt_item_id: item.id,
-        service_id: item.service_id,
-        service_name: item.service_name_snapshot || services.find((s: any) => s.id === item.service_id)?.name || "Unknown",
-        amount: Number(item.total || item.price || 0),
-      }));
-    }
-
-    let result:
-      | { kind: "modern"; refundData: any; warningMessage?: string; breakdown: any[] }
-      | { kind: "legacy"; refundData: any; refundItems: any[] };
-    if (refundMode === "legacy") {
-      try {
-        const legacyResult = await createLegacyBackedRefund({
-          supabase,
-          receiptId: selectedReceipt.id,
-          receptionistId: selectedReceipt.receptionist_id,
-          refundedBy: null,
-          reason: refundReason.trim(),
-          totalAmount: totalRefund,
-          paymentMethod: selectedReceipt.payment_method || "Legacy receipt refund",
-          refundItemRows: baseRefundItemRows,
-        });
-        result = { kind: "legacy", ...legacyResult };
-      } catch (error) {
-        alert(`Error creating legacy refund: ${error instanceof Error ? error.message : String(error)}`);
-        setIsProcessing(false);
-        return;
-      }
-    } else {
-      const { requests, error } = buildAllocationRefundRequests({
-        allocations: paymentAllocations,
-        selectedAllocationIds,
-        requestedAmountsByAllocationId: refundAllocationAmountInputs,
-        expectedRefundAmount: totalRefund,
-      });
-      if (error) {
-        alert(error);
-        setIsProcessing(false);
-        return;
-      }
-      try {
-        const modernResult = await createAllocationBackedRefund({
-          supabase,
-          receiptId: selectedReceipt.id,
-          receptionistId: selectedReceipt.receptionist_id,
-          processedBy: selectedReceipt.receptionist_id,
-          refundedBy: null,
-          reason: refundReason.trim(),
-          requests,
-          refundItemRows: baseRefundItemRows,
-        });
-        result = { kind: "modern", ...modernResult };
-      } catch (error) {
-        alert(`Error creating refund: ${error instanceof Error ? error.message : String(error)}`);
-        setIsProcessing(false);
-        return;
-      }
-    }
-
-    // A fully refunded partial-payment receipt shouldn't keep chasing the
-    // patient for the remainder — remove its auto-created outstanding balance,
-    // unless payments were already collected against it (needs manual review).
-    if (refundAll && selectedReceipt.amount_paid != null) {
-      const { data: linkedBalances } = await supabase
-        .from("outstanding_balances")
-        .select("id")
-        .eq("receipt_id", selectedReceipt.id);
-      const balanceIds = (linkedBalances || []).map((b: any) => b.id);
-      if (balanceIds.length > 0) {
-        const { data: collected } = await supabase
-          .from("balance_payments")
-          .select("id")
-          .in("outstanding_balance_id", balanceIds)
-          .limit(1);
-        if ((collected || []).length === 0) {
-          await supabase.from("outstanding_balances").delete().in("id", balanceIds);
-        } else {
-          alert("Note: this receipt's outstanding balance already has collected payments, so it was kept. Review it in the Backend page.");
-        }
-      }
-    }
-
-    // Refresh refund data for the current receipt
-    const freshRefundItems = result.kind === "legacy"
-      ? result.refundItems
-      : (await supabase.from("refund_items").select("*").eq("refund_id", result.refundData.id)).data || [];
-    setReceiptRefunds((prev) => [result.refundData, ...prev]);
-    setReceiptRefundItems((prev) => [...prev, ...freshRefundItems]);
-    setAllRefunds((prev) => [...prev, result.refundData]);
-
-    setLastRefund(result.refundData);
-    setRefundedItems(selectedRefundItems);
-    setLastRefundBreakdown(result.kind === "modern" ? result.breakdown : []);
+    alert('Refunds now require manager approval. Request the refund from POS patient receipt history, then track it in Corrections & refunds. No refund was recorded here.');
     setShowRefundModal(false);
-    setIsProcessing(false);
-    setRefundReason("");
-    setCheckedItems({});
-    setCheckedAllocations({});
-    setRefundAllocationAmountInputs({});
-    if (result.kind === "modern" && result.warningMessage) {
-      alert(result.warningMessage);
-      return;
-    }
   }
-
   function buildRefundReceiptHtml(): string {
     if (!lastRefund || !selectedReceipt) return "";
     const patient = patients.find((p) => p.id === selectedReceipt.patient_id);
@@ -750,46 +578,7 @@ export default function ReceiptLogClient() {
   }
 
 
-  async function deleteReceipt(receipt: any) {
-    const receiptLabel = receipt.receipt_number
-      ? `#${String(receipt.receipt_number).padStart(5, "0")}`
-      : `#${String(receipt.id).slice(0, 8)}`;
-    const patientName = patients.find((p) => p.id === receipt.patient_id)?.name || "Unknown Patient";
-    const confirmed = confirm(
-      `Permanently delete receipt ${receiptLabel} for ${patientName} (AED ${Number(receipt.total || 0).toFixed(2)})?\n\nThis also deletes its items, refunds, and any outstanding balance created by it — INCLUDING payments already collected against that balance. This cannot be undone.`
-    );
-    if (!confirmed) return;
-
-    setIsDeleting(true);
-    try {
-      // Remove any outstanding balance auto-created by this receipt first
-      // (its collected payments cascade). receipt_id may not exist on databases
-      // that haven't run the partial-payments migration — ignore that error.
-      const { error: balanceError } = await supabase
-        .from("outstanding_balances")
-        .delete()
-        .eq("receipt_id", receipt.id);
-      if (balanceError && balanceError.code !== "42703") {
-        console.error("Delete linked outstanding balance failed:", balanceError);
-        alert(`Error deleting the receipt's outstanding balance: ${balanceError.message}`);
-        return;
-      }
-
-      // receipt_items and refunds cascade in the database.
-      const { error } = await supabase.from("receipts").delete().eq("id", receipt.id);
-      if (error) {
-        console.error("Delete receipt failed:", error);
-        alert(`Error deleting receipt: ${error.message}`);
-        return;
-      }
-
-      setReceipts((prev) => prev.filter((r) => r.id !== receipt.id));
-      setAllRefunds((prev) => prev.filter((r) => r.receipt_id !== receipt.id));
-      setSelectedReceipt(null);
-    } finally {
-      setIsDeleting(false);
-    }
-  }
+  function deleteReceipt() { alert("Saved receipts cannot be deleted. Open POS receipt history and choose Correct receipt or Request Refund."); }
 
   return (
     <>
@@ -969,11 +758,11 @@ export default function ReceiptLogClient() {
 
                             <div className="mt-4 flex flex-wrap gap-2">
                               <button
-                                onClick={() => deleteReceipt(receipt)}
+                                onClick={() => deleteReceipt()}
                                 disabled={isDeleting}
                                 className="flex-1 rounded-2xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60"
                               >
-                                {isDeleting ? "Deleting…" : "Delete"}
+                                Correction guidance
                               </button>
                               <button
                                 onClick={() => {
@@ -1072,232 +861,7 @@ export default function ReceiptLogClient() {
           </>
         )}
       </div>
-      {showRefundModal && selectedReceipt && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl overflow-y-auto max-h-[90vh]">
-            <h3 className="text-lg font-semibold text-slate-900">Process Refund</h3>
-            <p className="mt-1 text-sm text-slate-500">
-              {selectedReceipt.receipt_number
-                ? `Receipt #${String(selectedReceipt.receipt_number).padStart(5, "0")}`
-                : "Receipt"}{" "}
-              · {patients.find((p) => p.id === selectedReceipt.patient_id)?.name}
-            </p>
-
-            {receiptSnapshotStatus === "mixed" && (
-              <div className="mt-4 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-700">
-                This receipt contains incomplete historical pricing data and cannot be refunded automatically. Please contact an administrator.
-              </div>
-            )}
-
-            {receiptSnapshotStatus !== "mixed" && (
-            <>
-            <div className="mt-4 space-y-2">
-              <label className="flex cursor-pointer items-center gap-3 rounded-2xl border-2 border-slate-200 p-3 transition hover:border-red-300">
-                <input
-                  type="radio"
-                  name="refundType"
-                  checked={refundAll}
-                  onChange={() => {
-                    setRefundAll(true);
-                    setCheckedItems({});
-                    if (refundMode === "modern") {
-                      setRefundAllocationAmountInputs(
-                        selectedAllocationIds.length > 0
-                          ? autoAllocateRefundAmounts(
-                            modernMaxRefundableAmount,
-                              paymentAllocations,
-                              selectedAllocationIds
-                            )
-                          : {}
-                      );
-                    }
-                  }}
-                  className="accent-red-500"
-                />
-                <div>
-                  <p className="text-sm font-semibold text-slate-900">Refund entire receipt</p>
-                  <p className="text-xs text-slate-500">AED {maxRefundableAmount.toFixed(2)}</p>
-                </div>
-              </label>
-              <label className="flex cursor-pointer items-center gap-3 rounded-2xl border-2 border-slate-200 p-3 transition hover:border-red-300">
-                <input
-                  type="radio"
-                  name="refundType"
-                  checked={!refundAll}
-                  onChange={() => {
-                    setRefundAll(false);
-                    if (refundMode === "modern") {
-                      setRefundAllocationAmountInputs(
-                        selectedAllocationIds.length > 0
-                          ? autoAllocateRefundAmounts(0, paymentAllocations, selectedAllocationIds)
-                          : {}
-                      );
-                    }
-                  }}
-                  className="accent-red-500"
-                />
-                <p className="text-sm font-semibold text-slate-900">Refund selected services only</p>
-              </label>
-            </div>
-
-            {!refundAll && (
-              <div className="mt-3 space-y-2">
-                {receiptItems.map((item) => {
-                  const itemId = String(item.id);
-                  const remaining = receiptSnapshotStatus === "snapshot" ? itemRemainingMap[itemId] : null;
-                  const isFullyRefunded = remaining?.isFullyRefunded ?? false;
-                  const label = item.service_name_snapshot || services.find((s: any) => s.id === item.service_id)?.name || "Service";
-                  const displayAmount = remaining
-                    ? remaining.remainingInvoice / 100
-                    : Number(item.total || item.price || 0);
-                  return (
-                    <label
-                      key={item.id}
-                      className={`flex cursor-pointer items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 ${isFullyRefunded ? "opacity-50 cursor-not-allowed" : "hover:bg-slate-100"}`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={!!checkedItems[itemId] && !isFullyRefunded}
-                        onChange={() => !isFullyRefunded && toggleItem(itemId)}
-                        disabled={isFullyRefunded}
-                        className="h-4 w-4 accent-red-500 disabled:opacity-50"
-                      />
-                      <div className="flex flex-1 items-center justify-between">
-                        <span className="text-sm text-slate-800">{label}</span>
-                        {isFullyRefunded ? (
-                          <span className="text-xs font-semibold text-slate-400">Fully Refunded</span>
-                        ) : (
-                          <span className="text-sm font-semibold text-slate-700">AED {displayAmount.toFixed(2)}</span>
-                        )}
-                      </div>
-                    </label>
-                  );
-                })}
-                {Object.values(checkedItems).some(Boolean) && (
-                  <div className="text-right">
-                    <p className="text-sm font-semibold text-red-600">
-                      Refund total: AED {refundTargetAmount.toFixed(2)}
-                    </p>
-                    {receiptSnapshotStatus === "snapshot" && (
-                      <p className="text-xs text-slate-400">(exact per-service VAT included)</p>
-                    )}
-                    {receiptSnapshotStatus !== "snapshot" && (
-                      <p className="text-xs text-slate-400">(includes proportional VAT)</p>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {refundMode === "modern" && (
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-slate-900">Original payment allocations</p>
-                  <p className="text-xs text-slate-500">Choose which original payment method should fund this refund.</p>
-                </div>
-                <p className="text-sm font-semibold text-slate-700">Target: AED {refundTargetAmount.toFixed(2)}</p>
-              </div>
-              <div className="mt-3 space-y-2">
-                {paymentAllocations.map((allocation) => {
-                  const remaining = getRemainingAllocationAmounts(allocation);
-                  return (
-                    <label
-                      key={allocation.id}
-                      className="block rounded-2xl border border-slate-200 bg-white p-3"
-                    >
-                      <div className="flex items-start gap-3">
-                        <input
-                          type="checkbox"
-                          checked={!!checkedAllocations[allocation.id]}
-                          onChange={() => toggleAllocation(allocation.id)}
-                          className="mt-1 h-4 w-4 accent-red-500"
-                        />
-                        <div className="flex-1">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="text-sm font-semibold text-slate-900">{paymentVariantLabel(allocation.method_variant)}</p>
-                              <p className="text-xs text-slate-500">
-                                Invoice remaining AED {remaining.invoice.toFixed(2)}
-                                {allocation.provider_reference_number ? ` · Ref ${allocation.provider_reference_number}` : ""}
-                              </p>
-                            </div>
-                            <div className="w-28">
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                value={refundAllocationAmountInputs[allocation.id] || ""}
-                                onChange={(e) => setRefundAllocationAmountInputs((current) => ({ ...current, [allocation.id]: e.target.value }))}
-                                placeholder={remaining.invoice.toFixed(2)}
-                                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
-                              />
-                            </div>
-                          </div>
-                          {isNonRefundableSurchargeVariant(allocation.method_variant) && Number(allocation.fee_amount || 0) > 0 && (
-                            <p className="mt-2 text-xs font-medium text-amber-700">
-                              Original fee AED {Number(allocation.fee_amount || 0).toFixed(2)} stays on record and is not refunded.
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    </label>
-                  );
-                })}
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-3 py-2 text-xs text-slate-600">
-                  Selected allocation total: AED {selectedAllocationRefundTotal.toFixed(2)}
-                  {" · "}
-                  Remaining to assign: AED {Math.max(0, refundTargetAmount - selectedAllocationRefundTotal).toFixed(2)}
-                </div>
-              </div>
-            </div>
-            )}
-            {refundMode === "legacy" && (
-            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              Legacy receipt refund: this receipt predates structured payment allocations, so refund uses compatibility mode.
-            </div>
-            )}
-            {refundMode === "admin_review" && (
-            <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
-              This receipt has payment records but missing payment allocations. Refund is blocked for safety; ask admin to review.
-            </div>
-            )}
-            </>)}
-
-            <div className="mt-4">
-            <label className="block text-sm font-semibold text-slate-700">Reason *</label>
-            <input
-              type="text"
-              value={refundReason}
-              onChange={(e) => setRefundReason(e.target.value)}
-              placeholder="e.g., Patient request, incorrect charge"
-              className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm outline-none focus:border-red-300 focus:ring-4 focus:ring-red-100"
-            />
-            </div>
-
-            <div className="mt-4 flex gap-3">
-            <button
-              onClick={processRefund}
-              disabled={
-                isProcessing
-                || receiptSnapshotStatus === "mixed"
-                || refundMode === "admin_review"
-                || (refundMode === "modern" && selectedAllocationIds.length === 0)
-              }
-              className="flex-1 rounded-2xl bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-50"
-              >
-                {isProcessing ? "Processing..." : "Confirm Refund"}
-              </button>
-              <button
-                onClick={() => setShowRefundModal(false)}
-                className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {showRefundModal && selectedReceipt && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"><div role="dialog" aria-modal="true" aria-label="Request a refund" className="max-w-md rounded-3xl bg-white p-6"><h3 className="text-lg font-semibold">Manager approval required</h3><p className="my-4">Open this patient in POS, select the receipt in Receipt History, and choose Request Refund. Then track it in Corrections &amp; refunds. No refund has been recorded here.</p><div className="flex gap-3"><a className="rounded bg-teal-700 px-4 py-2 text-white" href="/receipts">Open POS</a><button onClick={()=>setShowRefundModal(false)} className="rounded border px-4 py-2">Close</button></div></div></div>}
     </>
   );
 }

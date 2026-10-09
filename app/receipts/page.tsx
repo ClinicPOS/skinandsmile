@@ -1,4 +1,5 @@
-﻿"use client";
+"use client";
+import {savePosPreference} from "../../lib/pos-preference-client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -36,6 +37,8 @@ import { extractLegacyCashAmount, getCashDeductionTypeLabel, getDubaiBusinessDat
 import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 import { getBusinessDayKeyForReporting, getPaymentBreakdownForReporting, summarizeStoredAllocationCollectionsForReporting, summarizeStoredAllocationRowsForReporting } from "../../lib/receipts-reporting";
 import { mapRegularReceiptRenderLine } from "../../lib/regular-receipt-rendering";
+import { loadClinicPatientRecords, loadClinicHistoryPatients } from "../../lib/patient-read-client";
+import { reportClinicFileNumber } from "../../lib/clinic-file-numbers";
 import { buildReceiptInsertPayload, MISSING_RECEIPT_CLINIC_MESSAGE } from "../../lib/receipt-insert";
 
 type PosPricingService = {
@@ -454,6 +457,7 @@ export default function ReceiptsPage() {
   const [birthdayDiscountApplied, setBirthdayDiscountApplied] = useState(false);
   const [, setShowPrintModal] = useState(false);
   const [isSavingReceipt, setIsSavingReceipt] = useState(false);
+  const checkoutRequest = useRef<{ id: string; clinicId: string } | null>(null);
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
   const [isPosUnlocked, setIsPosUnlocked] = useState(false);
   const [loginReceptionistId, setLoginReceptionistId] = useState("");
@@ -477,6 +481,7 @@ export default function ReceiptsPage() {
   const [cashSalesTotal, setCashSalesTotal] = useState(0);
   const [expectedCashAmount, setExpectedCashAmount] = useState(0);
   const [isLoadingCashSummary, setIsLoadingCashSummary] = useState(false);
+  const [cashSummaryReady,setCashSummaryReady]=useState(false);
   const [cashDeductions, setCashDeductions] = useState<CashDeduction[]>([]);
   const [isLoadingCashDeductions, setIsLoadingCashDeductions] = useState(false);
   const [showCashDeductionModal, setShowCashDeductionModal] = useState(false);
@@ -631,6 +636,7 @@ export default function ReceiptsPage() {
     setIsLoadingCashDeductions(true);
     try {
       const payload = await fetchCashDeductionState();
+      setCashSummaryReady(true);
       setCashDeductions(payload.entries || []);
       setCashDeductionSummary(payload.summary);
     } catch (error) {
@@ -747,10 +753,19 @@ export default function ReceiptsPage() {
   }, [activeClinic?.id, receptionistId, loginReceptionistId, receptionists]);
 
   useEffect(() => {
-    if (!showRegisterPatientModal) return;
-    if (registrationPatients.length > 0 && registrationClinicPatientFiles.length > 0) return;
-    void loadRegistrationLookupData();
-  }, [showRegisterPatientModal, registrationPatients.length, registrationClinicPatientFiles.length]);
+    if (!showRegisterPatientModal || !activeClinic?.id) return;
+    let cancelled = false;
+    setRegistrationPatients([]);
+    setRegistrationClinicPatientFiles([]);
+    void loadClinicPatientRecords(activeClinic.id).then(records => {
+      if (cancelled) return;
+      setRegistrationPatients(records.patients);
+      setRegistrationClinicPatientFiles(records.files);
+    }).catch(error => {
+      if (!cancelled) alert(error instanceof Error ? error.message : "Registration lookup could not be loaded.");
+    });
+    return () => { cancelled = true; };
+  }, [showRegisterPatientModal, activeClinic?.id]);
 
   async function loadFavoriteServices() {
     if (!activeClinic?.id) {
@@ -794,12 +809,7 @@ export default function ReceiptsPage() {
 
     const isFavorite = favoriteServiceIds.includes(serviceId);
     if (isFavorite) {
-      const { error } = await supabase
-        .from("service_favorites")
-        .delete()
-        .eq("clinic_id", activeClinic.id)
-        .eq("receptionist_id", activeReceptionistId)
-        .eq("service_id", serviceId);
+      const { error } = await savePosPreference({kind:"favorite",serviceId,enabled:false});
       if (error) {
         alert(`Could not remove favorite: ${error.message || "unknown error"}`);
         return;
@@ -808,15 +818,7 @@ export default function ReceiptsPage() {
       return;
     }
 
-    const { error } = await supabase
-      .from("service_favorites")
-      .insert([
-        {
-          clinic_id: activeClinic.id,
-          receptionist_id: activeReceptionistId,
-          service_id: serviceId,
-        },
-      ]);
+    const { error } = await savePosPreference({kind:"favorite",serviceId,enabled:true});
     if (error) {
       alert(`Could not save favorite: ${error.message || "unknown error"}`);
       return;
@@ -921,50 +923,15 @@ export default function ReceiptsPage() {
       return;
     }
 
-    const CLINIC_FILES_BATCH = 1000;
-    const scopedClinicFiles: any[] = [];
-    const scopedPatientsById = new Map<string, any>();
-    for (let from = 0; ; from += CLINIC_FILES_BATCH) {
-      const { data: clinicFileRows, error: clinicFilesError } = await supabase
-        .from("clinic_patient_files")
-        .select("id, clinic_id, patient_id, file_no, mrn, patients(*)")
-        .eq("clinic_id", clinicId)
-        .range(from, from + CLINIC_FILES_BATCH - 1);
-      if (clinicFilesError) {
-        console.warn("Failed loading clinic patient files", clinicFilesError);
-        setClinicPatientFiles([]);
-        setPatients([]);
-        return;
-      }
-      const batchRows = clinicFileRows || [];
-      if (batchRows.length === 0) break;
-      for (const row of batchRows) {
-        scopedClinicFiles.push({
-          id: row.id,
-          clinic_id: row.clinic_id,
-          patient_id: row.patient_id,
-          file_no: row.file_no,
-          mrn: row.mrn,
-        });
-        const relatedPatient = Array.isArray(row.patients) ? row.patients[0] : row.patients;
-        if (relatedPatient && relatedPatient.id) {
-          scopedPatientsById.set(String(relatedPatient.id), relatedPatient);
-        }
-      }
-      if (batchRows.length < CLINIC_FILES_BATCH) break;
+    try {
+      const records = await loadClinicPatientRecords(clinicId);
+      setClinicPatientFiles(records.files);
+      setPatients(records.patients);
+    } catch (error) {
+      setClinicPatientFiles([]);
+      setPatients([]);
+      alert(error instanceof Error ? error.message : "Clinic patient records could not be loaded.");
     }
-
-    setClinicPatientFiles(scopedClinicFiles);
-    setPatients(Array.from(scopedPatientsById.values()));
-  }
-
-  async function loadRegistrationLookupData() {
-    const [patientRows, clinicFileRows] = await Promise.all([
-      fetchAllRows("patients", "*"),
-      fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no, mrn"),
-    ]);
-    setRegistrationPatients(patientRows);
-    setRegistrationClinicPatientFiles(clinicFileRows);
   }
 
   async function loadData(initialClinicId?: string | null) {
@@ -978,7 +945,7 @@ export default function ReceiptsPage() {
       patientCreditsResult,
     ] = await Promise.allSettled([
       supabase.from("doctors").select("*"),
-      supabase.from("receptionist").select("*"),
+      supabase.from("receptionist").select("id,name,clinic_id,shift"),
       supabase.from("services").select("*"),
       supabase.from("clinics").select("*"),
       supabase.from("outstanding_balances").select("*"),
@@ -1347,7 +1314,7 @@ export default function ReceiptsPage() {
 
   const clinicDoctors = useMemo(() => {
     if (!activeClinic) return [];
-    return doctors.filter((d) => d.clinic_id === activeClinic.id);
+    return doctors.filter((d) => d.clinic_id === activeClinic.id && d.is_active !== false);
   }, [doctors, activeClinic]);
 
   const clinicScopedPatients = useMemo(() => {
@@ -1554,9 +1521,15 @@ export default function ReceiptsPage() {
       return { ok: true as const, error: null as Error | null };
     }
 
-    const { error } = await supabase.from("patients").update(sanitizedPayload).eq("id", patientIdToSave);
-    if (error) {
-      console.error("Patient detail save error", error);
+    const response = await fetch(`/api/patients/${encodeURIComponent(patientIdToSave)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clinicId: activeClinic?.id || null, updates: sanitizedPayload }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      const error = new Error(payload?.error || "Patient details could not be saved.");
+      console.error("Patient detail save error", { operationId: payload?.operationId, message: error.message });
       return { ok: false as const, error };
     }
 
@@ -1587,17 +1560,6 @@ export default function ReceiptsPage() {
       return;
     }
 
-    const receptionistPin = String(selectedReceptionist.pin || "");
-    if (!receptionistPin) {
-      alert("This receptionist does not have a PIN yet. Set PIN in backend first.");
-      return;
-    }
-
-    if (pinInput !== receptionistPin) {
-      alert("Invalid PIN.");
-      return;
-    }
-
     const clinicForReceptionist = clinics.find((c) => c.id === selectedReceptionist.clinic_id);
     if (!clinicForReceptionist) {
       alert("This receptionist is not assigned to a clinic. Please assign one in the Backend > Receptionists section.");
@@ -1608,6 +1570,9 @@ export default function ReceiptsPage() {
       return;
     }
 
+    const identityResponse = await fetch('/api/auth/receptionist', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({receptionistId:loginReceptionistId,pin:pinInput})}).catch(()=>null);
+    if (!identityResponse?.ok) { const result = identityResponse ? await identityResponse.json().catch(()=>null) : null; alert(result?.error || 'Could not confirm receptionist login. Try again.'); return; }
+
     const parsedOpeningCash = Number(openingCashInput);
     if (!Number.isFinite(parsedOpeningCash) || parsedOpeningCash < 0) {
       alert("Please enter a valid opening cash amount.");
@@ -1616,57 +1581,26 @@ export default function ReceiptsPage() {
 
     const openedAt = new Date().toISOString();
 
-    let createdRegisterSessionId = "";
-    const { data: registerData, error: registerError } = await supabase
-      .from(REGISTER_TABLE)
-      .insert([
-        {
-          receptionist_id: loginReceptionistId,
-          opening_cash: parsedOpeningCash,
-          opened_at: openedAt,
-        },
-      ])
-      .select("id")
-      .single();
-
-    if (registerError) {
-      if (registerError.code === "23505") {
-        // Already has an open session — resume it
-        const { data: existing } = await supabase
-          .from(REGISTER_TABLE)
-          .select("id, opening_cash, opened_at")
-          .eq("receptionist_id", loginReceptionistId)
-          .is("closed_at", null)
-          .single();
-        if (existing) {
-          createdRegisterSessionId = String(existing.id);
-        } else {
-          alert("A register session already exists but could not be retrieved. Please contact support.");
-          return;
-        }
-      } else {
-        console.warn("Register session insert warning", registerError);
-        alert(
-          "Register opened locally, but shift log was not saved to database. Please create table 'cash_register_sessions' if not configured."
-        );
-      }
-    } else if (registerData) {
-      createdRegisterSessionId = String(registerData.id);
-    }
+    const registerResponse = await fetch('/api/register', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'open',amount:parsedOpeningCash})}).catch(()=>null);
+    const registerResult = registerResponse ? await registerResponse.json().catch(()=>null) : null;
+    if(!registerResponse?.ok || !registerResult?.register?.id){alert(registerResult?.error || 'Register was not opened. Try again.');return;}
+    const createdRegisterSessionId = String(registerResult.register.id);
+    const savedOpeningCash = Number(registerResult.register.opening_cash || 0);
+    const savedOpenedAt = String(registerResult.register.opened_at);
 
     const session = {
       receptionistId: loginReceptionistId,
       clinicId: clinicForReceptionist.id,
-      openingCash: parsedOpeningCash,
-      openedAt,
+      openingCash: savedOpeningCash,
+      openedAt: savedOpenedAt,
       registerSessionId: createdRegisterSessionId,
     };
 
     localStorage.setItem(POS_REGISTER_SESSION_KEY, JSON.stringify(session));
 
     setReceptionistId(loginReceptionistId);
-    setOpeningCash(parsedOpeningCash);
-    setRegisterOpenedAt(openedAt);
+    setOpeningCash(savedOpeningCash);
+    setRegisterOpenedAt(savedOpenedAt);
     setRegisterSessionId(createdRegisterSessionId);
     setActiveClinic(clinicForReceptionist);
     setIsPosUnlocked(true);
@@ -1676,33 +1610,23 @@ export default function ReceiptsPage() {
   }
 
   async function closeRegister() {
+    if(!cashSummaryReady){alert('Cash reconciliation must load successfully before closing the register. Reopen Close Register and try again.');return;}
     const parsedClosingCash = parseMoneyInput(closingCashInput);
     if (!Number.isFinite(parsedClosingCash) || parsedClosingCash < 0) {
       alert("Please enter a valid closing cash amount.");
       return;
     }
 
-    const latestExpectedCash = Number(expectedCashAmount || 0);
+    let latestExpectedCash = Number(expectedCashAmount || 0);
     const latestCashSales = Number(cashSalesTotal || 0);
-    const variance = parsedClosingCash - latestExpectedCash;
+    let variance = parsedClosingCash - latestExpectedCash;
 
-    if (registerSessionId) {
-      const { error: closeError } = await supabase
-        .from(REGISTER_TABLE)
-        .update({
-          closing_cash: parsedClosingCash,
-          variance,
-          closed_at: new Date().toISOString(),
-        })
-        .eq("id", registerSessionId);
-
-      if (closeError) {
-        console.warn("Register session update warning", closeError);
-        alert(
-          "Register closed locally, but closing cash was not saved to database."
-        );
-      }
-    }
+    if(!registerSessionId){alert('No saved register was found. Please sign in again.');return;}
+    const closeResponse=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'close',registerSessionId,amount:parsedClosingCash})}).catch(()=>null);
+    const closeResult=closeResponse?await closeResponse.json().catch(()=>null):null;
+    if(!closeResponse?.ok){alert(closeResult?.error||'Register was not closed. Try again.');return;}
+    latestExpectedCash = Number(closeResult.expectedCash);
+    variance = Number(closeResult.register.variance);
 
     alert(
       `Register closed. Opening cash: AED ${Number(openingCash || 0).toFixed(2)} | Cash collected: AED ${latestCashSales.toFixed(2)} | Cash deductions: AED ${Number(cashDeductionSummary.activeDeductionsTotal || 0).toFixed(2)} | Expected cash: AED ${latestExpectedCash.toFixed(2)} | Actual closing cash: AED ${parsedClosingCash.toFixed(2)} | Difference: AED ${variance.toFixed(2)}`
@@ -1767,61 +1691,14 @@ export default function ReceiptsPage() {
     setShowPrintModal(false);
   }
 
-  async function getShiftCashSalesTotal() {
-    const activeReceptionistId = receptionistId || loginReceptionistId;
-    if (!activeReceptionistId || !registerOpenedAt) {
-      return 0;
-    }
-
-    const [receiptsRes, balancePaymentsRes, depositsRes] = await Promise.all([
-      supabase
-        .from("receipts")
-        .select("total, amount_paid")
-        .eq("receptionist_id", activeReceptionistId)
-        .ilike("payment_method", "Cash%")
-        .gte("created_at", registerOpenedAt),
-      supabase
-        .from("balance_payments")
-        .select("amount")
-        .eq("receptionist_id", activeReceptionistId)
-        .ilike("payment_method", "Cash%")
-        .gte("created_at", registerOpenedAt),
-      supabase
-        .from("patient_credits")
-        .select("amount")
-        .eq("receptionist_id", activeReceptionistId)
-        .gt("amount", 0)
-        .ilike("payment_method", "Cash%")
-        .gte("created_at", registerOpenedAt),
-    ]);
-
-    if (receiptsRes.error) {
-      console.warn("Failed loading cash sales summary", receiptsRes.error);
-    }
-    if (balancePaymentsRes.error && balancePaymentsRes.error.code !== "42P01") {
-      console.warn("Failed loading balance payments for shift", balancePaymentsRes.error);
-    }
-    if (depositsRes.error && depositsRes.error.code !== "42P01") {
-      console.warn("Failed loading patient deposits for shift", depositsRes.error);
-    }
-
-    // amount_paid is what actually entered the drawer; NULL means paid in full.
-    const receiptsTotal = (receiptsRes.data || []).reduce(
-      (sum, row) => sum + Number(row.amount_paid ?? row.total ?? 0),
-      0
-    );
-    const balancePaymentsTotal = (balancePaymentsRes.data || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
-    // Cash deposits (advance payments) also enter the drawer.
-    const depositsTotal = (depositsRes.data || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
-    return receiptsTotal + balancePaymentsTotal + depositsTotal;
-  }
-
   async function openCloseRegisterModal() {
     setShowCloseRegisterModal(true);
     setClosingCashInput("");
     setIsLoadingCashSummary(true);
+    setCashSummaryReady(false);
     try {
       const payload = await fetchCashDeductionState();
+      setCashSummaryReady(true);
       setCashDeductions(payload.entries || []);
       setCashDeductionSummary(payload.summary);
       setCashSalesTotal(Number(payload.summary.cashCollected || 0));
@@ -1830,10 +1707,7 @@ export default function ReceiptsPage() {
       );
     } catch (error) {
       console.error("Failed loading close-register summary", error);
-      const shiftCashSales = await getShiftCashSalesTotal();
-      const expected = Number(openingCash || 0) + shiftCashSales;
-      setCashSalesTotal(shiftCashSales);
-      setExpectedCashAmount(expected);
+      alert('Cash reconciliation could not be loaded. Register closing is blocked to avoid incorrect totals. Please try again.');
     } finally {
       setIsLoadingCashSummary(false);
     }
@@ -1955,6 +1829,13 @@ export default function ReceiptsPage() {
 
     const now = new Date();
     const { startUtcIso, endUtcIso } = getDubaiDayUtcRange(now);
+    const reportDay = now.toLocaleDateString("en-CA", {timeZone:"Asia/Dubai"});
+    const eodResponse = await fetch("/api/workspace/eod?clinicId="+activeClinic.id+"&day="+reportDay,{cache:"no-store"});
+    const eodCheck = await eodResponse.json();
+    if(!eodResponse.ok){alert(eodCheck.error||"Could not check EOD approvals. Try again.");return;}
+    const pendingCorrections: Array<{id:string;receipt_id:string;kind:string;status:string;requested_reason:string;created_at:string}> = eodCheck.pending||[];
+    const correctionChanges: Array<{receipt_id:string;kind:string;requested_reason:string;approver:string;completed_at:string;replacement_receipt_id:string}> = eodCheck.changes||[];
+    if(pendingCorrections.length)alert("There are "+pendingCorrections.length+" unresolved correction/refund requests. This export will be marked DRAFT. Ask the manager to resolve them before sending final EOD.");
 
     const { data: clinicReceptionists, error: receptionistsError } = await supabase
       .from("receptionist")
@@ -1980,7 +1861,7 @@ export default function ReceiptsPage() {
     const { data: receiptsData, error: receiptsError } = await supabase
       .from("receipts")
       .select("*")
-      .in("receptionist_id", receptionistIds)
+      .or(`clinic_id.eq.${activeClinic.id},and(clinic_id.is.null,receptionist_id.in.(${receptionistIds.join(',')}))`)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
       .order("created_at", { ascending: true });
@@ -2002,6 +1883,7 @@ export default function ReceiptsPage() {
     const { data: paymentRecordsData, error: paymentRecordsError } = await supabase
       .from("payment_records")
       .select("*")
+      .neq('status','cancelled')
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -2046,28 +1928,40 @@ export default function ReceiptsPage() {
         }
       }
     }
+    // Returns are reported on the return day even when the sale was earlier.
+    const returnsResult=await supabase.from('payment_allocation_refunds').select('*').eq('clinic_id',activeClinic.id).eq('status','completed').gte('created_at',startUtcIso).lte('created_at',endUtcIso);
+    if(returnsResult.error){alert('Refund records could not be verified. EOD was not exported.');return;}
+    paymentAllocationRefundsForDay=(returnsResult.data||[]) as PaymentAllocationRefund[];
+    const missingRefundAllocationIds=[...new Set(paymentAllocationRefundsForDay.map(row=>row.payment_allocation_id))].filter(id=>!paymentAllocationsForDay.some(row=>row.id===id));
+    for(let offset=0;offset<missingRefundAllocationIds.length;offset+=100){const result=await supabase.from('payment_allocations').select('*').in('id',missingRefundAllocationIds.slice(offset,offset+100));if(result.error){alert('Refund payment methods could not be verified. EOD was not exported.');return;}paymentAllocationsForDay.push(...(result.data||[]) as PaymentAllocation[]);}
     const patientIds = [...new Set(receipts.map((r) => r.patient_id).filter(Boolean))];
+    let clinicFileNumbers: Map<string, string>;
+    let reportPatients: Array<{ id: string; name: string; phone: string; nationality: string | null; date_of_birth: string | null }>;
+    try {
+      const response = await fetch("/api/patients/report-details", {
+        method: "POST", headers: { "Content-Type": "application/json" }, cache: "no-store",
+        body: JSON.stringify({ clinicId: activeClinic.id, patientIds }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Patient details could not be loaded.");
+      clinicFileNumbers = new Map(result.fileNumbers);
+      reportPatients = result.patients;
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Patient details could not be loaded.");
+      return;
+    }
     const doctorIds = [...new Set(receipts.map((r) => r.doctor_id).filter(Boolean))];
     const patientMap = new Map<string, { 
       name: string;
       phone: string;
       nationality: string;
       date_of_birth: string;
-      patient_number: string;
+      file_no: string;
     }>();
     const doctorMap = new Map<string, string>();
 
     if (patientIds.length > 0) {
-      const { data: patientsData, error: patientsError } = await supabase
-        .from("patients")
-        .select("id, name, phone, nationality, date_of_birth, patient_number")
-        .in("id", patientIds);
-
-      if (patientsError) {
-        console.error("Failed loading patients for report", patientsError);
-        alert("Could not load patient details for this report.");
-        return;
-      }
+      const patientsData = reportPatients;
 
       (patientsData || []).forEach((patient) => {
         patientMap.set(String(patient.id), {
@@ -2075,7 +1969,7 @@ export default function ReceiptsPage() {
           phone: String(patient.phone || ""),
           nationality: String(patient.nationality || ""),
           date_of_birth: patient.date_of_birth ? new Date(patient.date_of_birth).toLocaleDateString("en-GB") : "",
-          patient_number: patient.patient_number ? String(patient.patient_number) : "",
+          file_no: reportClinicFileNumber(clinicFileNumbers, patient.id),
         });
       });
     }
@@ -2190,16 +2084,16 @@ export default function ReceiptsPage() {
     });
 
     const legacyRefundsForDay: Array<{ refund_id: string; receipt_id: string; total_amount: number; created_at: string | null }> = [];
-    if (receiptIds.length > 0) {
+    {
       const { data: refundsData, error: refundsError } = await supabase
         .from("refunds")
         .select("id, receipt_id, total_amount, created_at")
-        .in("receipt_id", receiptIds)
+        .eq("clinic_id",activeClinic.id)
         .gte("created_at", startUtcIso)
         .lte("created_at", endUtcIso);
 
       if (refundsError) {
-        console.error("Failed loading refunds for report", refundsError);
+        alert('Refund records could not be verified. EOD was not exported.');return;
       } else {
         (refundsData || []).forEach((refund) => {
           const refundId = String(refund.id || "");
@@ -2270,7 +2164,7 @@ export default function ReceiptsPage() {
     const { data: balancePaymentsData, error: balancePaymentsError } = await supabase
       .from("balance_payments")
       .select("amount, payment_method")
-      .in("receptionist_id", receptionistIds)
+      .eq("clinic_id",activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso);
     if (balancePaymentsError) {
@@ -2290,7 +2184,7 @@ export default function ReceiptsPage() {
     const { data: depositsData, error: depositsError } = await supabase
       .from("patient_credits")
       .select("amount, payment_method")
-      .in("receptionist_id", receptionistIds)
+      .eq("clinic_id",activeClinic.id)
       .gt("amount", 0)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso);
@@ -2319,6 +2213,13 @@ export default function ReceiptsPage() {
       activeCashDeductions = (cashDeductionData || []) as CashDeduction[];
     }
 
+    let planPatientDetails: Map<string, any>;
+    try {
+      planPatientDetails = new Map((await loadClinicHistoryPatients(activeClinic.id)).map(patient => [patient.id, patient]));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Treatment-plan patient details could not be loaded.");
+      return;
+    }
     const treatmentPlanRows: Array<(string | number)[]> = [];
     const treatmentPlanPaymentSummaries: Array<{
       methodVariant: PaymentMethodVariant;
@@ -2339,7 +2240,7 @@ export default function ReceiptsPage() {
 
     const { data: treatmentPlansCreatedData, error: treatmentPlansCreatedError } = await supabase
       .from("treatment_plans")
-      .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, patients(name, patient_number)")
+      .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, cancelled_at")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -2375,7 +2276,7 @@ export default function ReceiptsPage() {
     let treatmentPlanInitialSalesTotal = 0;
     const { data: treatmentPlanPaymentRecordsData, error: treatmentPlanPaymentRecordsError } = await supabase
       .from("treatment_plan_payment_records")
-      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid), patients(name, patient_number)")
+      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid)")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -2417,7 +2318,7 @@ export default function ReceiptsPage() {
       if (missingPlanIds.length > 0) {
         const { data: missingPlansData, error: missingPlansError } = await supabase
           .from("treatment_plans")
-          .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, patients(name, patient_number)")
+          .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, cancelled_at")
           .eq("clinic_id", activeClinic.id)
           .in("id", missingPlanIds)
           .order("created_at", { ascending: true });
@@ -2478,7 +2379,7 @@ export default function ReceiptsPage() {
       }
 
       [...treatmentPlansById.values()].forEach((plan: any) => {
-        const patient = Array.isArray(plan.patients) ? plan.patients[0] : plan.patients;
+        const patient = planPatientDetails.get(String(plan.patient_id));
         const planId = String(plan.id || "");
         const totalAmount = Number(plan.total_amount || 0);
         const rollup = treatmentPlanRollups.get(planId) || computeTreatmentPlanRollup(plan, { asOf: endUtcIso });
@@ -2495,7 +2396,7 @@ export default function ReceiptsPage() {
             hour12: true,
           }),
           patient?.name || "",
-          patient?.patient_number ? String(patient.patient_number) : "",
+          reportClinicFileNumber(clinicFileNumbers, plan.patient_id),
           plan.title || "Treatment Plan",
           plan.status || "",
           totalAmount,
@@ -2536,7 +2437,7 @@ export default function ReceiptsPage() {
     let cashTreatmentPlanCollectionsTotal = 0;
     treatmentPlanPaymentRecordsForDay.forEach((payment) => {
       const plan = Array.isArray(payment.treatment_plans) ? payment.treatment_plans[0] : payment.treatment_plans;
-      const patient = Array.isArray(payment.patients) ? payment.patients[0] : payment.patients;
+      const patient = planPatientDetails.get(String(payment.patient_id));
       const planId = String(payment.treatment_plan_id || "");
       const totalAmount = Number(plan?.total_amount || 0);
       const invoiceSettled = Number(payment.total_invoice_amount_settled || 0);
@@ -2620,7 +2521,7 @@ export default function ReceiptsPage() {
           hour12: true,
         }),
         patient?.name || "",
-        patient?.patient_number ? String(patient.patient_number) : "",
+        reportClinicFileNumber(clinicFileNumbers, plan?.patient_id || payment.patient_id),
         plan?.title || "Treatment Plan",
         totalAmount,
         invoiceSettled,
@@ -2637,7 +2538,7 @@ export default function ReceiptsPage() {
       "Receipt Number",
       "Patient Name",
       "Nationality",
-      "Patient ID Number",
+      "File No.",
       "Birthdate",
       "Dentist",
       "Treatments Performed",
@@ -2661,9 +2562,11 @@ export default function ReceiptsPage() {
       "Paid Today",
       "Credit Used",
       "Outstanding",
+      "Status", "Correction / Refund Reason", "Approved By", "Correction / Refund Time", "Original Receipt", "Replacement Receipt",
     ];
 
     const detailRows: Array<(string | number)[]> = [];
+    const netDetailRows: Array<(string | number)[]> = [];
 
     receipts.forEach((receipt) => {
       const receiptId = String(receipt.id || "");
@@ -2692,8 +2595,8 @@ export default function ReceiptsPage() {
       const creditUsed = Number(receipt.credit_applied || 0);
       const invoiceSettled = structuredPaymentRecords.length > 0
         ? structuredPaymentRecords.reduce((sum, row) => sum + Number(row.total_invoice_amount_settled || 0), 0)
-        : Math.max(0, Math.min(netTotal, Number(receipt.amount_paid ?? receipt.total ?? 0)));
-      const outstandingCreated = Math.max(0, truncateCurrency(netTotal - invoiceSettled - creditUsed));
+        : Math.max(0, Math.min(regularInvoiceValue, Number(receipt.amount_paid ?? receipt.total ?? 0) - gatewayFee));
+      const outstandingCreated = Math.max(0, roundCurrency(regularInvoiceValue - invoiceSettled - creditUsed));
       const receiptCollectionAmount = structuredPaymentRecords.reduce(
         (sum, row) => sum + Number(row.total_customer_charged_amount || 0),
         0
@@ -2725,6 +2628,7 @@ export default function ReceiptsPage() {
       const tabbyReference = structuredPaymentSummary?.references.tabby || extractTransactionReference(paymentMethodRaw, "tabby");
       const tamaraReference = structuredPaymentSummary?.references.tamara || extractTransactionReference(paymentMethodRaw, "tamara");
 
+      if(receipt.status!=="VOIDED"){
       grossRevenue += grossTotal;
       totalDiscounts += discountAmount;
       regularTreatmentValueTotal += regularTreatmentValue;
@@ -2751,6 +2655,7 @@ export default function ReceiptsPage() {
       tabbyInvoiceAllocationTotal += structuredCollectionSummary?.tabbyInvoice || 0;
       tabbyCardInvoiceAllocationTotal += structuredCollectionSummary?.tabbyCardInvoice || 0;
       tamaraInvoiceAllocationTotal += structuredCollectionSummary?.tamaraInvoice || 0;
+      }
 
       const treatments = (treatmentMap.get(receiptId) || []).join("\n") || "CONSULTATION";
 
@@ -2764,7 +2669,7 @@ export default function ReceiptsPage() {
         receipt.receipt_number ? String(receipt.receipt_number).padStart(5, "0") : String(receiptId).slice(0, 8),
         patientInfo?.name || "",
         patientInfo?.nationality || "",
-        patientInfo?.patient_number || "",
+        patientInfo?.file_no || "Missing clinic file",
         patientInfo?.date_of_birth || "",
         doctorName,
         treatments,
@@ -2788,7 +2693,33 @@ export default function ReceiptsPage() {
         receiptCollectionAmount,
         creditUsed,
         outstandingCreated,
+        receipt.status==="VOIDED"?"VOIDED":(eodCheck.statuses?.[receiptId]||"COMPLETED"),
+        receipt.void_reason||correctionChanges.find(c=>c.receipt_id===receiptId)?.requested_reason||"",
+        correctionChanges.find(c=>c.receipt_id===receiptId)?.approver||"",
+        receipt.voided_at||correctionChanges.find(c=>c.receipt_id===receiptId)?.completed_at||"",
+        eodCheck.receiptNumbers?.[receipt.original_receipt_id||""]||"",eodCheck.receiptNumbers?.[receipt.replacement_receipt_id||""]||"",
       ]);
+      const netRow=[...detailRows[detailRows.length-1]];
+      if(receipt.status==="VOIDED"){
+        for(const index of [8,9,10,11,12,13,15,17,18,19,21,22,25,26,27])netRow[index]=0;
+      }else{
+        const paymentIds=new Set(structuredPaymentRecords.map(payment=>payment.id));
+        const reversals=paymentAllocationRefundsForDay.filter(refund=>refund.status==='completed'&&paymentIds.has(refund.payment_id)&&new Date(refund.created_at).getTime()<=new Date(endUtcIso).getTime());
+        const reversedTreatment=reversals.reduce((sum,refund)=>sum+Number(refund.refunded_treatment_amount||0),0);
+        const reversedVat=reversals.reduce((sum,refund)=>sum+Number(refund.refunded_vat_amount||0),0);
+        const returned=reversals.reduce((sum,refund)=>sum+Number(refund.total_returned_amount||0),0);
+        netRow[8]=roundCurrency(Math.max(0,grossTotal-reversedTreatment));
+        netRow[11]=roundCurrency(Math.max(0,vatAmount-reversedVat));
+        netRow[10]=roundCurrency(Math.max(0,netTotal-returned));
+        netRow[25]=roundCurrency(Math.max(0,receiptCollectionAmount-returned));
+        if(netRow[28]==='REFUNDED'){netRow[8]=0;netRow[9]=0;netRow[11]=0;}
+        for(const [variants,index] of [[['cash'],12],[['card'],13],[['tabby_standard'],15],[['tabby_card'],17],[['tamara'],19],[['bank_transfer'],25]] as const){
+          if(index===25)continue;
+          const methodReturned=reversals.filter(refund=>variants.some(variant=>structuredPaymentAllocations.some(allocation=>allocation.id===refund.payment_allocation_id&&allocation.method_variant===variant))).reduce((sum,refund)=>sum+Number(refund.total_returned_amount||0),0);
+          netRow[index]=roundCurrency(Math.max(0,Number(netRow[index]||0)-methodReturned));
+        }
+      }
+      netDetailRows.push(netRow);
     });
 
     const totalMoneyCollected = regularPatientPaymentsTotal + treatmentPlanCollectionsTotal + balanceCollectionsTotal + depositsReceivedTotal;
@@ -2806,8 +2737,8 @@ export default function ReceiptsPage() {
     const cashRefundsToday = refundMethodTotals.cash;
     const cashCollectedForDeductions = cashGrossCollectedToday;
     const cashAfterDeductions = cashGrossCollectedToday - totalCashDeductions;
-    const uniquePatients = new Set(receipts.map((r) => String(r.patient_id || "")).filter(Boolean)).size;
-    const birthdayDiscountTotal = receipts.reduce((sum, receipt) => sum + Number(receipt.birthday_discount_amount || 0), 0);
+    const uniquePatients = new Set(receipts.filter(r=>r.status!=="VOIDED").map((r) => String(r.patient_id || "")).filter(Boolean)).size;
+    const birthdayDiscountTotal = receipts.filter(r=>r.status!=="VOIDED").reduce((sum, receipt) => sum + Number(receipt.birthday_discount_amount || 0), 0);
     const netCollectionsAfterDeductions = netPatientMoneyReceived - totalCashDeductions;
     const balanceCollectionBreakdown = (balancePaymentsData || []).reduce((summary, payment) => {
       const breakdown = getPaymentBreakdownForReporting(String(payment.payment_method || ""), Number(payment.amount || 0));
@@ -2864,7 +2795,7 @@ export default function ReceiptsPage() {
 
     const workbook = XLSX.utils.book_new();
     const normalizeReportCellValue = (value: string | number) => (
-      typeof value === "number" && Number.isFinite(value) ? truncateCurrency(value) : value
+      typeof value === "number" && Number.isFinite(value) ? roundCurrency(value) : value
     );
     const normalizeReportRows = (rows: (string | number)[][]) => rows.map((row) => row.map(normalizeReportCellValue));
     const thinBorder = {
@@ -2910,6 +2841,8 @@ export default function ReceiptsPage() {
       ["Advance Payments / Prepayments", depositsReceivedTotal, "", ""],
       ["TOTAL MONEY COLLECTED", totalMoneyCollected, "", ""],
       ["Refunds", refundsReturnedTodayTotalAmount, "", ""],
+      ["Refunds from today's receipts", todaysSalesRefundTotal.amount, "", ""],
+      ["Refunds from earlier receipts", previousSalesRefundTotal.amount, "", ""],
       ["NET MONEY COLLECTED", totalMoneyCollected - refundsReturnedTodayTotalAmount, "", ""],
       ["Commissions", totalCommissions, "", ""],
       ["Expenses", totalExpenses, "", ""],
@@ -2950,7 +2883,7 @@ export default function ReceiptsPage() {
       ["EXPECTED CASH AFTER DEDUCTIONS", cashTotal - refundMethodTotals.cash - totalCommissions - totalExpenses, "", ""],
       ["", "", "", ""],
       ["ACTIVITY", "", "", ""],
-      ["Regular Receipts", receipts.length, "", ""],
+      ["Regular Receipts", receipts.filter(r=>r.status!=="VOIDED").length, "", ""],
       ["Treatment Plan Visits", treatmentPlanVisitsTodayData?.length || 0, "", ""],
       ["Treatment Plan Payments", treatmentPlanPaymentRecordsForDay.length, "", ""],
       ["Old Balance Payments", (balancePaymentsData || []).length, "", ""],
@@ -3083,13 +3016,13 @@ export default function ReceiptsPage() {
       (detailsSheet as any)[address] = { ...(detailsSheet as any)[address], v: safeValue };
     };
 
-    writeCell(`A${totalsRow}`, "TOTALS");
+    writeCell(`A${totalsRow}`, "NET TOTALS");
 
     // Store computed totals as values. Formula cells have caused Excel repairs
     // when the report has no normal receipt rows but other EOD collections exist.
     ["I", "J", "K", "L", "M", "N", "P", "R", "S", "U", "V", "W", "Y", "Z", "AA"].forEach((col) => {
       const colIndex = XLSX.utils.decode_col(col);
-      const computed = detailRows.reduce((s, row) => s + Number(row[colIndex] || 0), 0);
+      const computed = roundCurrency(netDetailRows.reduce((sum,row)=>sum+Number(row[colIndex]||0),0));
       writeCell(`${col}${totalsRow}`, computed);
     });
 
@@ -3160,6 +3093,7 @@ export default function ReceiptsPage() {
           baseStyle.numFmt = "#,##0.00";
         }
 
+        if(!isTotalsRow){const status=visibleDetailRows[row-2]?.[28];if(status==="VOIDED"){baseStyle.fill={fgColor:{rgb:"E5E7EB"}};baseStyle.font={name:"Calibri",sz:10,color:{rgb:"6B7280"},strike:true};}else if(status==="REFUNDED"){baseStyle.fill={fgColor:{rgb:"FECACA"}};}else if(status==="PARTIALLY_REFUNDED"){baseStyle.fill={fgColor:{rgb:"FEF3C7"}};}}
         styleDetailsCell(row, col, baseStyle);
       }
     }
@@ -3170,7 +3104,7 @@ export default function ReceiptsPage() {
     const planHeaders = [
       "Created Time",
       "Patient Name",
-      "Patient ID Number",
+      "File No.",
       "Treatment Plan",
       "Status",
       "Plan Total",
@@ -3237,7 +3171,7 @@ export default function ReceiptsPage() {
     const planPaymentHeaders = [
       "Time",
       "Patient Name",
-      "Patient ID Number",
+      "File No.",
       "Treatment Plan",
       "Plan Total",
       "Paid Today",
@@ -3303,7 +3237,7 @@ export default function ReceiptsPage() {
     }
     XLSX.utils.book_append_sheet(workbook, planPaymentSheet, "Treatment Plan Payments");
 
-    if (paymentRecordsForDay.length > 0) {
+    if (paymentRecordsForDay.length > 0 || paymentAllocationRefundsForDay.length > 0) {
       const receiptMap = new Map(receipts.map((receipt) => [String(receipt.id), receipt]));
       const receptionistNameMap = new Map(receptionistRows.map((row) => [String(row.id), String(row.name || "")]));
       const allocationsByPaymentId = new Map<string, PaymentAllocation[]>();
@@ -3324,7 +3258,7 @@ export default function ReceiptsPage() {
         "Payment ID",
         "Invoice/Treatment ID",
         "Patient Name",
-        "Patient Number",
+        "File No.",
         "Clinic",
         "Cashier/User",
         "Treatment Net Amount",
@@ -3351,7 +3285,7 @@ export default function ReceiptsPage() {
           payment.id,
           payment.receipt_id,
           patient?.name || "",
-          patient?.patient_number || "",
+          reportClinicFileNumber(clinicFileNumbers, receipt?.patient_id),
           activeClinic.name,
           receptionistNameMap.get(String(payment.receptionist_id || "")) || "",
           treatmentNet,
@@ -3519,7 +3453,9 @@ export default function ReceiptsPage() {
 
     const fileDate = formatDubaiFileDate(now);
     const fileName = `EOD RECONCILIATION ${activeClinic.name.toUpperCase()} ${fileDate.day} ${fileDate.month} ${fileDate.year}.xlsx`;
-    XLSX.writeFile(workbook, fileName);
+    const pendingSheet=XLSX.utils.aoa_to_sheet([["EOD Approval Status",pendingCorrections.length?"DRAFT — unresolved requests":"No unresolved requests"],["Request","Receipt","Type","Status","Reason","Requested At"],...pendingCorrections.map(q=>[q.id,q.receipt_id,q.kind,q.status,q.requested_reason,q.created_at])]);
+    XLSX.utils.book_append_sheet(workbook,pendingSheet,"Pending Approvals");
+    XLSX.writeFile(workbook, (pendingCorrections.length?"DRAFT - ":"")+fileName);
   }
 
   function filenameFromDisposition(headerValue: string | null): string {
@@ -4144,194 +4080,102 @@ export default function ReceiptsPage() {
       }
     }
 
-    const { data: receiptData, error: receiptError } = await supabase
-      .from("receipts")
-      .insert([
-        buildReceiptInsertPayload({
+    const storageKey = `pos-checkout-request:${receiptClinicId}`;
+    let requestId = checkoutRequest.current?.clinicId === receiptClinicId ? checkoutRequest.current.id : null;
+    if (!requestId) {
+      requestId = sessionStorage.getItem(storageKey) || crypto.randomUUID();
+      sessionStorage.setItem(storageKey, requestId);
+      checkoutRequest.current = { id: requestId, clinicId: receiptClinicId };
+    }
+    const response = await fetch("/api/receipts/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requestId,
+        receipt: buildReceiptInsertPayload({
           clinicId: receiptClinicId,
           patientId: transactionPatientId,
           patientFileId: transactionPatientFileId || null,
           doctorId: doctorId || null,
           receptionistId: activeReceptionistId,
-          subtotal,
-          vat,
-          total: totalWithPaymentFees,
-          totalBeforeGatewayFee: total,
-          gatewayFee: roundedPaymentFees,
-          gatewayFeeProvider,
-          discountAmount,
-          birthdayDiscountAmount,
-          birthdayDiscountApplied,
-          paymentMethod: isFullyCoveredByCredit && creditApplied > 0.0049
-            ? `Patient Credit (AED ${creditApplied.toFixed(2)})`
-            : getPaymentSummaryForSave(),
+          subtotal, vat, total: totalWithPaymentFees, totalBeforeGatewayFee: total,
+          gatewayFee: roundedPaymentFees, gatewayFeeProvider, discountAmount: roundCurrency(discountAmount),
+          birthdayDiscountAmount: roundCurrency(birthdayDiscountAmount), birthdayDiscountApplied,
+          paymentMethod: getPaymentSummaryForSave(),
           includeAmountPaid: isPartialPayment || creditApplied > 0.0049 || roundedPaymentFees > 0,
-          amountPaid: amountPaidToday,
-          creditApplied,
+          amountPaid: amountPaidToday, creditApplied,
         }),
-      ])
-      .select()
-      .single();
-
-    if (receiptError || !receiptData) {
-      console.error("Receipt insert error", receiptError);
-      alert(`Error saving receipt: ${receiptError?.message || "unknown error"}`);
-      return false;
-    }
-
-    const items = preparedReceiptItemDrafts.map((item) => {
-      return {
-        receipt_id: receiptData.id,
-        service_id: item.service_id,
-        quantity: item.quantity,
-        price: item.price,
-        total: item.total,
-        original_price: item.original_price,
-        teeth: item.teeth,
-        service_name_snapshot: item.service_name_snapshot,
-        allocated_global_discount_amount: item.allocated_global_discount_amount,
-        taxable_amount: item.taxable_amount,
-        vat_rate: item.vat_rate,
-        vat_amount: item.vat_amount,
-        final_line_total: item.final_line_total,
-      };
+        items: preparedReceiptItemDrafts,
+        allocations: computedAllocations.map(row => ({
+          method_group: row.methodGroup, method_variant: row.methodVariant,
+          treatment_net_amount: row.treatmentNetAmount, vat_amount: row.vatAmount,
+          invoice_allocation_amount: row.invoiceAllocationAmount,
+          fee_rate: row.feeRate, fee_amount: row.feeAmount,
+          customer_charged_amount: row.customerChargedAmount,
+          provider_reference_number: row.providerReferenceNumber,
+          terminal_authorization_code: row.terminalAuthorizationCode, card_network: row.cardNetwork,
+        })),
+        registerSessionId: registerSessionId || null,
+      }),
     });
-
-    const { data: itemsData, error: itemsError } = await supabase.from("receipt_items").insert(items).select();
-
-    if (itemsError || !itemsData) {
-      console.error("Receipt items insert error", itemsError);
-      alert(`Error saving receipt items: ${itemsError?.message || "unknown error"}`);
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.receipt) {
+      if (response.status === 409) {
+        const savedResponse = await fetch(`/api/receipts/checkout?requestId=${encodeURIComponent(requestId)}`, { cache: "no-store" });
+        const saved = await savedResponse.json().catch(() => ({}));
+        if (savedResponse.ok && saved.receipt) {
+          const receiptNumber = String(saved.receipt.receipt_number || saved.receipt.id);
+          if (window.confirm(`Receipt ${receiptNumber} was already saved. This payment was not recorded again. Discard the current cart and review that receipt in Receipt History?`)) {
+            finalizeSuccessfulTransaction();
+          }
+          return false;
+        }
+      }
+      alert(result.error || "Checkout could not be confirmed. Retry with the same details; do not start another payment.");
       return false;
     }
-
+    const receiptData = result.receipt;
     setCurrentReceipt(receiptData);
-
-    const receiptRef = receiptData.receipt_number
-      ? `#${String(receiptData.receipt_number).padStart(5, "0")}`
-      : `#${String(receiptData.id).slice(0, 8).toUpperCase()}`;
-
-    if (!isFullyCoveredByCredit && computedAllocations.length > 0 && activeClinic?.id) {
-      const rpcAllocations = computedAllocations.map((row) => ({
-        method_group: row.methodGroup,
-        method_variant: row.methodVariant,
-        treatment_net_amount: row.treatmentNetAmount,
-        vat_amount: row.vatAmount,
-        invoice_allocation_amount: row.invoiceAllocationAmount,
-        fee_rate: row.feeRate,
-        fee_amount: row.feeAmount,
-        customer_charged_amount: row.customerChargedAmount,
-        provider_reference_number: row.providerReferenceNumber,
-        terminal_authorization_code: row.terminalAuthorizationCode,
-        card_network: row.cardNetwork,
-        status: "completed",
-      }));
-      const invoiceSettled = computedAllocations.reduce((sum, row) => sum + row.invoiceAllocationAmount, 0);
-      const vatSettled = computedAllocations.reduce((sum, row) => sum + row.vatAmount, 0);
-      const feeSettled = computedAllocations.reduce((sum, row) => sum + row.feeAmount, 0);
-      const customerChargedSettled = computedAllocations.reduce((sum, row) => sum + row.customerChargedAmount, 0);
-
-      const { data: paymentRecordId, error: paymentRecordError } = await supabase.rpc("create_payment_record_with_allocations", {
-        p_receipt_id: receiptData.id,
-        p_clinic_id: receiptClinicId,
-        p_receptionist_id: activeReceptionistId,
-        p_total_invoice_amount_settled: Math.round(invoiceSettled * 100) / 100,
-        p_total_vat_amount: Math.round(vatSettled * 100) / 100,
-        p_total_payment_fee_amount: Math.round(feeSettled * 100) / 100,
-        p_total_customer_charged_amount: Math.round(customerChargedSettled * 100) / 100,
-        p_payment_method_summary: paymentSummaryLabel(computedAllocations, { includeAmounts: true }),
-        p_is_split: computedAllocations.length > 1,
-        p_status: "completed",
-        p_allocations: rpcAllocations,
-        p_created_by: activeReceptionistId,
-      });
-      if (paymentRecordError) {
-        console.error("Payment allocation save error", paymentRecordError);
-        alert(`Receipt saved, but payment allocations were not recorded: ${paymentRecordError.message}`);
-      } else if (paymentRecordId) {
-        await supabase.from("payment_records").select("id").eq("id", paymentRecordId).maybeSingle();
-      }
-    }
-
-    // Deduct the applied credit from the patient's ledger (negative row).
-    if (creditApplied > 0.0049) {
-      const { data: creditRow, error: creditError } = await supabase
-        .from("patient_credits")
-        .insert([
-          {
-            patient_id: transactionPatientId,
-            clinic_id: receiptClinicId,
-            amount: -creditApplied,
-            reason: `Applied to receipt ${receiptRef}`,
-            receipt_id: receiptData.id,
-            receptionist_id: activeReceptionistId,
-            register_session_id: registerSessionId || null,
-          },
-        ])
-        .select()
-        .single();
-
-      if (creditError || !creditRow) {
-        console.error("Credit deduction insert error", creditError);
-        alert(
-          `Receipt saved, but deducting the applied patient credit of AED ${creditApplied.toFixed(2)} failed: ${creditError?.message || "unknown error"}. The patient's available credit was NOT reduced — please correct it.`
-        );
-      } else {
-        setPatientCredits((prev) => [creditRow as PatientCredit, ...prev]);
-      }
-    }
-
-    if (isPartialPayment) {
-      const { data: balanceData, error: balanceError } = await supabase
-        .from("outstanding_balances")
-        .insert([
-          {
-            patient_id: transactionPatientId,
-            clinic_id: receiptClinicId,
-            original_date: new Date().toLocaleDateString("en-CA"),
-            original_amount: outstandingRemainder,
-            reason: creditApplied > 0.0049
-              ? `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} + credit AED ${creditApplied.toFixed(2)} of AED ${totalWithPaymentFees.toFixed(2)}`
-              : `Partial payment at POS — paid AED ${amountPaidToday.toFixed(2)} of AED ${totalWithPaymentFees.toFixed(2)}`,
-            reference_number: receiptRef,
-            created_by: activeReceptionistId,
-            receipt_id: receiptData.id,
-          },
-        ])
-        .select()
-        .single();
-
-      if (balanceError || !balanceData) {
-        console.error("Outstanding balance insert error", balanceError);
-        alert(
-          `Receipt saved, but recording the outstanding balance of AED ${outstandingRemainder.toFixed(2)} failed: ${balanceError?.message || "unknown error"}. Add it manually from the Backend page.`
-        );
-      } else {
-        setOutstandingBalances((prev) => [balanceData as OutstandingBalance, ...prev]);
-      }
-    }
-
+    if (result.credit) setPatientCredits(prev => [result.credit as PatientCredit, ...prev.filter(row => row.id !== result.credit.id)]);
+    if (result.balance) setOutstandingBalances(prev => [result.balance as OutstandingBalance, ...prev.filter(row => row.id !== result.balance.id)]);
     if (notes.trim()) {
-      const { error: noteError } = await supabase.from("patient_notes").insert({
-        patient_id: transactionPatientId,
-        receipt_id: receiptData.id,
-        note: notes.trim(),
-        doctor_id: doctorId || null,
-        receptionist_id: activeReceptionistId,
-        clinic_id: receiptClinicId,
-      });
-      if (noteError) {
-        console.error("Patient note save error", noteError.message, noteError.code, noteError.details, noteError.hint);
+      try {
+        const noteResponse = await fetch("/api/patient-notes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            patientId: transactionPatientId,
+            receiptId: receiptData.id,
+            note: notes.trim(),
+            doctorId: doctorId || null,
+            receptionistId: activeReceptionistId,
+            clinicId: receiptClinicId,
+          }),
+        });
+        if (!noteResponse.ok) {
+          const payload = await noteResponse.json().catch(() => null);
+          console.error("Patient note save error", { operationId: payload?.operationId });
+          alert("Receipt saved. The patient note could not be saved; check the patient notes and add it there. Do not repeat the payment.");
+        }
+      } catch {
+        alert("Receipt saved. The note change could not be confirmed; refresh patient notes before adding it again. Do not repeat the payment.");
       }
     }
 
     return receiptData;
+    } catch {
+      alert("Checkout could not be confirmed. Keep the same transaction details and retry; do not collect payment again.");
+      return false;
     } finally {
       setIsSavingReceipt(false);
     }
   }
 
   function finalizeSuccessfulTransaction() {
+    if (checkoutRequest.current) {
+      sessionStorage.removeItem(`pos-checkout-request:${checkoutRequest.current.clinicId}`);
+      checkoutRequest.current = null;
+    }
     setShowPrintModal(false);
     setPaymentCompleteSnapshot(null);
     setShowPaymentModal(false);
@@ -6228,6 +6072,13 @@ export default function ReceiptsPage() {
         onCreditSaved={(credit) => setPatientCredits((prev) => [credit, ...prev])}
         onPatientUpdated={(updated) => {
           setPatients((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } : p)));
+          const syncClinicFile = (rows: any[]) => rows.map((file) =>
+            file.patient_id === updated.id && file.clinic_id === activeClinic?.id
+              ? { ...file, file_no: updated.clinic_file_no ?? file.file_no, mrn: Object.hasOwn(updated, "clinic_file_mrn") ? updated.clinic_file_mrn : file.mrn }
+              : file
+          );
+          setClinicPatientFiles(syncClinicFile);
+          setRegistrationClinicPatientFiles(syncClinicFile);
           if (patientId === updated.id) selectPatient(updated);
           pushSuccessToast("Patient updated");
         }}

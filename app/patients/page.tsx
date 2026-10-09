@@ -2,10 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
-import { supabase } from "../../lib/supabase";
+import { loadManagedPatients } from "../../lib/patient-read-client";
 import { Patient } from "../../lib/types";
 import { calculateAge } from "../../lib/utils";
-import { nextAutoFileNumber } from "../../lib/patient-file-number";
+
 
 export default function PatientsPage() {
   const [name, setName] = useState("");
@@ -26,14 +26,8 @@ export default function PatientsPage() {
   }, []);
 
   async function loadPatients() {
-    const { data } = await supabase
-      .from("patients")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (data) {
-      setPatients(data);
-    }
+    try { setPatients(await loadManagedPatients()); }
+    catch (error) { setPatients([]); alert(error instanceof Error ? error.message : "Patient records could not be loaded."); }
   }
 
   async function savePatient() {
@@ -42,39 +36,20 @@ export default function PatientsPage() {
       return;
     }
 
-    // Auto-assigned File Numbers start at 20,000 (old-system files stop around
-    // 18,000). Retry on a duplicate so simultaneous saves get distinct numbers.
-    let saveError: unknown = null;
-    let saved = false;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const nextNumber = await nextAutoFileNumber();
-
-      const { error } = await supabase.from("patients").insert([
-        {
-          name: name.trim(),
-          phone: phone.trim() || null,
-          email: email.trim() || null,
-          notes: notes.trim() || null,
-          date_of_birth: dateOfBirth || null,
-          sex: sex || null,
-          nationality: nationality.trim() || null,
-          emirates_id: emiratesId.trim() || null,
-          passport_number: passportNumber.trim() || null,
-          patient_number: nextNumber,
-        },
-      ]);
-
-      if (!error) {
-        saved = true;
-        break;
-      }
-      saveError = error;
-      if ((error as { code?: string }).code !== "23505") break;
-    }
-
-    if (!saved) {
-      alert("Error saving patient");
-      console.error(saveError);
+    try {
+      const response = await fetch("/api/patients/simple", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ patient: {
+          name: name.trim(), phone: phone.trim(), email: email.trim() || null,
+          notes: notes.trim() || null, date_of_birth: dateOfBirth || null,
+          sex: sex || null, nationality: nationality.trim() || null,
+          emirates_id: emiratesId.trim() || null, passport_number: passportNumber.trim() || null,
+        } }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Patient could not be saved.");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Patient could not be saved. Check the list before retrying.");
       return;
     }
 

@@ -10,6 +10,7 @@ import {
 } from "../../../lib/a4-invoice-branding";
 import { generateInvoiceHtml } from "../../../lib/generate-invoice-html";
 import { supabase } from "../../../lib/supabase";
+import {saveClinicDesign} from '../../../lib/backend-catalog-client';
 import type { Clinic } from "../../../lib/types";
 
 const BACKEND_SELECTED_CLINIC_KEY = "backendSelectedClinicId";
@@ -240,7 +241,7 @@ function A4InvoiceDesignPageContent() {
     };
 
     setIsSaving(true);
-    const { error } = await supabase.from("clinics").update(payload).eq("id", selectedClinicId);
+    const { error } = await saveClinicDesign(selectedClinicId,payload);
     setIsSaving(false);
 
     if (error) {

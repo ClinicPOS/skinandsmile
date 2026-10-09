@@ -8,6 +8,7 @@ export type ClinicAccessSession = {
   mode: "clinic" | "manager";
   clinicId: string | null;
   clinicName: string | null;
+  role?: 'owner'|'clinic_manager';
 };
 
 export function readClinicAccessSession(): ClinicAccessSession | null {
@@ -22,6 +23,7 @@ export function readClinicAccessSession(): ClinicAccessSession | null {
       mode,
       clinicId,
       clinicName: String(parsed?.clinicName || "").trim() || null,
+      ...(parsed?.role==='owner'||parsed?.role==='clinic_manager'?{role:parsed.role}:{}),
     };
   } catch {
     return null;
@@ -36,6 +38,7 @@ export function writeClinicAccessSession(session: ClinicAccessSession) {
 export function clearClinicAccessSession() {
   if (typeof window === "undefined") return;
   localStorage.removeItem(CLINIC_ACCESS_SESSION_KEY);
+  localStorage.removeItem('posRegisterSession');
 }
 
 export function clinicAccessAllowsClinic(
@@ -56,7 +59,7 @@ export function filterClinicsForAccess<T extends { id: string }>(
 
 export function getClinicAccessLabel(session: ClinicAccessSession | null): string {
   if (!session) return "Clinic Access";
-  if (session.mode === "manager") return "Manager • All Clinics";
+  if (session.mode === "manager") return session.role==='owner'?"Owner • All Clinics":"Shared Admin • All Clinics";
   return session.clinicName || "Clinic Access";
 }
 

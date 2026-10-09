@@ -1,0 +1,9 @@
+# Per-visit doctor attribution — ranking values pending
+
+Clinic decision: record the actual doctor now; do not allocate treatment-plan ranking money until managers agree stage values. Existing treatment_plan_visits.doctor_id already supports different doctors per visit. New visits require an actual active doctor in the plan's clinic at UI, API and protected RPC. Historical doctor-null visits remain untouched. Retries do not overwrite or duplicate visits; the original RPC retains locked plan limits, clinic checks, audit logging and completion behavior.
+
+The CEO dashboard exposes treatmentPlanRankingPending counts and an attention notice for the selected reporting period and clinic. No upfront plan payment, instalment or visit-count share is added to doctor monetary rankings. Missing historical attribution is explicitly reported, never guessed. Existing ranking amounts are unchanged.
+
+Remaining design: managers must agree stage/service values after discounts and VAT basis consistent with regular ranking (currently before VAT). Support stage-level attribution for multiple doctors in one visit, single credit per stage, allocation total cap, manager-approved attribution corrections, historical backfill review, and explicit refund/void effect on performance. Do not implement a default equal split. Current regular ranking still needs separate review: it can assign the whole receipt to the last item doctor, and refund performance treatment is not yet settled.
+
+Migration 20261008020000_require_visit_doctor.sql is local only and does not backfill or modify historical records. For rollback, restore matching local application/database or restore the prior visit function/grants together; do not reopen anonymous writes. Tests cover required doctor, different doctors across visits, inactive/wrong-clinic rejection, concurrent visit limits and unchanged retries. Production remains NO GO pending the wider release review.

@@ -1,4 +1,5 @@
 import { createServerSupabaseClient, readAppSession } from "../../../../lib/api-session";
+import {createProtectedDataClient} from '../../../../lib/protected-data-server';
 import { fromMinorUnits, toMinorUnits } from "../../../../lib/money";
 import { fetchAllPages } from "../../../../lib/paginated-fetch";
 import { canAccessReports } from "../../../../lib/session-auth";
@@ -59,10 +60,11 @@ async function fetchByIds<Row>(
 }
 
 export async function POST(request: Request) {
-  const supabase = createServerSupabaseClient();
+  let supabase = createServerSupabaseClient();
   const { session, errorResponse } = await readAppSession(supabase);
   if (!session) return errorResponse!;
   if (!canAccessReports(session)) return Response.json({ error: "Forbidden." }, { status: 403 });
+  supabase=createProtectedDataClient();
 
   const body = await request.json().catch(() => null);
   let range: ReturnType<typeof parseDubaiRange>;
@@ -79,7 +81,7 @@ export async function POST(request: Request) {
   try {
     const receipts = await fetchAllPages<ReceiptRow>((from, to) => {
       let query = supabase.from("receipts")
-        .select("id, clinic_id, patient_id, created_at, transaction_type")
+        .select("id, clinic_id, patient_id, created_at, transaction_type").neq("status","VOIDED")
         .gte("created_at", range.startIso).lt("created_at", range.endIso)
         .order("created_at", { ascending: true }).order("id", { ascending: true }).range(from, to);
       if (clinicId) query = query.eq("clinic_id", clinicId);

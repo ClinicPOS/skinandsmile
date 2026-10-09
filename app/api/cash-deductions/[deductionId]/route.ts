@@ -1,4 +1,5 @@
-import { ensureClinicScopeAccess, readAppSession, createServerSupabaseClient } from "../../../../lib/api-session";
+import {createProtectedDataClient} from '../../../../lib/protected-data-server';
+import { ensureClinicScopeAccess, readAppSession } from "../../../../lib/api-session";
 import { roundCurrency, toMinorUnits } from "../../../../lib/money";
 import {
   buildCashDeductionSummary,
@@ -20,7 +21,7 @@ export async function PATCH(
   request: Request,
   context: { params: Promise<{ deductionId: string }> }
 ) {
-  const supabase = createServerSupabaseClient();
+  const supabase = createProtectedDataClient();
   const { session, errorResponse } = await readAppSession(supabase);
   if (errorResponse || !session) return errorResponse!;
 
@@ -47,6 +48,7 @@ export async function PATCH(
   }
   const clinicScopeError = ensureClinicScopeAccess(session, registerContext.clinicId);
   if (clinicScopeError) return clinicScopeError;
+  if(session.userRole === "receptionist" && session.receptionistId !== registerContext.receptionistId)return Response.json({error:"Sign in as the receptionist who opened this register."},{status:403});
   if (registerContext.closedAt) {
     return Response.json({ error: "Register is already closed. Cash deductions are locked." }, { status: 409 });
   }

@@ -1,0 +1,82 @@
+// LOCALHOST ONLY. Retains labelled fake financial records to preserve audit history.
+import fs from 'node:fs';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';
+const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8').replace(/^\uFEFF/,''));assert.equal(config.API_URL,'http://127.0.0.1:54321');
+const app='http://127.0.0.1:3001',clinic='11111111-1111-4111-8111-111111111111',other='22222222-2222-4222-8222-222222222222',rec='33333333-3333-4333-8333-333333333333';
+const headers={apikey:config.SERVICE_ROLE_KEY,Authorization:`Bearer ${config.SERVICE_ROLE_KEY}`,'Content-Type':'application/json'},anon={apikey:config.ANON_KEY,Authorization:`Bearer ${config.ANON_KEY}`,'Content-Type':'application/json'};
+const token=randomUUID(),foreign=randomUUID(),service=randomUUID(),tokens=[token,foreign];
+let testManagerId;
+async function db(path,init={}){const r=await fetch(`${config.API_URL}/rest/v1/${path}`,{...init,headers});assert.ok(r.ok,await r.clone().text());const text=await r.text();return text?JSON.parse(text):null;}
+async function api(path,auth=token,body){return fetch(`${app}${path}`,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...(auth?{Cookie:`app-auth=${auth}`}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:'manual'});}
+async function ok(response){assert.equal(response.status,200,await response.clone().text());return response.json();}
+async function login(email,password,clinicId){const r=await api('/api/auth/staff-login',null,{email,password,clinicId});await ok(r);const value=r.headers.get('set-cookie').match(/app-auth=([^;]+)/)[1];tokens.push(value);return value;}
+const post=(body,auth=token)=>api('/api/workspace/refunds',auth,body);
+async function receipt(variant='cash'){
+ const patient='77777777-7777-4777-8777-777777777777';const files=await db(`clinic_patient_files?patient_id=eq.${patient}&clinic_id=eq.${clinic}&select=id`);
+ const doctors=await db(`doctors?clinic_id=eq.${clinic}&is_active=eq.true&select=id`);assert.ok(doctors.length);
+ const id=randomUUID(),fee=variant==='tabby_standard'?15.75:0;
+ const saved=await ok(await api('/api/receipts/checkout',token,{requestId:id,receipt:{clinic_id:clinic,patient_id:patient,patient_file_id:files[0].id,doctor_id:doctors[0].id,receptionist_id:rec,subtotal:200,vat:10,total:210+fee,total_before_gateway_fee:210,gateway_fee:fee,discount_amount:0,birthday_discount_amount:0,amount_paid:210+fee,credit_applied:0},items:[0,1].map(()=>({service_id:service,quantity:1,price:100,original_price:100,total:100,teeth:[],service_name_snapshot:'TEST REFUND APPROVAL',allocated_global_discount_amount:0,taxable_amount:100,vat_rate:0.05,vat_amount:5,final_line_total:105})),allocations:[{method_group:variant==='cash'?'cash':'tabby',method_variant:variant,treatment_net_amount:200,vat_amount:10,invoice_allocation_amount:210,fee_rate:fee?0.075:0,fee_amount:fee,customer_charged_amount:210+fee,provider_reference_number:fee?'TEST-'+id:null}],registerSessionId:(await db('cash_register_sessions?receptionist_id=eq.'+rec+'&closed_at=is.null&select=id'))[0].id}));
+ const items=await db(`receipt_items?receipt_id=eq.${saved.receipt.id}&select=id`),payments=await db(`payment_records?receipt_id=eq.${saved.receipt.id}&select=id`),allocations=await db(`payment_allocations?payment_id=eq.${payments[0].id}&select=*`);
+ return {id:saved.receipt.id,items:items.map(i=>i.id),allocation:allocations[0].id};
+}
+function draft(r,all=false){return {action:'request',receiptId:r.id,operationId:randomUUID(),reason:'TEST patient requested return',itemIds:all?r.items:[r.items[0]],allocationAmounts:{[r.allocation]:all?'210':'105'}};}
+try{
+ await db('services',{method:'POST',body:JSON.stringify({id:service,clinic_id:clinic,name:'TEST REFUND APPROVAL',price:100,vat_rate:0.05,is_active:true})});
+ for(const [t,c,r] of [[token,clinic,rec],[foreign,other,'44444444-4444-4444-8444-444444444444']])await db('active_sessions',{method:'POST',body:JSON.stringify({token:t,session_mode:'clinic',user_role:'receptionist',clinic_id:c,receptionist_id:r,created_at:new Date().toISOString()})});
+ await db(`active_sessions?token=eq.${token}`,{method:'PATCH',body:JSON.stringify({receptionist_id:null})});
+ assert.equal((await api('/api/auth/receptionist',token,{receptionistId:rec,pin:'wrong'})).status,403);
+ assert.equal((await api('/api/auth/receptionist',token,{receptionistId:'44444444-4444-4444-8444-444444444444',pin:'1234'})).status,403);
+ await ok(await api('/api/auth/receptionist',token,{receptionistId:rec,pin:'1234'}));
+ assert.equal((await db(`active_sessions?token=eq.${token}&select=receptionist_id`))[0].receptionist_id,rec);
+ const owner=await login('owner.demo@local.test','LocalOwnerTestOnly!42');
+ const email=`refund.approver.${randomUUID()}@local.test`;
+ const created=await ok(await api('/api/owner/managers',owner,{clinicId:clinic,name:'TEST Refund Approver (disabled after checks)',email,enabled:true,permissions:['correction_approval'],startsOn:null,endsOn:null,expectedUpdatedAt:null,reason:'TEST refund approval verification'}));testManagerId=created.accountId;
+ const manager=await login(email,created.temporaryPassword,clinic);
+ const voidReceipt=await receipt();const voidInput={action:'request',kind:'VOID',receiptId:voidReceipt.id,operationId:randomUUID(),reason:'TEST duplicate receipt entry; actual cash accounted separately',itemIds:[],allocationAmounts:{}};
+ await ok(await post(voidInput));
+ assert.equal((await post({action:'approve',id:voidInput.operationId},manager)).status,400);
+ const voidApproval=await Promise.all([post({action:'approve',id:voidInput.operationId,confirmMistakenEntry:true},manager),post({action:'approve',id:voidInput.operationId,confirmMistakenEntry:true},manager)]);for(const response of voidApproval){assert.equal((await ok(response)).request.status,'COMPLETED');}
+ const voidSaved=(await db(`receipts?id=eq.${voidReceipt.id}&select=status,total,voided_by,replacement_receipt_id`))[0];assert.equal(voidSaved.status,'VOIDED');assert.equal(Number(voidSaved.total),210);assert.equal(voidSaved.voided_by,testManagerId);assert.equal(voidSaved.replacement_receipt_id,null);
+ assert.equal((await db(`refunds?receipt_id=eq.${voidReceipt.id}&select=id`)).length,0);
+ assert.equal((await db(`payment_records?receipt_id=eq.${voidReceipt.id}&select=status`))[0].status,'cancelled');assert.equal((await db(`payment_allocations?id=eq.${voidReceipt.allocation}&select=status`))[0].status,'voided');
+ const cancelVoidReceipt=await receipt();const cancelVoid={...voidInput,receiptId:cancelVoidReceipt.id,operationId:randomUUID()};await ok(await post(cancelVoid));await ok(await post({action:'cancel',id:cancelVoid.operationId}));assert.equal((await db(`receipts?id=eq.${cancelVoidReceipt.id}&select=status`))[0].status,'COMPLETED');
+ console.log('PASS: whole receipt void completes on manager approval, requires payment-entry confirmation, keeps original amounts, cancels mistaken collections, creates no refund/replacement, and retries once; cancellation leaves receipt unchanged.');
+ const r=await receipt(),input=draft(r);
+ assert.equal((await post(input,null)).status,401);assert.equal((await post(input,foreign)).status,403);
+ const copies=await Promise.all([post(input),post(input)]);for(const response of copies)await ok(response);
+ const pending=(await ok(await api('/api/workspace/refunds',token))).requests.find(row=>row.id===input.operationId);assert.equal(pending.status,'PENDING');assert.ok(pending.patientName);assert.ok(pending.receiptNumber);assert.equal(Number(pending.proposal.total),105);
+ assert.equal((await db(`refunds?receipt_id=eq.${r.id}&select=id`)).length,0);
+ assert.equal((await post({action:'execute',id:input.operationId,moneyReturned:true,reference:'TEST cash returned'})).status,409);
+ assert.equal((await post({action:'approve',id:input.operationId})).status,403);
+ assert.equal((await api(`/api/workspace/refunds?clinicId=${other}`,manager)).status,403);
+ await ok(await post({action:'approve',id:input.operationId},manager));assert.equal((await db(`refunds?receipt_id=eq.${r.id}&select=id`)).length,0);
+ await db(`pos_accounts?id=eq.${testManagerId}`,{method:'PATCH',body:JSON.stringify({enabled:false})});assert.equal((await post({action:'execute',id:input.operationId,moneyReturned:true,reference:'TEST disabled approval'})).status,409);await db(`pos_accounts?id=eq.${testManagerId}`,{method:'PATCH',body:JSON.stringify({enabled:true})});
+ assert.equal((await post({action:'execute',id:input.operationId,moneyReturned:false,reference:'TEST cash returned'})).status,400);
+ const executions=await Promise.all([post({action:'execute',id:input.operationId,moneyReturned:true,reference:'TEST cash returned'}),post({action:'execute',id:input.operationId,moneyReturned:true,reference:'TEST cash returned'})]);for(const response of executions)assert.equal((await ok(response)).request.status,'COMPLETED');
+ assert.equal((await db(`refunds?receipt_id=eq.${r.id}&select=id`)).length,1);assert.equal(Number((await db(`payment_allocations?id=eq.${r.allocation}&select=refunded_treatment_amount`))[0].refunded_treatment_amount),100);
+ await ok(await post(input));
+ const next=draft(r);next.itemIds=[r.items[1]];await ok(await post(next));await ok(await post({action:'reject',id:next.operationId,reason:'TEST not eligible'},owner));assert.equal((await post({action:'execute',id:next.operationId,moneyReturned:true,reference:'TEST cash'})).status,409);
+ const last=draft(r);last.itemIds=[r.items[1]];await ok(await post(last));await ok(await post({action:'approve',id:last.operationId},owner));await ok(await post({action:'execute',id:last.operationId,moneyReturned:true,reference:'TEST remainder cash'}));assert.equal((await db(`payment_allocations?id=eq.${r.allocation}&select=status`))[0].status,'refunded');
+ const stale=await receipt(),staleInput=draft(stale);await ok(await post(staleInput));await db(`receipts?id=eq.${stale.id}`,{method:'PATCH',body:JSON.stringify({amount_paid:209})});assert.equal((await post({action:'approve',id:staleInput.operationId},owner)).status,409);await ok(await post({action:'cancel',id:staleInput.operationId}));
+ const bnpl=await receipt('tabby_standard'),bnplInput=draft(bnpl,true);await ok(await post(bnplInput));await ok(await post({action:'approve',id:bnplInput.operationId},owner));await ok(await post({action:'execute',id:bnplInput.operationId,moneyReturned:true,reference:'TEST provider returned'}));const bnplAllocation=(await db(`payment_allocations?id=eq.${bnpl.allocation}&select=refunded_fee_amount`))[0];assert.equal(Number(bnplAllocation.refunded_fee_amount),0);
+ // Force failure after the first allocation write: the entire transaction must roll back.
+ const broken=await receipt(),brokenInput=draft(broken);const proposal=(await ok(await post(brokenInput))).request.proposal;await ok(await post({action:'approve',id:brokenInput.operationId},owner));proposal.allocations.push({id:randomUUID(),treatment:1,vat:0});await db(`receipt_refund_requests?id=eq.${brokenInput.operationId}`,{method:'PATCH',body:JSON.stringify({proposal})});assert.equal((await post({action:'execute',id:brokenInput.operationId,moneyReturned:true,reference:'TEST rollback'})).status,409);assert.equal((await db(`refunds?receipt_id=eq.${broken.id}&select=id`)).length,0);assert.equal(Number((await db(`payment_allocations?id=eq.${broken.allocation}&select=refunded_treatment_amount`))[0].refunded_treatment_amount),0);await ok(await post({action:'cancel',id:brokenInput.operationId}));
+ for(const path of ['receipt_refund_requests','refunds','refund_items','payment_allocation_refunds']){const denied=await fetch(`${config.API_URL}/rest/v1/${path}`,{method:'POST',headers:anon,body:'{}'});assert.ok([401,403].includes(denied.status));}
+ const direct=await fetch(`${config.API_URL}/rest/v1/rpc/create_payment_allocation_refund`,{method:'POST',headers:anon,body:JSON.stringify({p_refund_id:randomUUID(),p_payment_allocation_id:r.allocation,p_refunded_treatment_amount:1,p_refunded_vat_amount:0,p_reason:'TEST bypass',p_processed_by:rec,p_idempotency_key:randomUUID()})});assert.ok([401,403,404].includes(direct.status));
+ const audit=await db(`activity_log?entity_type=eq.receipt_refund_requests&entity_id=eq.${input.operationId}&select=actor_verified,actor_role`);assert.ok(audit.length>=3);assert.ok(audit.every(row=>row.actor_verified));
+ // Cash correction: original 210 invoice, 105 collected -> replacement 105.
+ const corrected=await receipt();await db(`receipts?id=eq.${corrected.id}`,{method:'PATCH',body:JSON.stringify({amount_paid:105})});
+ const [record]=await db(`payment_records?receipt_id=eq.${corrected.id}&select=id`);
+ await db(`payment_records?id=eq.${record.id}`,{method:'PATCH',body:JSON.stringify({total_invoice_amount_settled:105,total_customer_charged_amount:105,total_vat_amount:5})});
+ await db(`payment_allocations?id=eq.${corrected.allocation}`,{method:'PATCH',body:JSON.stringify({invoice_allocation_amount:105,customer_charged_amount:105,treatment_net_amount:100,vat_amount:5})});
+ const correctionId=randomUUID();const correctionInput={action:'request',kind:'CORRECTION',receiptId:corrected.id,operationId:correctionId,reason:'TEST wrong total entered; keep recorded cash',itemIds:[],allocationAmounts:{},correction:{items:[{serviceId:service,price:100,quantity:1}]}};
+ const requested=await ok(await post(correctionInput));assert.equal(requested.request.kind,'CORRECTION');await ok(await post(correctionInput));await ok(await post({action:'approve',id:correctionId},owner));
+ const replacements=await Promise.all([post({action:'execute',id:correctionId}),post({action:'execute',id:correctionId})]);for(const result of replacements)assert.equal((await ok(result)).request.replacement_receipt_id,correctionId);
+ const [original]=await db(`receipts?id=eq.${corrected.id}&select=*`),[replacement]=await db(`receipts?id=eq.${correctionId}&select=*`);assert.equal(original.status,'VOIDED');assert.equal(original.replacement_receipt_id,correctionId);assert.equal(Number(original.total),210);assert.equal(replacement.original_receipt_id,corrected.id);assert.equal(Number(replacement.total),105);assert.equal(Number(replacement.amount_paid),105);
+ assert.equal((await db(`payment_records?receipt_id=eq.${corrected.id}&select=id`)).length,0);const moved=await db(`payment_records?receipt_id=eq.${correctionId}&select=id,total_customer_charged_amount`);assert.equal(moved.length,1);assert.equal(moved[0].id,record.id);assert.equal(Number(moved[0].total_customer_charged_amount),105);assert.equal((await db(`refunds?receipt_id=eq.${corrected.id}&select=id`)).length,0);
+ const [balance]=await db(`outstanding_balances?receipt_id=eq.${correctionId}&select=original_amount`);assert.equal(Number(balance.original_amount),0);
+ const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Dubai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());const eod=await ok(await api(`/api/workspace/eod?clinicId=${clinic}&day=${day}`));assert.ok(eod.changes.some(c=>c.kind==='CORRECTION'&&c.receipt_id===corrected.id));assert.ok(eod.receiptNumbers[correctionId]);
+ const excessive=await receipt();const excessiveInput={...correctionInput,receiptId:excessive.id,operationId:randomUUID()};assert.equal((await post(excessiveInput)).status,400);
+ const expired=await receipt(),expiredInput=draft(expired);await ok(await post(expiredInput));await db(`receipt_refund_requests?id=eq.${expiredInput.operationId}`,{method:'PATCH',body:JSON.stringify({created_at:'2020-01-01T00:00:00Z'})});assert.equal((await post({action:'approve',id:expiredInput.operationId},owner)).status,409);await ok(await post({action:'cancel',id:expiredInput.operationId}));
+ console.log('PASS: linked correction, original amount retention, payment identity transfer exactly once, no refund side effect, excess-payment block, zero replacement balance, same-day approval and EOD metadata.');
+ console.log('PASS: request/approval/return separation, clinic and role isolation, concurrent retry, full and item-partial refund, rejection/cancellation, stale receipt guard, BNPL fee retention, atomic rollback, audit identity and anonymous bypass denial.');
+}finally{for(const t of tokens)await db(`active_sessions?token=eq.${t}`,{method:'DELETE'});if(testManagerId)await db(`pos_accounts?id=eq.${testManagerId}`,{method:'PATCH',body:JSON.stringify({enabled:false})});await db(`services?id=eq.${service}`,{method:'PATCH',body:JSON.stringify({is_active:false})});}

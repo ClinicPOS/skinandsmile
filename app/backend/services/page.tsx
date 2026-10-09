@@ -1,2 +1,2 @@
-export const dynamic = "force-dynamic";
-export { default } from "../page";
+import ClinicManagerWorkspace from '../../../components/clinic-manager-workspace';
+export default function Page(){return <ClinicManagerWorkspace initialTab="services"/>;}

@@ -1,5 +1,3 @@
-import { supabase } from "./supabase";
-
 export type PatientLike = {
   id: string;
   name?: string | null;
@@ -218,45 +216,21 @@ export async function registerPatientFromPos(payload: {
   address?: string | null;
   notes?: string | null;
   fileNo?: string | null;
+  clinicFileClinicalNotes?: string | null;
 }) {
-  const { data, error } = await supabase.rpc("create_patient_with_clinic_file", {
-    p_name: payload.fullName.trim(),
-    p_phone: payload.mobile.trim(),
-    p_email: payload.email?.trim() || "",
-    p_date_of_birth: payload.dateOfBirth || "",
-    p_sex: payload.sex || "",
-    p_nationality: payload.nationality?.trim() || "",
-    p_emirates_id: payload.emiratesId?.trim() || "",
-    p_passport_number: payload.passportNumber?.trim() || "",
-    p_mrn_input: payload.mrn?.trim() || "",
-    p_clinic_id: payload.clinicId,
-    p_file_no: payload.fileNo?.trim() || "",
+  const response = await fetch("/api/patients/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
-  if (error || !data) {
-    throw new Error(error?.message || "Could not create patient");
-  }
-
-  const result = data as {
-    patient_id: string;
-    clinic_patient_file_id: string;
-    file_no: string;
-  };
-
-  const updatePayload: Record<string, string | null> = {
-    address: payload.address?.trim() || null,
-    notes: payload.notes?.trim() || null,
-  };
-  const { error: updateError } = await supabase
-    .from("patients")
-    .update(updatePayload)
-    .eq("id", result.patient_id);
-  if (updateError) {
-    throw new Error(updateError.message || "Patient created but optional details failed to save");
-  }
+  const result = await response.json().catch(() => null);
+  if (!response.ok || !result?.patientId) throw new Error(result?.error || "Could not create patient");
 
   return {
-    patientId: String(result.patient_id || ""),
-    clinicPatientFileId: String(result.clinic_patient_file_id || ""),
-    fileNo: String(result.file_no || ""),
+    patient: result.patient as PatientLike | null,
+    warnings: Array.isArray(result.warnings) ? result.warnings.filter((warning: unknown): warning is string => typeof warning === "string") as string[] : [],
+    patientId: String(result.patientId || ""),
+    clinicPatientFileId: String(result.clinicPatientFileId || ""),
+    fileNo: String(result.fileNo || ""),
   };
 }

@@ -1,4 +1,5 @@
-import { ensureClinicScopeAccess, readAppSession, createServerSupabaseClient } from "../../../lib/api-session";
+import {createProtectedDataClient} from '../../../lib/protected-data-server';
+import { ensureClinicScopeAccess, readAppSession } from "../../../lib/api-session";
 import { getDubaiBusinessDate } from "../../../lib/cash-deductions";
 import { roundCurrency, toMinorUnits } from "../../../lib/money";
 import {
@@ -18,7 +19,7 @@ function normalizeAmount(value: unknown): number | null {
 }
 
 export async function GET(request: Request) {
-  const supabase = createServerSupabaseClient();
+  const supabase = createProtectedDataClient();
   const { session, errorResponse } = await readAppSession(supabase);
   if (errorResponse || !session) return errorResponse!;
 
@@ -35,6 +36,7 @@ export async function GET(request: Request) {
 
   const clinicScopeError = ensureClinicScopeAccess(session, context.clinicId);
   if (clinicScopeError) return clinicScopeError;
+  if(session.userRole === "receptionist" && session.receptionistId !== context.receptionistId)return Response.json({error:"Sign in as the receptionist who opened this register."},{status:403});
 
   const [entries, cashCollected] = await Promise.all([
     listCashDeductions(supabase, registerSessionId),
@@ -50,7 +52,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const supabase = createServerSupabaseClient();
+  const supabase = createProtectedDataClient();
   const { session, errorResponse } = await readAppSession(supabase);
   if (errorResponse || !session) return errorResponse!;
 
@@ -82,6 +84,7 @@ export async function POST(request: Request) {
   }
   const clinicScopeError = ensureClinicScopeAccess(session, context.clinicId);
   if (clinicScopeError) return clinicScopeError;
+  if(session.userRole === "receptionist" && session.receptionistId !== context.receptionistId)return Response.json({error:"Sign in as the receptionist who opened this register."},{status:403});
   if (context.closedAt) {
     return Response.json({ error: "Register is already closed. Cash deductions are locked." }, { status: 409 });
   }

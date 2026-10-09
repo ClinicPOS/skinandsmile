@@ -1,5 +1,9 @@
-﻿"use client";
+"use client";
+import {saveOwnerCatalog} from "../../lib/owner-catalog-client";
+import { saveReceptionistRecord } from "../../lib/receptionist-admin-client";
+import {saveClinicDesign} from '../../lib/backend-catalog-client';
 
+import {TreatmentPlanCancelButton} from "../../components/treatment-plan-cancel-button";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
@@ -9,7 +13,8 @@ import { calculateAge } from "../../lib/utils";
 import { rollupBalance, formatBalanceReference } from "../../lib/outstanding-balances";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
 import { effectiveServiceCategory } from "../../lib/service-categories";
-import { createClinicPatientFile, nextClinicFileNumber } from "../../lib/clinic-patient-files";
+import { registerPatientFromPos } from "../../lib/patient-registration";
+import { loadClinicPatientRecords, loadManagedPatients } from "../../lib/patient-read-client";
 import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 
 const BACKEND_SELECTED_CLINIC_KEY = "backendSelectedClinicId";
@@ -144,7 +149,7 @@ function BackendPageContent() {
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [selectedClinicId, setSelectedClinicId] = useState<string>("");
   const [isRegisterTableReady, setIsRegisterTableReady] = useState(true);
-  const [activeSessions, setActiveSessions] = useState<{ token: string; ip: string; user_agent: string; created_at: string }[]>([]);
+  const [activeSessions, setActiveSessions] = useState<{ id: string; ip: string; user_agent: string; created_at: string }[]>([]);
   const [loginLogs, setLoginLogs] = useState<{ id: string; ip: string; user_agent: string; success: boolean; created_at: string }[]>([]);
 
   const [patientName, setPatientName] = useState("");
@@ -541,43 +546,7 @@ function BackendPageContent() {
     }
   }
 
-  async function deleteBalance(id: string) {
-    if (!confirm("Delete this outstanding balance? Any recorded payments will also be removed.")) return;
-    const { error } = await supabase.from("outstanding_balances").delete().eq("id", id);
-    if (error) {
-      alert(`Delete failed: ${error.message || error.code || "Unknown error"}`);
-      return;
-    }
-    setOutstandingBalances((prev) => prev.filter((b) => b.id !== id));
-    setBalancePayments((prev) => prev.filter((p) => p.outstanding_balance_id !== id));
-  }
-
-  async function deleteTreatmentPlan(id: string) {
-    if (!confirm("Delete this active treatment plan? Its related payments and visits will also be removed, and the reports will stop reflecting it.")) return;
-
-    const [paymentsResult, visitsResult, planResult] = await Promise.allSettled([
-      supabase.from("treatment_plan_payments").delete().eq("treatment_plan_id", id),
-      supabase.from("treatment_plan_visits").delete().eq("treatment_plan_id", id),
-      supabase.from("treatment_plans").delete().eq("id", id),
-    ]);
-
-    const planError = planResult.status === "fulfilled" ? planResult.value.error : null;
-    if (planError) {
-      alert(`Delete failed: ${planError.message || planError.code || "Unknown error"}`);
-      return;
-    }
-
-    if (paymentsResult.status === "fulfilled" && paymentsResult.value.error && paymentsResult.value.error.code !== "42P01" && paymentsResult.value.error.code !== "42501") {
-      console.warn("Failed deleting treatment plan payments", paymentsResult.value.error);
-    }
-    if (visitsResult.status === "fulfilled" && visitsResult.value.error && visitsResult.value.error.code !== "42P01" && visitsResult.value.error.code !== "42501") {
-      console.warn("Failed deleting treatment plan visits", visitsResult.value.error);
-    }
-
-    setTreatmentPlans((prev) => prev.filter((plan) => plan.id !== id));
-    setTreatmentPlanPayments((prev) => prev.filter((payment) => payment.treatment_plan_id !== id));
-    setTreatmentPlanPaymentRecords((prev) => prev.filter((payment) => payment.treatment_plan_id !== id));
-  }
+  async function deleteBalance(id: string) { alert("Saved balances cannot be deleted. A recorded financial adjustment is required; the balance and its payments were kept."); }
 
   const displayedDoctors = useMemo(() =>
     selectedClinicId ? doctors.filter(d => d.clinic_id === selectedClinicId) : [],
@@ -749,12 +718,10 @@ function BackendPageContent() {
 
     let cancelled = false;
     void (async () => {
-      const { data, error } = await supabase
-        .from("patients")
-        .select("id, name")
-        .in("id", missingIds);
-
-      if (cancelled || error) return;
+      let data: Patient[];
+      try { data = await loadManagedPatients(missingIds); }
+      catch { return; }
+      if (cancelled) return;
 
       const nextNames = Object.fromEntries((data || []).filter(Boolean).map((patient: { id: string; name: string | null }) => [patient.id, patient.name || "Unknown patient"]));
       if (Object.keys(nextNames).length > 0) {
@@ -767,9 +734,22 @@ function BackendPageContent() {
     };
   }, [outstandingBalances, treatmentPlans, patients, patientNamesById]);
 
-  async function revokeSession(token: string) {
-    await supabase.from("active_sessions").delete().eq("token", token);
-    setActiveSessions((prev) => prev.filter((s) => s.token !== token));
+  async function loadLoginSessions() {
+    const response = await fetch("/api/admin/sessions", { cache: "no-store" });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !Array.isArray(payload?.sessions)) throw new Error(payload?.error || "Sessions could not be loaded.");
+    return { data: payload.sessions };
+  }
+
+  async function revokeSession(id: string) {
+    try {
+      const response = await fetch("/api/admin/sessions", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok && response.status !== 404) throw new Error(payload?.error || "Session could not be revoked.");
+      setActiveSessions(prev => prev.filter(session => session.id !== id));
+    } catch {
+      alert("Could not confirm session removal. Refresh and check before retrying.");
+    }
   }
 
   async function loadAll() {
@@ -785,7 +765,7 @@ function BackendPageContent() {
       supabase.from("clinics").select("*").order("name"),
       supabase.from("services").select("*"),
       supabase.from("doctors").select("*"),
-      supabase.from("receptionist").select("*"),
+      supabase.from("receptionist").select("id,name,clinic_id,shift"),
     ]);
 
     const clinicRows = (clinicsResult.data || []) as Clinic[];
@@ -814,19 +794,22 @@ function BackendPageContent() {
       treatmentPlanPaymentRecordsResult,
     ] = await Promise.allSettled([
       resolvedClinicId
-        ? supabase
-            .from("clinic_patient_files")
-            .select("id, file_no, patient_id, patients(id, patient_number, name, phone, email, notes, date_of_birth, sex, nationality, emirates_id, passport_number, mrn, address)")
-            .eq("clinic_id", resolvedClinicId)
-            .order("file_no", { ascending: true })
+        ? loadClinicPatientRecords(resolvedClinicId).then(records => {
+            const byId = new Map(records.patients.map(patient => [patient.id, patient]));
+            return { data: records.files.map(file => ({ ...file, patients: byId.get(file.patient_id) })), error: null };
+          })
         : Promise.resolve({ data: [], error: null }),
       supabase
         .from("cash_register_sessions")
         .select("*")
         .gte("opened_at", startOfDay.toISOString())
         .order("opened_at", { ascending: false }),
-      supabase.from("active_sessions").select("*").order("created_at", { ascending: false }),
-      supabase.from("login_logs").select("*").order("created_at", { ascending: false }).limit(20),
+      loadLoginSessions(),
+      fetch("/api/admin/login-logs", { cache: "no-store" }).then(async response => {
+        if (!response.ok) throw new Error("Login history unavailable");
+        const result = await response.json();
+        return { data: result.logs || [] };
+      }),
       supabase.from("outstanding_balances").select("*").order("original_date", { ascending: false }),
       supabase.from("balance_payments").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
@@ -866,11 +849,20 @@ function BackendPageContent() {
         setPatients(mappedPatients);
       }
     }
+    if (clinicPatientsResult.status === "rejected") {
+      setPatients([]);
+      alert("Unable to load clinic patients. Please try again.");
+    }
     if (sessionsResult.status === "fulfilled") {
       setActiveSessions((sessionsResult.value.data || []) as typeof activeSessions);
+    } else {
+      setActiveSessions([]);
+      alert("Login sessions could not be loaded. Access may be restricted or temporarily unavailable.");
     }
     if (logsResult.status === "fulfilled") {
       setLoginLogs((logsResult.value.data || []) as typeof loginLogs);
+    } else {
+      setLoginLogs([]);
     }
 
     if (balancesResult.status === "fulfilled") {
@@ -973,11 +965,9 @@ function BackendPageContent() {
   }
 
   async function exportData() {
-    const { data: allPatientsData } = await supabase
-      .from("patients")
-      .select("id, patient_number, name, phone, email, date_of_birth, sex, nationality, emirates_id, passport_number, mrn, notes");
-
-    const allPatients = (allPatientsData || []) as Patient[];
+    let allPatients: Patient[];
+    try { allPatients = await loadManagedPatients(); }
+    catch (error) { alert(error instanceof Error ? error.message : "Patient export could not be loaded."); return; }
     const { data: receipts } = await supabase
       .from("receipts")
       .select("id, receipt_number, created_at, patient_id, receptionist_id, payment_method, subtotal, discount_amount, total");
@@ -1077,62 +1067,21 @@ function BackendPageContent() {
       return;
     }
 
-    const { data: patientData, error } = await supabase
-      .from("patients")
-      .insert([
-        {
-          name: patientName,
-          phone: patientPhone,
-          email: patientEmail,
-          notes: patientNotes,
-          date_of_birth: patientDateOfBirth || null,
-          sex: patientSex || null,
-          nationality: patientNationality || null,
-          emirates_id: patientEmiratesId || null,
-          passport_number: patientPassportNumber || null,
-          mrn: patientMrn || null,
-        },
-      ])
-      .select("*")
-      .single();
-
-    if (error || !patientData) {
-      alert("Error saving patient");
-      return;
-    }
-
     try {
-      const fileNo = await nextClinicFileNumber(selectedClinicId);
-      const clinicFile = await createClinicPatientFile({
-        clinicId: selectedClinicId,
-        patientId: String(patientData.id),
-        fileNo,
-        mrn: patientMrn || null,
-        clinicalNotes: patientNotes || null,
+      const result = await registerPatientFromPos({
+        clinicId: selectedClinicId, fullName: patientName.trim(), mobile: patientPhone.trim(),
+        email: patientEmail || null, notes: patientNotes || null, dateOfBirth: patientDateOfBirth || null,
+        sex: patientSex || null, nationality: patientNationality || null,
+        emiratesId: patientEmiratesId || null, passportNumber: patientPassportNumber || null,
+        mrn: patientMrn || null, clinicFileClinicalNotes: patientNotes || null,
       });
-      setPatients((prev) => [
-        {
-          id: String(patientData.id),
-          patient_number: patientData.patient_number ?? null,
-          name: String(patientData.name || ""),
-          phone: patientData.phone ?? null,
-          email: patientData.email ?? null,
-          notes: patientData.notes ?? null,
-          date_of_birth: patientData.date_of_birth ?? null,
-          sex: patientData.sex ?? null,
-          nationality: patientData.nationality ?? null,
-          emirates_id: patientData.emirates_id ?? null,
-          passport_number: patientData.passport_number ?? null,
-          mrn: patientData.mrn ?? null,
-          address: patientData.address ?? null,
-          clinic_file_no: clinicFile.file_no,
-          clinic_patient_file_id: clinicFile.id,
-        },
-        ...prev,
-      ]);
-    } catch (clinicFileError) {
-      await supabase.from("patients").delete().eq("id", patientData.id);
-      alert(clinicFileError instanceof Error ? clinicFileError.message : "Failed to create clinic patient file");
+      if (result.warnings.length) alert(result.warnings.join("\n"));
+      if (result.patient) {
+        setPatients(prev => [{ ...result.patient, id: result.patientId, name: String(result.patient?.name || patientName),
+          phone: result.patient?.phone ?? "", clinic_file_no: result.fileNo, clinic_patient_file_id: result.clinicPatientFileId } as BackendPatient, ...prev]);
+      } else alert("Patient was saved. Refresh the patient list. Do not register them again.");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Patient could not be saved. Check the list before retrying.");
       return;
     }
 
@@ -1154,24 +1103,20 @@ function BackendPageContent() {
       return;
     }
 
-    const { error } = await supabase
-      .from("patients")
-      .update({
-        name: editingPatientName,
-        phone: editingPatientPhone,
-        email: editingPatientEmail,
-        notes: editingPatientNotes,
-        date_of_birth: editingPatientDob || null,
-        sex: editingPatientSex || null,
-        nationality: editingPatientNationality || null,
-        emirates_id: editingPatientEmiratesId || null,
-        passport_number: editingPatientPassportNumber || null,
-        mrn: editingPatientMrn || null,
-      })
-      .eq("id", id);
-
-    if (error) {
-      alert("Error updating patient");
+    try {
+      const response = await fetch(`/api/patients/${encodeURIComponent(id)}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clinicId: selectedClinicId || null, updates: {
+          name: editingPatientName.trim(), phone: editingPatientPhone.trim(), email: editingPatientEmail || null,
+          notes: editingPatientNotes || null, date_of_birth: editingPatientDob || null, sex: editingPatientSex || null,
+          nationality: editingPatientNationality || null, emirates_id: editingPatientEmiratesId || null,
+          passport_number: editingPatientPassportNumber || null, mrn: editingPatientMrn || null,
+        } }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Patient could not be updated.");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Patient update could not be confirmed. Refresh before retrying.");
       return;
     }
 
@@ -1207,31 +1152,8 @@ function BackendPageContent() {
     );
   }
 
-  async function deletePatient(id: string) {
-    const confirmed = window.confirm("Delete this patient?");
-    if (!confirmed) {
-      return;
-    }
-
-    const { error } = await supabase.from("patients").delete().eq("id", id);
-    if (error) {
-      alert("Error deleting patient");
-      return;
-    }
-
-    if (editingPatientId === id) {
-      setEditingPatientId("");
-      setEditingPatientName("");
-      setEditingPatientPhone("");
-      setEditingPatientEmail("");
-      setEditingPatientNotes("");
-      setEditingPatientDob("");
-      setEditingPatientSex("");
-      setEditingPatientNationality("");
-      setEditingPatientEmiratesId("");
-      setEditingPatientPassportNumber("");
-    }
-    setPatients((prev) => prev.filter((patient) => patient.id !== id));
+  async function deletePatient(_id: string) {
+    alert("Patient deletion is disabled to preserve clinic history. Keep the record; an archive workflow is needed before removal can be offered safely.");
   }
 
   async function addDoctor() {
@@ -1244,13 +1166,13 @@ function BackendPageContent() {
       return;
     }
 
-    const { error } = await supabase.from("doctors").insert([
+    const { error } = await saveOwnerCatalog("doctors","create",([
       {
         name: doctorName,
         specialty: doctorSpecialty,
         clinic_id: selectedClinicId,
       },
-    ]);
+    ])[0],undefined);
 
     if (error) {
       alert("Error saving doctor");
@@ -1268,10 +1190,7 @@ function BackendPageContent() {
       return;
     }
 
-    const { error } = await supabase
-      .from("doctors")
-      .update({ name: editingDoctorName, specialty: editingDoctorSpecialty })
-      .eq("id", id);
+    const { error } = await saveOwnerCatalog("doctors","update",{ name: editingDoctorName, specialty: editingDoctorSpecialty },id);
 
     if (error) {
       alert("Error updating doctor");
@@ -1285,12 +1204,12 @@ function BackendPageContent() {
   }
 
   async function deleteDoctor(id: string) {
-    const confirmed = window.confirm("Delete this doctor?");
+    const confirmed = window.confirm("Deactivate this doctor? Existing receipts and treatment records will be kept.");
     if (!confirmed) {
       return;
     }
 
-    const { error } = await supabase.from("doctors").delete().eq("id", id);
+    const { error } = await saveOwnerCatalog("doctors","archive",{},id);
     if (error) {
       alert("Error deleting doctor");
       return;
@@ -1325,7 +1244,7 @@ function BackendPageContent() {
       return;
     }
 
-    const { error } = await supabase.from("services").insert([
+    const { error } = await saveOwnerCatalog("services","create",([
       {
         name: serviceName.trim(),
         display_name: serviceName.trim(),
@@ -1346,7 +1265,7 @@ function BackendPageContent() {
         billing_unit: "Session",
         tooth_selection_mode: "none",
       },
-    ]);
+    ])[0],undefined);
 
     if (error) {
       if (error.message?.includes("vat_rate")) {
@@ -1431,10 +1350,7 @@ function BackendPageContent() {
       max_price: editingServicePricingType === "variable" ? parsedMaxPrice : null,
     };
 
-    const { error } = await supabase
-      .from("services")
-      .update({ ...baseUpdate, ...pricingFields })
-      .eq("id", id);
+    const { error } = await saveOwnerCatalog("services","update",{ ...baseUpdate, ...pricingFields },id);
 
     if (error) {
       // If the variable-pricing migration hasn't been applied yet, fall back
@@ -1450,10 +1366,7 @@ function BackendPageContent() {
           alert(`Error updating service: ${error.message}. Please apply the services VAT migration first.`);
           return;
         }
-        const fallback = await supabase
-          .from("services")
-          .update(baseUpdate)
-          .eq("id", id);
+        const fallback = await saveOwnerCatalog("services","update",baseUpdate,id);
         if (fallback.error) {
           alert(`Error updating service: ${fallback.error.message}`);
           return;
@@ -1487,12 +1400,12 @@ function BackendPageContent() {
   }
 
   async function deleteService(id: string) {
-    const confirmed = window.confirm("Delete this service?");
+    const confirmed = window.confirm("Deactivate this service? Existing receipts and treatment records will be kept.");
     if (!confirmed) {
       return;
     }
 
-    const { error } = await supabase.from("services").delete().eq("id", id);
+    const { error } = await saveOwnerCatalog("services","archive",{},id);
     if (error) {
       alert("Error deleting service");
       return;
@@ -1507,10 +1420,7 @@ function BackendPageContent() {
   }
 
   async function markServiceInactive(id: string) {
-    const { error } = await supabase
-      .from("services")
-      .update({ is_active: false })
-      .eq("id", id);
+    const { error } = await saveOwnerCatalog("services","update",{ is_active: false },id);
     if (error) {
       alert(`Could not mark inactive: ${error.message || "unknown error"}`);
       return;
@@ -1524,10 +1434,7 @@ function BackendPageContent() {
       return;
     }
 
-    const { error } = await supabase
-      .from("services")
-      .update({ canonical_service_id: canonicalServiceId })
-      .eq("id", serviceId);
+    const { error } = await saveOwnerCatalog("services","update",{ canonical_service_id: canonicalServiceId },serviceId);
     if (error) {
       alert(`Could not map canonical service: ${error.message || "unknown error"}`);
       return;
@@ -1551,17 +1458,15 @@ function BackendPageContent() {
       return;
     }
 
-    const { error } = await supabase.from("receptionist").insert([
-      {
+    const { error } = await saveReceptionistRecord("create", {
         name: receptionistName,
         shift: receptionistShift,
         pin: receptionistPin,
         clinic_id: selectedClinicId,
-      },
-    ]);
+      });
 
     if (error) {
-      alert("Error saving receptionist");
+      alert(error.message);
       return;
     }
 
@@ -1592,13 +1497,10 @@ function BackendPageContent() {
       updatePayload.pin = editingReceptionistPin;
     }
 
-    const { error } = await supabase
-      .from("receptionist")
-      .update(updatePayload)
-      .eq("id", id);
+    const { error } = await saveReceptionistRecord("update", updatePayload, id);
 
     if (error) {
-      alert("Error updating receptionist");
+      alert(error.message);
       return;
     }
 
@@ -1610,25 +1512,8 @@ function BackendPageContent() {
     loadAll();
   }
 
-  async function deleteReceptionist(id: string) {
-    const confirmed = window.confirm("Delete this receptionist?");
-    if (!confirmed) {
-      return;
-    }
-
-    const { error } = await supabase.from("receptionist").delete().eq("id", id);
-    if (error) {
-      alert("Error deleting receptionist");
-      return;
-    }
-
-    if (editingReceptionistId === id) {
-      setEditingReceptionistId("");
-      setEditingReceptionistName("");
-      setEditingReceptionistShift("");
-      setEditingReceptionistPin("");
-    }
-    loadAll();
+  async function deleteReceptionist(_id: string) {
+    alert("Staff records are retained because they are linked to receipt history. You can change the PIN to remove access.");
   }
 
   async function saveReceiptPrintSettings() {
@@ -1655,10 +1540,7 @@ function BackendPageContent() {
       logo: receiptLogoValue.trim() || null,
     };
 
-    const { error } = await supabase
-      .from("clinics")
-      .update(payload)
-      .eq("id", selectedClinicId);
+    const { error } = await saveClinicDesign(selectedClinicId,payload);
 
     if (error) {
       alert(`Error updating clinic receipt settings: ${error.message || error.code || "Unknown error"}`);
@@ -1824,12 +1706,7 @@ function BackendPageContent() {
                             </button>
                           ) : null}
                           {item.kind === "treatment_plan" ? (
-                            <button
-                              onClick={() => deleteTreatmentPlan(item.id.replace("plan-", ""))}
-                              className="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-50"
-                            >
-                              Delete plan
-                            </button>
+                            <TreatmentPlanCancelButton planId={item.id.replace("plan-", "")} onCancelled={() => setTreatmentPlans(prev => prev.map(plan => plan.id === item.id.replace("plan-", "") ? {...plan, status: "Cancelled"} : plan))} />
                           ) : null}
                         </div>
                       </div>
@@ -2353,7 +2230,7 @@ function BackendPageContent() {
                         onClick={() => deleteDoctor(doctor.id)}
                         className="rounded-xl bg-teal-600 px-3 py-1.5 text-xs font-semibold text-white"
                       >
-                        Delete
+                        Deactivate
                       </button>
                     </div>
                   </div>
@@ -2676,7 +2553,7 @@ function BackendPageContent() {
                         onClick={() => deleteService(service.id)}
                         className="rounded-xl bg-teal-600 px-3 py-1.5 text-xs font-semibold text-white"
                       >
-                        Delete
+                        Deactivate
                       </button>
                       {service.is_active !== false && (
                         <button
@@ -3015,13 +2892,13 @@ function BackendPageContent() {
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white">
                 {activeSessions.map((s) => (
-                  <tr key={s.token}>
+                  <tr key={s.id}>
                     <td className="px-4 py-3 text-slate-800">{s.ip}</td>
                     <td className="px-4 py-3 text-slate-600 max-w-xs truncate">{s.user_agent}</td>
                     <td className="px-4 py-3 text-slate-600">{new Date(s.created_at).toLocaleString()}</td>
                     <td className="px-4 py-3">
                       <button
-                        onClick={() => { if (confirm("Remove this session? That person will be logged out.")) revokeSession(s.token); }}
+                        onClick={() => { if (confirm("Remove this session? That person will be logged out.")) revokeSession(s.id); }}
                         className="rounded-lg bg-red-50 px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-100 transition"
                       >
                         Remove

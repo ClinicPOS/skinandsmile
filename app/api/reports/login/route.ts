@@ -1,3 +1,5 @@
+import { recordLoginAttempt } from "../../../../lib/login-log";
+import { sessionStorageFetch } from "../../../../lib/session-storage";
 import { NextRequest, NextResponse } from "next/server";
 import { APP_AUTH_COOKIE_NAME } from "../../../../lib/session-auth";
 
@@ -47,24 +49,7 @@ function getReportsCredentials(): ReportsCredential[] {
 }
 
 async function logAttempt(req: NextRequest, success: boolean) {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return;
-  }
-
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-  const userAgent = req.headers.get("user-agent") ?? "unknown";
-  await fetch(`${supabaseUrl}/rest/v1/login_logs`, {
-    method: "POST",
-    headers: {
-      apikey: supabaseAnonKey,
-      Authorization: `Bearer ${supabaseAnonKey}`,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify({ ip, user_agent: userAgent, success }),
-  });
+  await recordLoginAttempt(req, success);
 }
 
 export async function POST(req: NextRequest) {
@@ -122,7 +107,7 @@ export async function POST(req: NextRequest) {
   const token = crypto.randomUUID();
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
   const userAgent = req.headers.get("user-agent") ?? "unknown";
-  const sessionResponse = await fetch(`${supabaseUrl}/rest/v1/active_sessions`, {
+  const sessionResponse = await sessionStorageFetch("", {
     method: "POST",
     headers: {
       apikey: supabaseAnonKey,

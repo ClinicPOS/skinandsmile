@@ -170,13 +170,14 @@ export async function computeRegisterSessionCashCollected(
   const [receiptsRes, paymentRecordsRes, balancePaymentsRes, depositsRes, treatmentPlanRecordRes, treatmentPlanLegacyRes] = await Promise.all([
     supabase
       .from("receipts")
-      .select("id, total, amount_paid, payment_method, transaction_type")
+      .select("id, total, amount_paid, payment_method, transaction_type").neq("status","VOIDED")
       .eq("receptionist_id", context.receptionistId)
       .gte("created_at", context.openedAt)
       .lte("created_at", rangeEnd),
     supabase
       .from("payment_records")
       .select("id, receipt_id")
+      .neq('status','cancelled')
       .eq("receptionist_id", context.receptionistId)
       .eq("clinic_id", context.clinicId)
       .gte("created_at", context.openedAt)
@@ -210,6 +211,7 @@ export async function computeRegisterSessionCashCollected(
   const treatmentPlanLegacyPayments = !treatmentPlanLegacyRes.error ? (treatmentPlanLegacyRes.data || []) as TreatmentPlanPaymentRow[] : [];
 
   const paymentRecordIds = paymentRecords.map((row) => String(row.id || "")).filter(Boolean);
+  for(const response of [receiptsRes,paymentRecordsRes,balancePaymentsRes,depositsRes,treatmentPlanRecordRes,treatmentPlanLegacyRes])if(response.error)throw Error('Cash records could not be verified.');
   const treatmentPlanRecordIds = treatmentPlanRecords.map((row) => String(row.id || "")).filter(Boolean);
 
   const [receiptAllocationsRes, treatmentPlanAllocationsRes] = await Promise.all([
@@ -234,7 +236,8 @@ export async function computeRegisterSessionCashCollected(
     paymentRecords.map((row) => String(row.receipt_id || "")).filter(Boolean)
   );
 
-  const structuredReceiptCash = sumCashAllocations(paymentRecordIds, receiptAllocations);
+  if(receiptAllocationsRes.error||treatmentPlanAllocationsRes.error)throw Error('Cash payment allocations could not be verified.');
+  const structuredReceiptCash = sumCashAllocations(paymentRecordIds, receiptAllocations.map(row=>({...row,refunded_treatment_amount:0,refunded_fee_amount:0})));
   const legacyReceiptCash = roundCurrency(
     receipts.reduce((sum, receipt) => {
       if (receiptIdsWithStructuredPayments.has(String(receipt.id || ""))) return sum;
@@ -257,9 +260,13 @@ export async function computeRegisterSessionCashCollected(
 
   const balanceCash = roundCurrency(balancePayments.reduce((sum, row) => sum + Number(row.amount || 0), 0));
   const depositCash = roundCurrency(deposits.reduce((sum, row) => sum + Number(row.amount || 0), 0));
-  return roundCurrency(
-    structuredReceiptCash + legacyReceiptCash + structuredTreatmentPlanCash + legacyTreatmentPlanCash + balanceCash + depositCash
-  );
+  const refunds=await supabase.from('payment_allocation_refunds').select('refund_id,total_returned_amount,payment_allocations!inner(method_group)').eq('clinic_id',context.clinicId).eq('processed_by',context.receptionistId).eq('status','completed').gte('created_at',context.openedAt).lte('created_at',rangeEnd);
+  const legacyRefunds=await supabase.from('refunds').select('id,total_amount,payment_method,receipts!inner(clinic_id)').eq('receipts.clinic_id',context.clinicId).eq('refunded_by',context.receptionistId).gte('created_at',context.openedAt).lte('created_at',rangeEnd);
+  if(refunds.error||legacyRefunds.error)throw Error('Cash refund records could not be verified.');
+  const structuredRefundIds=new Set((refunds.data||[]).map(row=>row.refund_id));
+  const cashRefunds=(refunds.data||[]).reduce((sum,row)=>{const allocation=row.payment_allocations as unknown as {method_group:string};return sum+(allocation.method_group==='cash'?Number(row.total_returned_amount||0):0);},0);
+  const legacyCashRefunds=(legacyRefunds.data||[]).filter(row=>!structuredRefundIds.has(row.id)).reduce((sum,row)=>sum+extractLegacyCashAmount(String(row.payment_method||''),Number(row.total_amount||0)),0);
+  return roundCurrency(structuredReceiptCash+legacyReceiptCash+structuredTreatmentPlanCash+legacyTreatmentPlanCash+balanceCash+depositCash-cashRefunds-legacyCashRefunds);
 }
 
 export async function listCashDeductions(

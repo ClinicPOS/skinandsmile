@@ -7,9 +7,7 @@ import { supabase } from "../../lib/supabase";
 import { COUNTRIES } from "../../lib/countries";
 import { AddOutstandingBalanceModal } from "../../components/outstanding-balance-modals";
 import {
-  createClinicPatientFile,
   getActiveClinicIdFromRegisterSession,
-  nextClinicFileNumber,
 } from "../../lib/clinic-patient-files";
 import { filterClinicsForAccess, useClinicAccess } from "../../lib/clinic-access";
 import {
@@ -17,6 +15,7 @@ import {
   mergeReaderPatientFields,
   readEmiratesIdCard,
 } from "../../lib/emirates-id-reader";
+import { registerPatientFromPos } from "../../lib/patient-registration";
 import type { Clinic, Patient, OutstandingBalance } from "../../lib/types";
 
 export default function AddPatientPage() {
@@ -134,110 +133,26 @@ export default function AddPatientPage() {
       return;
     }
 
-    // File numbers are official physical file labels — verify a manual entry
-    // is unique before inserting so the receptionist gets a clear message.
-    if (fileNo.trim()) {
-      const manualNo = fileNo.trim();
-      if (!manualNo) {
-        alert("File No. cannot be blank.");
-        return;
-      }
-      const { data: fileNoDupes } = await supabase
-        .from("clinic_patient_files")
-        .select("id")
-        .eq("clinic_id", selectedClinicId)
-        .eq("file_no", manualNo)
-        .limit(1);
-      if ((fileNoDupes || []).length > 0) {
-        alert("This File Number already exists in this clinic. Please use another File Number.");
-        return;
-      }
-    }
-
     setSaving(true);
     try {
-      let saved: Patient | null = null;
-      let lastError: { code?: string; message?: string; details?: string; hint?: string } | null = null;
-
-      for (let attempt = 0; attempt < 5; attempt++) {
-        let clinicFileNo: string;
-        if (fileNo.trim()) {
-          clinicFileNo = fileNo.trim();
-        } else {
-          clinicFileNo = await nextClinicFileNumber(selectedClinicId);
-        }
-
-        const chosenNationality = nationality || nationalitySearch.trim() || null;
-
-        const { data, error } = await supabase
-          .from("patients")
-          .insert([
-            {
-              name: name.trim(),
-              // Live patients.phone column is NOT NULL; POS inserts "" too.
-              phone: phone.trim(),
-              email: email.trim() || null,
-              notes: notes.trim() || null,
-              date_of_birth: dob || null,
-              sex: sex || null,
-              nationality: chosenNationality,
-              emirates_id: emiratesId.trim() || null,
-              passport_number: passportNumber.trim() || null,
-              mrn: null,
-            },
-          ])
-          .select("*")
-          .single();
-
-        if (!error) {
-          try {
-            await createClinicPatientFile({
-              clinicId: selectedClinicId,
-              patientId: String((data as Patient).id),
-              fileNo: clinicFileNo,
-              mrn: mrn.trim() || null,
-              clinicalNotes: notes.trim() || null,
-            });
-            saved = data as Patient;
-          } catch (fileError: unknown) {
-            const rollback = await supabase.from("patients").delete().eq("id", (data as Patient).id);
-            if (rollback.error) {
-              console.error("Rollback failed after patient file create error", rollback.error);
-            }
-            if (fileError instanceof Error) {
-              lastError = { message: fileError.message };
-            } else {
-              lastError = { message: "Failed to create clinic patient file." };
-            }
-          }
-          break;
-        }
-        lastError = error;
-        if ((error as { code?: string }).code !== "23505") break;
-        if (fileNo.trim()) break;
-      }
-
-      if (!saved) {
-        console.error("Add patient failed. Raw error:", lastError);
-        console.error("Error keys:", lastError ? Object.keys(lastError) : "no error object");
-        console.error("Error JSON:", JSON.stringify(lastError, null, 2));
-        if (lastError?.code === "23505" && fileNo.trim()) {
-          alert("This File Number already exists in this clinic. Please use another File Number.");
-        } else {
-          const detail =
-            lastError?.message ||
-            lastError?.details ||
-            lastError?.hint ||
-            lastError?.code ||
-            "Empty error — likely RLS blocking the insert. Check DevTools Network tab for the request to /rest/v1/patients.";
-          alert(`Error saving patient: ${detail}`);
-        }
+      const result = await registerPatientFromPos({
+        clinicId: selectedClinicId, fullName: name.trim(), mobile: phone.trim(),
+        email: email.trim() || null, notes: notes.trim() || null, dateOfBirth: dob || null,
+        sex: sex || null, nationality: nationality || nationalitySearch.trim() || null,
+        emiratesId: emiratesId.trim() || null, passportNumber: passportNumber.trim() || null,
+        mrn: mrn.trim() || null, fileNo: fileNo.trim() || null, clinicFileClinicalNotes: notes.trim() || null,
+      });
+      if (result.warnings.length) alert(result.warnings.join("\n"));
+      if (!result.patient) {
+        alert("Patient was saved. Refresh the patient list to open their profile. Do not register them again.");
+        resetForm();
         return;
       }
-
-      setLastAdded(saved);
+      setLastAdded({ ...result.patient, id: result.patientId, name: String(result.patient.name || name), phone: result.patient.phone ?? "" } as Patient);
       setSavedBalance(null);
       resetForm();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Patient could not be saved. Check the patient list before retrying.");
     } finally {
       setSaving(false);
     }

@@ -1,0 +1,579 @@
+[
+  {
+    "file": "app\\treatment-history\\page.tsx",
+    "client": true,
+    "tables": [
+      "clinic_patient_files",
+      "clinics",
+      "receipt_items",
+      "receipts",
+      "receptionist",
+      "services"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "components\\outstanding-balance-modals.tsx",
+    "client": true,
+    "tables": [
+      "balance_payments",
+      "outstanding_balances"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "components\\backend-shell.tsx",
+    "client": true,
+    "tables": [
+      "clinics"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "components\\patient-credit-modals.tsx",
+    "client": true,
+    "tables": [
+      "patient_credits"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "components\\edit-patient-modal.tsx",
+    "client": true,
+    "tables": [
+      "clinic_patient_files"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "components\\app-frame.tsx",
+    "client": true,
+    "tables": [],
+    "rpcs": [
+      "get_clinic_birthday_remaining_count"
+    ]
+  },
+  {
+    "file": "app\\birthdays\\page.tsx",
+    "client": true,
+    "tables": [
+      "birthday_greetings",
+      "clinics"
+    ],
+    "rpcs": [
+      "get_clinic_birthday_patients"
+    ]
+  },
+  {
+    "file": "app\\doctors\\page.tsx",
+    "client": true,
+    "tables": [
+      "doctors"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\add-patient\\page.tsx",
+    "client": true,
+    "tables": [
+      "clinic_patient_files",
+      "clinics",
+      "patients"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\login\\page.tsx",
+    "client": true,
+    "tables": [
+      "clinics"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\receipts\\page.tsx",
+    "client": true,
+    "tables": [
+      "balance_payments",
+      "cash_deductions",
+      "clinic_patient_files",
+      "clinics",
+      "doctors",
+      "outstanding_balances",
+      "patient_credits",
+      "patients",
+      "payment_allocation_refunds",
+      "payment_allocations",
+      "payment_records",
+      "receipt_items",
+      "receipts",
+      "receptionist",
+      "refunds",
+      "service_favorites",
+      "services",
+      "treatment_plan_payment_allocations",
+      "treatment_plan_payment_records",
+      "treatment_plan_payments",
+      "treatment_plan_visits",
+      "treatment_plans"
+    ],
+    "rpcs": [
+      "create_payment_record_with_allocations"
+    ]
+  },
+  {
+    "file": "app\\receptionists\\page.tsx",
+    "client": true,
+    "tables": [
+      "receptionist"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\services\\page.tsx",
+    "client": true,
+    "tables": [
+      "services"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "lib\\api-session.ts",
+    "client": false,
+    "tables": [
+      "active_sessions"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\refunds\\page.tsx",
+    "client": true,
+    "tables": [
+      "clinics",
+      "payment_allocations",
+      "payment_records",
+      "receipt_items",
+      "receipts",
+      "receptionist"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "lib\\clinic-file-numbers.ts",
+    "client": false,
+    "tables": [
+      "clinic_patient_files"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\reports\\page.tsx",
+    "client": true,
+    "tables": [
+      "clinics"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\receipt-history\\page.tsx",
+    "client": true,
+    "tables": [
+      "clinics",
+      "doctors",
+      "receipt_items",
+      "receipts",
+      "receptionist",
+      "services",
+      "treatment_plan_payment_allocations",
+      "treatment_plan_payment_records",
+      "treatment_plan_payments",
+      "treatment_plan_visits",
+      "treatment_plans"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "lib\\clinic-patient-files.ts",
+    "client": false,
+    "tables": [
+      "clinic_patient_files"
+    ],
+    "rpcs": [
+      "next_clinic_file_number"
+    ]
+  },
+  {
+    "file": "app\\receipt-log\\receipt-log-client.tsx",
+    "client": true,
+    "tables": [
+      "balance_payments",
+      "clinics",
+      "doctors",
+      "outstanding_balances",
+      "payment_allocations",
+      "payment_records",
+      "receipt_items",
+      "receipts",
+      "receptionist",
+      "refund_items",
+      "refunds",
+      "services"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "components\\pos-modals.tsx",
+    "client": true,
+    "tables": [
+      "balance_payments",
+      "clinic_patient_files",
+      "clinics",
+      "doctors",
+      "outstanding_balances",
+      "patient_notes",
+      "patient_treatment_visits",
+      "patients",
+      "payment_allocations",
+      "payment_records",
+      "receipt_items",
+      "receipts",
+      "receptionist",
+      "refund_items",
+      "refunds",
+      "services",
+      "treatment_plan_payment_allocations",
+      "treatment_plan_payment_records",
+      "treatment_plan_payments",
+      "treatment_plan_visits",
+      "treatment_plans"
+    ],
+    "rpcs": [
+      "create_treatment_plan_payment_record_with_allocations"
+    ]
+  },
+  {
+    "file": "app\\patients\\page.tsx",
+    "client": true,
+    "tables": [
+      "patients"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\treatment-plan-visits\\route.ts",
+    "client": false,
+    "tables": [
+      "treatment_plan_visits",
+      "treatment_plans"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\backend\\a4-invoice-design\\a4-invoice-design-client.tsx",
+    "client": true,
+    "tables": [
+      "clinics"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "components\\pos-plan-checkout-modal.tsx",
+    "client": true,
+    "tables": [
+      "treatment_plan_payments",
+      "treatment_plans"
+    ],
+    "rpcs": [
+      "create_treatment_plan_payment_record_with_allocations"
+    ]
+  },
+  {
+    "file": "app\\backend\\backend-page-client.tsx",
+    "client": true,
+    "tables": [
+      "active_sessions",
+      "balance_payments",
+      "cash_register_sessions",
+      "clinic_patient_files",
+      "clinics",
+      "doctors",
+      "login_logs",
+      "outstanding_balances",
+      "patients",
+      "receipts",
+      "receptionist",
+      "services",
+      "treatment_plan_payment_records",
+      "treatment_plan_payments",
+      "treatment_plan_visits",
+      "treatment_plans"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\send-invoice\\route.ts",
+    "client": false,
+    "tables": [],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\generate-invoice-pdf\\route.ts",
+    "client": false,
+    "tables": [],
+    "rpcs": []
+  },
+  {
+    "file": "app\\search-patients\\page.tsx",
+    "client": true,
+    "tables": [
+      "clinic_patient_files",
+      "clinics"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "lib\\emirates-id-reader.ts",
+    "client": true,
+    "tables": [],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\clinic-deduction-settings\\route.ts",
+    "client": false,
+    "tables": [
+      "clinics"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\backend\\receipt-branding\\receipt-branding-client.tsx",
+    "client": true,
+    "tables": [
+      "clinics"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\reports\\top-services\\route.ts",
+    "client": false,
+    "tables": [
+      "receipts"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\patient-notes\\route.ts",
+    "client": false,
+    "tables": [
+      "doctors",
+      "patient_notes",
+      "receipts",
+      "receptionist"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\auth\\login\\route.ts",
+    "client": false,
+    "tables": [],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\patient-notes\\[noteId]\\route.ts",
+    "client": false,
+    "tables": [
+      "patient_notes"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\reports\\logout\\route.ts",
+    "client": false,
+    "tables": [
+      "active_sessions"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\cash-deductions\\route.ts",
+    "client": false,
+    "tables": [
+      "cash_deduction_events",
+      "cash_deductions",
+      "clinics",
+      "doctors"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\patient-backup\\route.ts",
+    "client": false,
+    "tables": [
+      "active_sessions",
+      "clinic_memberships",
+      "clinic_patient_files",
+      "clinics",
+      "doctors",
+      "patient_backup_exports",
+      "patient_notes",
+      "patient_treatment_visits",
+      "patients",
+      "receipt_items",
+      "receipts",
+      "receptionist",
+      "services",
+      "treatment_plan_visits",
+      "treatment_plans"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\patients\\[patientId]\\route.ts",
+    "client": false,
+    "tables": [
+      "patients"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\reports\\ceo-dashboard\\route.ts",
+    "client": false,
+    "tables": [
+      "cash_deductions",
+      "clinic_calendar_events",
+      "clinic_monthly_targets",
+      "clinic_operating_schedule",
+      "clinics",
+      "doctors",
+      "outstanding_balances",
+      "payment_records",
+      "receipts",
+      "receptionist",
+      "refunds",
+      "treatment_plans"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\patients\\register\\route.ts",
+    "client": false,
+    "tables": [
+      "clinic_patient_files",
+      "patients"
+    ],
+    "rpcs": [
+      "create_patient_with_clinic_file"
+    ]
+  },
+  {
+    "file": "app\\api\\patients\\[patientId]\\clinic-file\\route.ts",
+    "client": false,
+    "tables": [
+      "clinic_patient_files"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\patients\\[patientId]\\clinic-link\\route.ts",
+    "client": false,
+    "tables": [],
+    "rpcs": [
+      "ensure_patient_clinic_file"
+    ]
+  },
+  {
+    "file": "app\\api\\cash-deductions\\[deductionId]\\route.ts",
+    "client": false,
+    "tables": [
+      "cash_deduction_events",
+      "cash_deductions",
+      "clinics",
+      "doctors"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\patients\\simple\\route.ts",
+    "client": false,
+    "tables": [
+      "patients"
+    ],
+    "rpcs": [
+      "next_patient_file_number"
+    ]
+  },
+  {
+    "file": "app\\api\\cash-deductions\\_shared.ts",
+    "client": false,
+    "tables": [
+      "balance_payments",
+      "cash_deductions",
+      "cash_register_sessions",
+      "doctors",
+      "patient_credits",
+      "payment_allocations",
+      "payment_records",
+      "receipts",
+      "receptionist",
+      "treatment_plan_payment_allocations",
+      "treatment_plan_payment_records",
+      "treatment_plan_payments"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "app\\api\\reports\\login\\route.ts",
+    "client": false,
+    "tables": [],
+    "rpcs": []
+  },
+  {
+    "file": "lib\\patient-file-number.ts",
+    "client": false,
+    "tables": [
+      "patients"
+    ],
+    "rpcs": [
+      "next_patient_file_number"
+    ]
+  },
+  {
+    "file": "lib\\patient-mutation-server.ts",
+    "client": false,
+    "tables": [
+      "clinic_patient_files",
+      "clinics"
+    ],
+    "rpcs": []
+  },
+  {
+    "file": "components\\reports\\reports-loading-state.tsx",
+    "client": false,
+    "tables": [],
+    "rpcs": []
+  },
+  {
+    "file": "lib\\receipt-branding.ts",
+    "client": false,
+    "tables": [],
+    "rpcs": []
+  },
+  {
+    "file": "lib\\receipt-refunds.ts",
+    "client": false,
+    "tables": [
+      "refund_items",
+      "refunds"
+    ],
+    "rpcs": [
+      "create_legacy_receipt_refund",
+      "create_payment_allocation_refund"
+    ]
+  },
+  {
+    "file": "lib\\session-auth.ts",
+    "client": false,
+    "tables": [],
+    "rpcs": []
+  }
+]

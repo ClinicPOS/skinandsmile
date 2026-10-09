@@ -1,77 +1,43 @@
-import { createServerSupabaseClient, ensureClinicScopeAccess, readAppSession } from "../../../lib/api-session";
-import { canAddTreatmentPlanVisit, getTreatmentPlanCompletedVisitCount } from "../../../lib/treatment-plan-visits";
+import { createServerSupabaseClient, ensureManagerSession, readAppSession } from "../../../lib/api-session";
+import { createProtectedDataClient } from "../../../lib/protected-data-server";
+import { isUuid } from "../../../lib/patient-mutation-validation";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const supabase = createServerSupabaseClient();
-  const { session, errorResponse } = await readAppSession(supabase);
+  const { session, errorResponse } = await readAppSession(createServerSupabaseClient());
   if (errorResponse || !session) return errorResponse!;
-
+  if (session.sessionMode !== "clinic" && ensureManagerSession(session)) {
+    return Response.json({ error: "Forbidden." }, { status: 403 });
+  }
   const body = await request.json().catch(() => null);
-  const treatmentPlanId = String(body?.treatmentPlanId || "").trim();
-  const doctorId = String(body?.doctorId || "").trim() || null;
-  const notes = String(body?.notes || "").trim() || null;
-  if (!treatmentPlanId) {
-    return Response.json({ error: "Treatment plan is required." }, { status: 400 });
+  const treatmentPlanId = body?.treatmentPlanId;
+  const requestId = body?.requestId;
+  const doctorId = body?.doctorId ?? null;
+  if(!isUuid(doctorId))return Response.json({error:'Select the doctor who actually performed this visit.'},{status:400});
+  const notes = typeof body?.notes === "string" ? body.notes.trim() || null : null;
+  if (!isUuid(treatmentPlanId) || !isUuid(requestId) || (doctorId !== null && !isUuid(doctorId)) ||
+      (body?.notes != null && typeof body.notes !== "string") || (notes?.length || 0) > 4000) {
+    return Response.json({ error: "Valid plan, request ID and visit details are required." }, { status: 400 });
   }
-  const { data: plan, error: planError } = await supabase
-    .from("treatment_plans")
-    .select("id, clinic_id, planned_visits, clinic_patient_file_id, status")
-    .eq("id", treatmentPlanId)
-    .maybeSingle();
-  if (planError || !plan) {
-    return Response.json({ error: "Treatment plan was not found." }, { status: 404 });
+  try {
+    const client = createProtectedDataClient();
+    let query = client.from("treatment_plans").select("id, clinic_id").eq("id", treatmentPlanId);
+    if (session.sessionMode === "clinic") query = query.eq("clinic_id", session.clinicId!);
+    const { data: plan, error } = await query.maybeSingle();
+    if (error) throw error;
+    if (!plan) return Response.json({ error: "Treatment plan was not found in the permitted clinic." }, { status: 404 });
+    const { data, error: saveError } = await client.rpc("record_treatment_plan_visit", {
+      p_visit_id: requestId, p_plan_id: treatmentPlanId, p_clinic_id: plan.clinic_id,
+      p_doctor_id: doctorId, p_receptionist_id: session.receptionistId, p_notes: notes,
+    });
+    if (saveError) {
+      const status = saveError.code === "42501" ? 403 : ["23505", "23514"].includes(saveError.code) ? 409 : saveError.code === "22023" ? 400 : 503;
+      const message = status === 403 ? "The patient, doctor or receptionist is not linked to this clinic." : status === 409 ? "The plan is closed, its visit limit was reached, or this request ID was already used. Refresh the plan before trying again." : "Visit could not be saved. Retry the same request.";
+      return Response.json({ error: message }, { status });
+    }
+    return Response.json(data, { headers: { "Cache-Control": "no-store" } });
+  } catch {
+    return Response.json({ error: "Visit saving is unavailable. Retry the same request." }, { status: 503 });
   }
-
-  const clinicScopeError = ensureClinicScopeAccess(session, String(plan.clinic_id));
-  if (clinicScopeError) return clinicScopeError;
-
-  const { count, error: countError } = await supabase
-    .from("treatment_plan_visits")
-    .select("id", { count: "exact", head: true })
-    .eq("treatment_plan_id", treatmentPlanId);
-  if (countError) {
-    return Response.json({ error: "Treatment-plan visits could not be checked." }, { status: 500 });
-  }
-
-  const recordedVisits = getTreatmentPlanCompletedVisitCount(Number(count || 0), !!plan.clinic_patient_file_id);
-  const totalVisits = plan.planned_visits == null ? null : Number(plan.planned_visits);
-  if (!canAddTreatmentPlanVisit(totalVisits, recordedVisits)) {
-    return Response.json({
-      error: "This treatment plan has reached its planned visit limit. Create a new add-on plan for further treatment.",
-      completedVisits: recordedVisits,
-      totalVisits,
-    }, { status: 409 });
-  }
-
-  const nextVisitNumber = recordedVisits + 1;
-  const { data: visit, error: insertError } = await supabase
-    .from("treatment_plan_visits")
-    .insert([{
-      treatment_plan_id: treatmentPlanId,
-      visit_number: nextVisitNumber,
-      doctor_id: doctorId,
-      receptionist_id: session.receptionistId,
-      notes,
-    }])
-    .select()
-    .single();
-  if (insertError || !visit) {
-    return Response.json({ error: insertError?.message || "Treatment-plan visit could not be saved." }, { status: 500 });
-  }
-
-  let updatedPlan = null;
-  const completedVisits = recordedVisits + 1;
-  if (totalVisits != null && completedVisits >= totalVisits && plan.status !== "Completed") {
-    const { data } = await supabase
-      .from("treatment_plans")
-      .update({ status: "Completed", completed_at: new Date().toISOString() })
-      .eq("id", treatmentPlanId)
-      .select("*")
-      .single();
-    if (data) updatedPlan = data;
-  }
-
-  return Response.json({ visit, plan: updatedPlan, completedVisits, totalVisits });
 }

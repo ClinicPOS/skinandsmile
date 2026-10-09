@@ -1,4 +1,5 @@
 "use client";
+import {createPosEntry,completePosEntry} from "../lib/pos-entry-client";
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
@@ -122,10 +123,7 @@ export function ReceiveDepositModal({
 
     setSaving(true);
     try {
-      const { data, error } = await supabase
-        .from("patient_credits")
-        .insert([
-          {
+      const { data, error } = await createPosEntry("deposit", {
             patient_id: patient.id,
             clinic_id: clinic.id,
             amount: amt,
@@ -135,10 +133,7 @@ export function ReceiveDepositModal({
             notes: notes.trim() || null,
             receptionist_id: receptionistId,
             register_session_id: registerSessionId,
-          },
-        ])
-        .select()
-        .single();
+          });
 
       if (error) {
         console.error("Receive deposit failed:", error);
@@ -154,6 +149,7 @@ export function ReceiveDepositModal({
         cashierName,
         availableAfter: availableNow + amt,
       });
+      completePosEntry(data);
       onSaved?.(credit);
       onClose();
     } finally {

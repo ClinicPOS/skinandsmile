@@ -1,0 +1,11 @@
+# Whole receipt void — local implementation
+
+Saved receipt history offers Request Void with a mandatory reason. A named owner or assigned manager approves or rejects. Approval atomically marks the receipt VOIDED and the request COMPLETED, cancels its mistaken payment records/allocations, cancels its outstanding balance, and preserves all original monetary amounts and items. No refund or replacement is created. The verified audit actor identifies requester/approver; the manager must confirm that actual money is accounted for separately. This is cancellation of an erroneous payment entry, never an assertion that real cash was returned or transferred.
+
+For duplicate entries keep the correct receipt. For wrong-price entries, create a correct receipt separately after approval. Staff must record the amount actually paid on the correct receipt. Until then, the voided entry contributes zero reported collections; this workflow does not automatically transfer funds or enforce that a new receipt is created. Managers must reconcile the actual till before final EOD. No production rollout yet.
+
+Supported scope: current Dubai day, ordinary cash receipts without existing refunds, applied credit, gateway fees, linked treatment-plan visits or later balance payments. Unsupported cases fail without changing financial rows. Request cancellation/rejection leaves receipt and payments unchanged. Retried approval returns the completed request for the original approver.
+
+EOD excludes VOIDED receipt revenue and cancelled collections, shows original rows grey and struck through, and retains approver/reason/time. CEO and cash-deduction payment queries exclude cancelled payment entries. Legacy and external reports still require a full rollout audit. Prior completed documents are not rewritten.
+
+Migration: 20261008010000_whole_receipt_void.sql, applied only to the isolated local database. Tests: local-refund-approval-integration.mjs checks manager confirmation, concurrent approval, amounts retained, no refund/replacement, cancelled payments, and cancellation without changes. local-eod-export-integration.mjs verifies exported styling and totals. Do not revert only the UI or only database functions; recover the isolated database and matching application together. Production requires verified backup restoration and compatible migration/report deployment review.

@@ -1,14 +1,14 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { createServerSupabaseClient } from "../../../../lib/api-session";
+import { sessionStorageFetch } from "../../../../lib/session-storage";
 import { APP_AUTH_COOKIE_NAME } from "../../../../lib/session-auth";
 
 export async function POST() {
   const cookieStore = await cookies();
   const token = cookieStore.get(APP_AUTH_COOKIE_NAME)?.value || "";
   if (token) {
-    const supabase = createServerSupabaseClient();
-    await supabase.from("active_sessions").delete().eq("token", token);
+    const result = await sessionStorageFetch(`?token=eq.${encodeURIComponent(token)}`, { method: "DELETE" });
+    if (!result.ok) return NextResponse.json({ error: "Could not revoke the session. Please try again." }, { status: 503 });
   }
 
   const response = NextResponse.json({ ok: true });

@@ -215,6 +215,9 @@ export function PosRegisterPatientModal({
         },
         successMessage: `Patient registered and selected (File #${created.fileNo}).`,
       });
+      if (created.warnings.length > 0) {
+        alert(`Patient registered (File #${created.fileNo}). Do not register again. ${created.warnings.join(" ")}`);
+      }
       resetAndClose();
     } catch (error) {
       alert(error instanceof Error ? error.message : "Could not register patient.");

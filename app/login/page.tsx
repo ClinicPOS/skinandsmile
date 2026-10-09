@@ -95,7 +95,7 @@ export default function LoginPage() {
       setLockedUntil(Date.now() + data.remaining * 1000);
     } else {
       const left = data.attemptsLeft;
-      setError(left === 1 ? "Wrong password. 1 attempt left before lockout." : `Wrong password. ${left} attempts left.`);
+      setError(typeof left!=='number'?(data.error||'Could not sign in.'):left === 1 ? "Wrong password. 1 attempt left before lockout." : `Wrong password. ${left} attempts left.`);
     }
     setLoading(false);
   }
@@ -115,7 +115,6 @@ export default function LoginPage() {
             className="w-full border border-slate-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
           >
             <option value="">What Clinic will open the POS?</option>
-            <option value="manager">Manager</option>
             {clinics.map((clinic) => (
               <option key={clinic.id} value={clinic.id}>
                 {clinic.name}
@@ -146,6 +145,7 @@ export default function LoginPage() {
             {loading ? "Checking..." : "Enter"}
           </button>
         </form>
+        <a href="/login/staff" className="mt-5 block text-sm font-medium text-blue-700">Owner &amp; Manager Login</a>
       </div>
     </div>
   );

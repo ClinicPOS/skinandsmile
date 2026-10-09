@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
+import { loadClinicHistoryPatients, loadClinicFileIndex } from "../../lib/patient-read-client";
 import { buildReceiptQrHtml, getReceiptLogoPath, printHtmlWhenImagesReady } from "../../lib/receipt-branding";
 import { generateInvoiceHtml, generateTreatmentPlanPaymentInvoiceHtml, type InvoiceStatus } from "../../lib/generate-invoice-html";
 import { buildThermalReceiptHtml as buildThermalReceiptHtmlShared, type BuildThermalReceiptHtmlOptions } from "../../lib/build-thermal-receipt-html";
@@ -13,6 +14,7 @@ import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 import { mapRegularReceiptRenderLine, summarizeRegularReceiptForRender } from "../../lib/regular-receipt-rendering";
 
 type Receipt = {
+  status?: string;
   id: string;
   receipt_number?: number | null;
   patient_id: string;
@@ -73,6 +75,7 @@ type ReceiptItem = {
 };
 
 type HistoryEntry = {
+  status?: string;
   id: string;
   kind: "receipt" | "treatment-plan";
   title: string;
@@ -140,19 +143,22 @@ export default function ReceiptHistoryPage() {
 
   useEffect(() => {
     if (!isLoaded) return;
-    loadHistory();
-  }, [isLoaded]);
+    void loadHistory().catch(error => {
+      setPatients([]); setHistoryEntries([]);
+      alert(error instanceof Error ? error.message : "Receipt history could not be loaded.");
+    });
+  }, [isLoaded, allowedClinicId]);
 
   async function loadHistory() {
     const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult, clinicResult, clinicPatientFileResult, treatmentPlanResult, treatmentPlanVisitResult, treatmentPlanPaymentResult, legacyTreatmentPlanPaymentResult, treatmentPlanAllocationResult] = await Promise.all([
       supabase.from("receipts").select("*").order("created_at", { ascending: false }),
-      fetchAllRows("patients", "id, name, phone, patient_number"),
+      loadClinicHistoryPatients(allowedClinicId),
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
       supabase.from("receptionist").select("id, name, clinic_id").order("name", { ascending: true }),
       supabase.from("services").select("id, name, price, standard_price, pricing_type").order("name", { ascending: true }),
       supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total, original_price, service_name_snapshot, teeth, allocated_global_discount_amount, taxable_amount, vat_rate, vat_amount, final_line_total"),
       supabase.from("clinics").select("*"),
-      fetchAllRows("clinic_patient_files", "id, clinic_id, patient_id, file_no"),
+      loadClinicFileIndex(allowedClinicId),
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_visits").select("id, treatment_plan_id, visit_number, created_at").order("visit_number", { ascending: true }),
       supabase.from("treatment_plan_payment_records").select("*").order("created_at", { ascending: false }),
@@ -181,6 +187,7 @@ export default function ReceiptHistoryPage() {
       payment_method: receipt.payment_method || null,
       notes: receipt.notes || null,
       receipt_number: receipt.receipt_number ?? null,
+      status: receipt.status,
       doctor_id: receipt.doctor_id ?? null,
       gateway_fee: receipt.gateway_fee ?? null,
       gateway_fee_provider: receipt.gateway_fee_provider ?? null,
@@ -423,6 +430,7 @@ export default function ReceiptHistoryPage() {
   }
 
   function buildInvoiceHtmlForSelected(): string {
+    if(selectedReceipt?.status === "VOIDED")return "<!doctype html><html><body><h1>VOIDED RECEIPT</h1><p>This original record is kept for history and excluded from collections. It is not a valid invoice.</p></body></html>";
     if (!selectedReceipt) return "";
     const receptionist = receptionists.find((r) => r.id === selectedReceipt.receptionist_id);
     const clinic = clinics.find((c) => c.id === receptionist?.clinic_id) ?? clinics[0] ?? null;
@@ -575,6 +583,7 @@ export default function ReceiptHistoryPage() {
 
 
   function printSelectedReceipt() {
+    if(selectedReceipt?.status === "VOIDED"){alert("This receipt is voided and kept for history. It cannot be printed as a valid receipt.");return;}
     if (!selectedReceipt) return;
 
     if (selectedReceipt.kind === "treatment-plan") {
@@ -678,7 +687,7 @@ export default function ReceiptHistoryPage() {
                       <p className="mt-1 text-sm text-slate-600">{getPatientName(receipt.patient_id)}</p>
                     </div>
                     <div className="text-right">
-                      <p className="text-sm font-semibold text-teal-700">AED {Number(receipt.total || 0).toFixed(2)}</p>
+                      <p className="text-sm font-semibold text-teal-700">AED {Number(receipt.total || 0).toFixed(2)}</p>{receipt.status === "VOIDED" && <p className="text-xs font-semibold text-slate-600">VOIDED — excluded from collections</p>}
                       <p className="mt-1 text-xs text-slate-500">
                         {receipt.created_at ? new Date(receipt.created_at).toLocaleString() : "No date"}
                       </p>
@@ -715,7 +724,7 @@ export default function ReceiptHistoryPage() {
                       Printable Thermal Receipt
                     </p>
                     <h2 className="mt-2 text-2xl font-semibold text-slate-900 print:text-black">
-                      Receipt {formatReceiptNo(selectedReceipt)}
+                      Receipt {formatReceiptNo(selectedReceipt)} {selectedReceipt.status === "VOIDED" && <span className="ml-2 text-rose-700">VOIDED — retained for history</span>}
                     </h2>
                     <p className="mt-1 text-sm text-slate-500">Premium dental clinic format</p>
                   </div>
