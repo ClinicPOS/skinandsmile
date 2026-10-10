@@ -19,7 +19,7 @@ const localFetch=async (input,init={})=>{
  const resolved=url.startsWith('/')?`http://127.0.0.1:3001${url}`:url;
  assert.ok(resolved.startsWith(status.API_URL+'/')||resolved.startsWith('http://127.0.0.1:3001/'),'Remote network access is forbidden');
  if(resolved.startsWith('http://127.0.0.1:3001/'))return fetch(resolved,{...init,headers:{...init.headers,Cookie:`app-auth=${token}`}});
- const parsed=new URL(resolved);if(parsed.pathname.startsWith('/rest/v1/')&&(!init.method||init.method==='GET'||init.method==='HEAD')){const h=new Headers(init.headers);return fetch('http://127.0.0.1:3001/api/pos-read',{method:'POST',headers:{'Content-Type':'application/json',Cookie:'app-auth='+token},body:JSON.stringify({table:parsed.pathname.slice('/rest/v1/'.length),query:parsed.search.slice(1),range:h.get('range'),accept:h.get('accept'),count:h.get('prefer')?.includes('count=exact')?'exact':null})});}
+ const parsed=new URL(resolved);if(process.env.LOCAL_EOD_FAIL_TABLE && parsed.pathname==='/rest/v1/'+process.env.LOCAL_EOD_FAIL_TABLE)return Response.json({message:'Injected local read failure',code:'TEST'},{status:503});if(parsed.pathname.startsWith('/rest/v1/')&&(!init.method||init.method==='GET'||init.method==='HEAD')){const h=new Headers(init.headers);return fetch('http://127.0.0.1:3001/api/pos-read',{method:'POST',headers:{'Content-Type':'application/json',Cookie:'app-auth='+token},body:JSON.stringify({table:parsed.pathname.slice('/rest/v1/'.length),query:parsed.search.slice(1),range:h.get('range'),accept:h.get('accept'),count:h.get('prefer')?.includes('count=exact')?'exact':null})});}
  return fetch(resolved,init);
 };
 const client=createClient(status.API_URL,status.ANON_KEY,{global:{fetch:localFetch},auth:{persistSession:false}});
@@ -37,7 +37,7 @@ function loadModule(filename){
  },fetch:localFetch,Response,URL,URLSearchParams,console,crypto:webcrypto,process:{env:{}},setTimeout,clearTimeout},{filename:resolved});
  return exports;
 }
-const pagePath=path.resolve('app/receipts/page.tsx'), sourceText=fs.readFileSync(pagePath,'utf8');
+const pagePath=path.resolve('app/receipts/page.tsx'), sourceText=fs.readFileSync(process.env.LOCAL_EOD_SOURCE || pagePath,'utf8');
 const source=ts.createSourceFile(pagePath,sourceText,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
 let target;function locate(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='downloadDailyIncomeReport')target=node;ts.forEachChild(node,locate);}locate(source);assert.ok(target);
 let workbook;
@@ -62,8 +62,14 @@ vm.runInNewContext(program,scope);
 try{
  await rest('active_sessions',{method:'POST',body:JSON.stringify({token,session_mode:'clinic',clinic_id:clinic,user_role:'receptionist',created_at:new Date().toISOString()})});
  await scope.exports.run();
+ if(process.env.LOCAL_EOD_FAIL_TABLE){
+   assert.equal(workbook,undefined,'Failed required read must prevent export');
+   assert.ok(alerts.some(message=>message.includes('not exported')||message.includes('Could not load')));
+   console.log('PASS: failed '+process.env.LOCAL_EOD_FAIL_TABLE+' read prevents incomplete EOD export.');
+ } else {
  assert.ok(alerts.every(message=>message.includes('unresolved correction/refund requests')),`Export reported an error: ${alerts.join('; ')}`);
  assert.ok(workbook,'Actual EOD function must produce a workbook');
+ if(process.env.LOCAL_EOD_SNAPSHOT)fs.writeFileSync(process.env.LOCAL_EOD_SNAPSHOT,JSON.stringify(workbook));
  for(const name of ['Daily Summary','Transaction Details','Treatment Plans','Treatment Plan Payments'])assert.ok(workbook.Sheets[name]);
  const payments=XLSX.utils.sheet_to_json(workbook.Sheets['Treatment Plan Payments'],{header:1});
  const sourcePayments=await (await rest(`treatment_plan_payment_records?clinic_id=eq.${clinic}&created_at=gte.${reportStart}&created_at=lte.${reportEnd}&select=patient_id,total_customer_charged_amount`)).json();
@@ -101,11 +107,12 @@ try{
  const totalRow=detailData.find(row=>row[0]==='NET TOTALS');assert.ok(totalRow);
  const summaryRows=XLSX.utils.sheet_to_json(workbook.Sheets['Daily Summary'],{header:1});
  assert.ok(Math.abs(Number(totalRow[25])-Number(summaryRows.find(row=>row[0]==='NET MONEY COLLECTED')[1])+expectedCollections+Number(summaryRows.find(row=>row[0]==='Old Balance Collections')?.[1]||0)+Number(summaryRows.find(row=>row[0]==='Advance Payments / Prepayments')?.[1]||0)-Number(summaryRows.find(row=>row[0]==='Refunds from earlier receipts')?.[1]||0))<0.001,'Receipt net collections must match summary for these receipt-only fixtures: detail='+totalRow[25]+' summary='+summaryRows.find(row=>row[0]==='NET MONEY COLLECTED')[1]+' plan='+expectedCollections);
- for(const [method,index] of (expectedCollections===0 && Number(summaryRows.find(row=>row[0]==='Refunds from earlier receipts')?.[1]||0)===0?[['Cash',12],['Tabby',15],['Card',13]]:[])){const summaryMethod=summaryRows.find(row=>row[0]===method);assert.ok(summaryMethod);assert.ok(Math.abs(Number(totalRow[index])-Number(summaryMethod[3]))<0.001,'Net payment method must reconcile: '+method);}
+ for(const [method,index] of (expectedCollections===0 && Number(summaryRows.find(row=>row[0]==='Refunds from earlier receipts')?.[1]||0)===0 && Number(summaryRows.find(row=>row[0]==='Old Balance Collections')?.[1]||0)===0 && Number(summaryRows.find(row=>row[0]==='Advance Payments / Prepayments')?.[1]||0)===0?[['Cash',12],['Tabby',15],['Card',13]]:[])){const summaryMethod=summaryRows.find(row=>row[0]===method);assert.ok(summaryMethod);assert.ok(Math.abs(Number(totalRow[index])-Number(summaryMethod[3]))<0.001,'Net payment method must reconcile: '+method);}
  for(let index=1;index<detailData.length;index++){const row=detailData[index];if(['REFUNDED','PARTIALLY_REFUNDED'].includes(row[28])){const cell=workbook.Sheets['Transaction Details'][XLSX.utils.encode_cell({r:index,c:2})];assert.equal(cell.s.fill.fgColor.rgb,row[28]==='REFUNDED'?'FECACA':'FEF3C7');}}
  assert.ok(workbook.Sheets['Pending Approvals']);
  const files=await (await rest(`clinic_patient_files?clinic_id=eq.${clinic}&select=patient_id,file_no`)).json();
  for(const payment of sourcePayments){const file=files.find(f=>f.patient_id===payment.patient_id);assert.ok(payments.some(row=>row[2]===file.file_no&&row[1]),'Plan payment export must retain the patient name and current clinic file label');}
  if(process.env.LOCAL_EOD_QA_OUTPUT)fs.writeFileSync(process.env.LOCAL_EOD_QA_OUTPUT,XLSX.write(workbook,{type:'buffer',bookType:'xlsx'}));
  console.log('PASS: actual POS EOD export function executed against restricted local Supabase; expected sheets and treatment-payment file labels verified.');
+}
 }finally{await rest(`active_sessions?token=eq.${token}`,{method:'DELETE'});}

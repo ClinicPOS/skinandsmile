@@ -6,7 +6,7 @@ import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
 const row={id:'fixture-request',receiptNumber:123,patientName:'TEST Patient',requestedBy:'TEST Receptionist',status:'PENDING',created_at:'2026-10-07T10:00:00Z',requested_reason:'TEST return',proposal:{total:105,method:'cash',items:[{service_name:'TEST Service',refunded_invoice_amount:105}]}};
 let values=[],cursor=0,calls=[];
-const react={useEffect(){},useState(initial){const i=cursor++;if(!(i in values))values[i]=i===0?[row]:initial;return [values[i],value=>{values[i]=typeof value==='function'?value(values[i]):value;}];}};
+const react={useEffect(){},useState(initial){const i=cursor++;if(!(i in values))values[i]=Array.isArray(initial)?[row]:typeof initial==='boolean'&&initial===true?false:initial;return [values[i],value=>{values[i]=typeof value==='function'?value(values[i]):value;}];}};
 const source=ts.transpileModule(fs.readFileSync('components/refund-approval-queue.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText;
 const exports={};vm.runInNewContext(source,{exports,require:name=>name==='react'?react:require(name),fetch:async(url,init)=>{calls.push({url,body:JSON.parse(init.body)});return {ok:true,json:async()=>({request:{status:'APPROVED'}})};},queueMicrotask,console,Date});
 function render(){cursor=0;return exports.RefundApprovalQueue({clinicId:'fixture-clinic',review:true});}

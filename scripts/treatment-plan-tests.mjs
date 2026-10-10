@@ -52,7 +52,9 @@ assert.equal(legacyRollup.historicalPaid, 1500);
 assert.equal(legacyRollup.totalPaidToDate, 1700);
 assert.equal(legacyRollup.remainingBalance, 300);
 assert.equal(getTreatmentPlanCompletedVisitCount(3, false), 3);
-assert.equal(5, 5, "Total visits remain 5");
+assert.equal(getTreatmentPlanCompletedVisitCount(0, true), 0, "A linked clinic file does not create a visit");
+assert.equal(getTreatmentPlanCompletedVisitCount(1, true), 1);
+assert.equal(getTreatmentPlanCompletedVisitCount(2, true), 2, "Saved imported visits are preserved");
 
 assert.equal(canAddTreatmentPlanVisit(5, 4), true, "Case A: visit 5 is allowed");
 assert.equal(canAddTreatmentPlanVisit(5, 5), false, "Case B: the limit blocks another visit");

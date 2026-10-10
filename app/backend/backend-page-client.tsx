@@ -408,7 +408,7 @@ function BackendPageContent() {
       const paid = rollup.totalPaidToDate;
       const remaining = rollup.remainingBalance;
       const completedVisits = (treatmentPlanVisitsByPlanId.get(plan.id) || []).length;
-      const shownVisits = Math.max(completedVisits, plan.clinic_patient_file_id ? 1 : 0);
+      const shownVisits = completedVisits;
       const totalVisits = Math.max(1, Number(plan.planned_visits || 0));
       const visitSummary = `${Math.min(shownVisits, totalVisits)}/${totalVisits} visits`;
       const group = groups.get(clinicId) || {

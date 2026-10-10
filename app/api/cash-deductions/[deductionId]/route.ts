@@ -79,14 +79,7 @@ export async function PATCH(
       return Response.json({ error: updateError.message || "Failed voiding cash deduction." }, { status: 500 });
     }
 
-    await supabase.from("cash_deduction_events").insert([{
-      deduction_id: deductionId,
-      action: "voided",
-      changed_by: registerContext.receptionistId,
-      reason: voidReason,
-      previous_data: existingRow,
-      next_data: { ...existingRow, ...updatePayload },
-    }]);
+  // Activity logging is atomic in the database trigger.
 
     const entries = await listCashDeductions(supabase, registerContext.id);
     const cashCollected = await computeRegisterSessionCashCollected(supabase, registerContext);
@@ -170,13 +163,7 @@ export async function PATCH(
     return Response.json({ error: updateError.message || "Failed updating cash deduction." }, { status: 500 });
   }
 
-  await supabase.from("cash_deduction_events").insert([{
-    deduction_id: deductionId,
-    action: "updated",
-    changed_by: registerContext.receptionistId,
-    previous_data: existingRow,
-    next_data: { ...existingRow, ...updatePayload },
-  }]);
+  // Activity logging is atomic in the database trigger.
 
   const entries = await listCashDeductions(supabase, registerContext.id);
   const updatedCashCollected = await computeRegisterSessionCashCollected(supabase, registerContext);

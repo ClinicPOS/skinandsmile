@@ -21,8 +21,19 @@ export async function loadManagedPatients(ids?: string[]): Promise<Patient[]> {
   return patients;
 }
 
-export async function loadClinicHistoryPatients(clinicId?: string | null): Promise<(Patient & { clinic_file_no?: string | null })[]> {
+export async function loadClinicHistoryPatients(clinicId?: string | null, patientIds?: string[]): Promise<(Patient & { clinic_file_no?: string | null })[]> {
   if (!clinicId) return loadManagedPatients();
+  if (patientIds !== undefined) {
+    const patients: (Patient & { clinic_file_no?: string | null })[] = [];
+    const unique = [...new Set(patientIds)];
+    for (let offset = 0; offset < unique.length; offset += 200) {
+      const response = await fetch(`/api/patients/history?${new URLSearchParams({ clinicId, patientIds: unique.slice(offset, offset + 200).join(",") })}`, { cache: "no-store" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Patient history details could not be loaded.");
+      patients.push(...body.patients);
+    }
+    return patients;
+  }
   const response = await fetch(`/api/patients/history?${new URLSearchParams({ clinicId })}`, { cache: "no-store" });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || "Patient history details could not be loaded.");

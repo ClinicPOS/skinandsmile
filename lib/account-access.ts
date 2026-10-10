@@ -1,5 +1,5 @@
 import {sessionStorageConfiguration} from './session-storage';
-export const MANAGER_PERMISSIONS=['doctors','services','receipt_design','reports','correction_approval'] as const;
+export const MANAGER_PERMISSIONS=['doctors','services','receipt_design','reports','correction_approval','receptionists'] as const;
 export type ManagerPermission=typeof MANAGER_PERMISSIONS[number];
 export type NamedAccountAccess={id:string;name:string;role:'owner'|'clinic_manager';permissions:ManagerPermission[]};
 export async function readNamedAccountAccess(accountId:string,clinicId:string|null):Promise<NamedAccountAccess|null>{

@@ -88,15 +88,15 @@ function createFormFromClinic(clinic: Clinic | null): ReceiptBrandingForm {
   };
 }
 
-export default function ReceiptBrandingPage() {
+export default function ReceiptBrandingPage({fixedClinicId}:{fixedClinicId?:string} = {}) {
   return (
     <Suspense fallback={<div className="min-h-[240px]" />}>
-      <ReceiptBrandingPageContent />
+      <ReceiptBrandingPageContent fixedClinicId={fixedClinicId} />
     </Suspense>
   );
 }
 
-function ReceiptBrandingPageContent() {
+function ReceiptBrandingPageContent({fixedClinicId}:{fixedClinicId?:string}) {
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [clinics, setClinics] = useState<Clinic[]>([]);
@@ -253,7 +253,8 @@ function ReceiptBrandingPageContent() {
 
     void (async () => {
       setIsLoading(true);
-      const { data, error } = await supabase.from("clinics").select("*").order("name");
+      const query = supabase.from("clinics").select("*").order("name");
+      const { data, error } = await (fixedClinicId ? query.eq("id",fixedClinicId) : query);
       setIsLoading(false);
 
       if (cancelled) return;
@@ -271,7 +272,7 @@ function ReceiptBrandingPageContent() {
       const savedClinicId = typeof window !== "undefined"
         ? window.localStorage.getItem(BACKEND_SELECTED_CLINIC_KEY)
         : "";
-      const initialClinicId = [urlClinicId, savedClinicId, clinicRows[0]?.id || ""]
+      const initialClinicId = [fixedClinicId, urlClinicId, savedClinicId, clinicRows[0]?.id || ""]
         .find((clinicId) => clinicId && clinicRows.some((clinic) => clinic.id === clinicId)) || clinicRows[0]?.id || "";
 
       const initialClinic = clinicRows.find((clinic) => clinic.id === initialClinicId) || null;
@@ -282,7 +283,7 @@ function ReceiptBrandingPageContent() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [fixedClinicId]);
 
   useEffect(() => {
     if (!selectedClinicId) return;
@@ -318,7 +319,7 @@ function ReceiptBrandingPageContent() {
       receipt_thank_you: form.receipt_thank_you.trim() || null,
       receipt_final_message: form.receipt_final_message.trim() || null,
       receipt_qr_url: form.receipt_qr_url.trim() || null,
-      trn: form.trn.trim() || null,
+      ...(!fixedClinicId?{trn: form.trn.trim() || null}:{}),
       logo: form.logo.trim() || null,
       ...thermalDraftValidation.payload,
     };
@@ -342,7 +343,7 @@ function ReceiptBrandingPageContent() {
     <div className="space-y-5">
     <div className="mb-5 flex flex-wrap items-center gap-3">
       <Link
-        href="/backend"
+        href={fixedClinicId?"/clinic-admin":"/backend"}
         className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
       >
         ← Back to Backend
@@ -385,7 +386,7 @@ function ReceiptBrandingPageContent() {
               Use the separate A4 invoice design page to change invoice-only logo, colors, and slogan without affecting thermal receipts.
             </div>
             <a
-              href={`/backend/a4-invoice-design${selectedClinicId ? `?clinicId=${selectedClinicId}` : ""}`}
+              href={fixedClinicId?`/clinic-admin?tab=a4_design`:`/backend/a4-invoice-design?clinicId=${selectedClinicId}`}
               className="mt-2 inline-flex items-center justify-center rounded-xl border border-cyan-300 bg-white px-3 py-2 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-100"
             >
               Open A4 Invoice Design
@@ -426,7 +427,7 @@ function ReceiptBrandingPageContent() {
                   className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                 />
                 <input
-                  value={form.trn}
+                  readOnly={!!fixedClinicId} title={fixedClinicId?"Legal tax details are managed by the owner":""} value={form.trn}
                   onChange={(e) => updateForm("trn", e.target.value)}
                   placeholder="TRN"
                   className="rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
@@ -748,9 +749,10 @@ function ReceiptBrandingPageContent() {
                   </span>
                 </div>
                 <div className="overflow-x-auto pb-2">
-                  <div className="mx-auto" style={{ width: `${THERMAL_PAPER_WIDTH_MM}mm`, minWidth: `${THERMAL_PAPER_WIDTH_MM}mm` }}>
+                  {/* Reserve space for the frame borders/padding and scrollbar outside the 72mm receipt. */}
+                  <div className="mx-auto" style={{ width: `calc(${THERMAL_PAPER_WIDTH_MM}mm + 46px)`, minWidth: `calc(${THERMAL_PAPER_WIDTH_MM}mm + 46px)` }}>
                     <div className="rounded-[28px] border border-slate-300 bg-white p-3 shadow-sm">
-                      <div className="grid grid-cols-[4mm_minmax(0,72mm)_4mm] overflow-hidden rounded-[20px] border border-slate-200 bg-white">
+                      <div className="grid grid-cols-[4mm_minmax(0,1fr)_4mm] overflow-hidden rounded-[20px] border border-slate-200 bg-white">
                         <div className="border-r border-dashed border-slate-200 bg-slate-50/80" />
                         <div className="bg-white">
                           <iframe

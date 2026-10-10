@@ -697,7 +697,7 @@ export function SearchPatientModal({
   }
 
   function planCompletedVisits(plan: TreatmentPlan) {
-    return getTreatmentPlanCompletedVisitCount(planVisitsCount(plan.id), !!plan.clinic_patient_file_id);
+    return getTreatmentPlanCompletedVisitCount(planVisitsCount(plan.id));
   }
 
   function startPlanPayment(plan: TreatmentPlan) {
@@ -2865,7 +2865,18 @@ export function ReceiptHistoryModal({
     });
   }
 
-  function printTreatmentPlanPaymentInvoice(record: TreatmentPlanPaymentRecord, plan: TreatmentPlan | null, allocations: TreatmentPlanPaymentAllocation[]) {
+  async function paymentInvoiceVisitCount(plan: TreatmentPlan | null, issuedAt: string | null | undefined) {
+    if (!plan) return null;
+    let query = supabase.from("treatment_plan_visits").select("id").eq("treatment_plan_id", plan.id);
+    if (issuedAt) query = query.lte("created_at", issuedAt);
+    const { data, error } = await query;
+    if (error) { alert("Could not confirm saved visits. Please retry the invoice."); return undefined; }
+    return data?.length || 0;
+  }
+
+  async function printTreatmentPlanPaymentInvoice(record: TreatmentPlanPaymentRecord, plan: TreatmentPlan | null, allocations: TreatmentPlanPaymentAllocation[]) {
+    const completedVisits = await paymentInvoiceVisitCount(plan, record.created_at);
+    if (completedVisits === undefined) return;
     const patient = patients.find((p) => p.id === record.patient_id);
     const receptionist = allReceptionists.find((r) => r.id === record.receptionist_id);
     const html = generateTreatmentPlanPaymentInvoiceHtml({
@@ -2893,13 +2904,15 @@ export function ReceiptHistoryModal({
       })),
       remainingAfterToday: remainingAfterPayment(plan, record.created_at),
       plannedVisits: plan?.planned_visits ?? null,
-      completedVisits: plan?.clinic_patient_file_id ? 1 : 0,
+      completedVisits,
       notes: plan?.notes || null,
     });
     printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
   }
 
   async function downloadTreatmentPlanPaymentInvoice(record: TreatmentPlanPaymentRecord, plan: TreatmentPlan | null, allocations: TreatmentPlanPaymentAllocation[]) {
+    const completedVisits = await paymentInvoiceVisitCount(plan, record.created_at);
+    if (completedVisits === undefined) return;
     const patient = patients.find((p) => p.id === record.patient_id);
     const receptionist = allReceptionists.find((r) => r.id === record.receptionist_id);
     const html = generateTreatmentPlanPaymentInvoiceHtml({
@@ -2927,7 +2940,7 @@ export function ReceiptHistoryModal({
       })),
       remainingAfterToday: remainingAfterPayment(plan, record.created_at),
       plannedVisits: plan?.planned_visits ?? null,
-      completedVisits: plan?.clinic_patient_file_id ? 1 : 0,
+      completedVisits,
       notes: plan?.notes || null,
     });
     printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");

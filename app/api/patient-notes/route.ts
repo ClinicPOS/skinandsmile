@@ -59,8 +59,13 @@ export async function POST(request: Request) {
   const patientId = String(body.patientId);
   const receiptId = body.receiptId ? String(body.receiptId) : null;
 
+  if (!(await canAccessPatientContext(supabase, session, patientId, clinicId))) {
+    return operationResponse(operationId, { error: "Forbidden for this clinic." }, 403);
+  }
+  const protectedClient = createProtectedDataClient();
+
   if (receiptId) {
-    const { data: receipt, error } = await supabase
+    const { data: receipt, error } = await protectedClient
       .from("receipts")
       .select("id, patient_id, clinic_id")
       .eq("id", receiptId)
@@ -81,7 +86,7 @@ export async function POST(request: Request) {
 
   let receptionistId = session.receptionistId;
   if (!receptionistId && body.receptionistId) {
-    const { data: receptionist } = await supabase
+    const { data: receptionist } = await protectedClient
       .from("receptionist")
       .select("id, clinic_id")
       .eq("id", String(body.receptionistId))
@@ -93,7 +98,7 @@ export async function POST(request: Request) {
   }
 
   if (body.doctorId && clinicId) {
-    const { data: doctor } = await supabase
+    const { data: doctor } = await protectedClient
       .from("doctors")
       .select("id, clinic_id")
       .eq("id", String(body.doctorId))
@@ -103,7 +108,7 @@ export async function POST(request: Request) {
     }
   }
 
-  const { data: note, error } = await createProtectedDataClient()
+  const { data: note, error } = await protectedClient
     .from("patient_notes")
     .insert([{
       patient_id: patientId,

@@ -1,4 +1,4 @@
-import { sessionStorageFetch } from "./session-storage";
+import { sessionStorageConfiguration, sessionStorageFetch } from "./session-storage";
 import { readNamedAccountAccess, type ManagerPermission } from './account-access';
 
 export const APP_AUTH_COOKIE_NAME = "app-auth";
@@ -83,6 +83,7 @@ export async function fetchActiveSession(token: string): Promise<ActiveSession |
   if(!session)return null;
   if(process.env.POS_NAMED_ADMIN_ONLY==='true'&&session.sessionMode==='manager'&&!session.accountId)return null;
   if(session.accountId){const account=await readNamedAccountAccess(session.accountId,session.clinicId);if(!account||account.role!==session.userRole)return null;return {...session,accountName:account.name,permissions:account.permissions};}
+  if(session.receptionistId){const {url,headers}=sessionStorageConfiguration();const r=await fetch(`${url}/rest/v1/receptionist?id=eq.${encodeURIComponent(session.receptionistId)}&clinic_id=eq.${encodeURIComponent(session.clinicId||'')}&select=is_active`,{headers,cache:'no-store'});if(!r.ok)return null;const records=await r.json();if(records.length!==1||records[0].is_active!==true)return null;}
   return session;
 }
 

@@ -3,8 +3,6 @@
 import Link from "next/link";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import {
-  A4_INVOICE_LOGO_BUCKET,
-  buildA4InvoiceLogoStoragePath,
   getA4InvoiceLogoSettings,
   getA4InvoiceTheme,
 } from "../../../lib/a4-invoice-branding";
@@ -63,15 +61,15 @@ function normalizeColor(value: string) {
   return /^#[0-9a-f]{6}$/i.test(trimmed) ? trimmed : null;
 }
 
-export default function A4InvoiceDesignPage() {
+export default function A4InvoiceDesignPage({fixedClinicId}:{fixedClinicId?:string} = {}) {
   return (
     <Suspense fallback={<div className="min-h-[240px]" />}>
-      <A4InvoiceDesignPageContent />
+      <A4InvoiceDesignPageContent fixedClinicId={fixedClinicId} />
     </Suspense>
   );
 }
 
-function A4InvoiceDesignPageContent() {
+function A4InvoiceDesignPageContent({fixedClinicId}:{fixedClinicId?:string}) {
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
@@ -154,7 +152,8 @@ function A4InvoiceDesignPageContent() {
 
     void (async () => {
       setIsLoading(true);
-      const { data, error } = await supabase.from("clinics").select("*").order("name");
+      const query = supabase.from("clinics").select("*").order("name");
+      const { data, error } = await (fixedClinicId ? query.eq("id",fixedClinicId) : query);
       setIsLoading(false);
 
       if (cancelled) return;
@@ -172,7 +171,7 @@ function A4InvoiceDesignPageContent() {
       const savedClinicId = typeof window !== "undefined"
         ? window.localStorage.getItem(BACKEND_SELECTED_CLINIC_KEY)
         : "";
-      const initialClinicId = [urlClinicId, savedClinicId, clinicRows[0]?.id || ""]
+      const initialClinicId = [fixedClinicId, urlClinicId, savedClinicId, clinicRows[0]?.id || ""]
         .find((clinicId) => clinicId && clinicRows.some((clinic) => clinic.id === clinicId)) || clinicRows[0]?.id || "";
 
       const initialClinic = clinicRows.find((clinic) => clinic.id === initialClinicId) || null;
@@ -183,7 +182,7 @@ function A4InvoiceDesignPageContent() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [fixedClinicId]);
 
   useEffect(() => {
     if (!selectedClinicId) return;
@@ -202,21 +201,7 @@ function A4InvoiceDesignPageContent() {
     }
 
     setIsUploadingLogo(true);
-    const uploadPath = buildA4InvoiceLogoStoragePath(selectedClinicId, file.name);
-    const { error: uploadError } = await supabase.storage.from(A4_INVOICE_LOGO_BUCKET).upload(uploadPath, file, {
-      cacheControl: "3600",
-      upsert: false,
-      contentType: file.type || undefined,
-    });
-    setIsUploadingLogo(false);
-
-    if (uploadError) {
-      alert(`Error uploading A4 logo: ${uploadError.message}`);
-      return;
-    }
-
-    const { data } = supabase.storage.from(A4_INVOICE_LOGO_BUCKET).getPublicUrl(uploadPath);
-    updateForm("a4_invoice_logo_url", data.publicUrl || "");
+    try{const formData=new FormData();formData.set('file',file);const response=await fetch(`/api/workspace/logo?clinicId=${selectedClinicId}`,{method:'POST',body:formData});const data=await response.json();if(!response.ok)throw Error(data.error);updateForm('a4_invoice_logo_url',data.url);}catch(e){alert(e instanceof Error?e.message:'Could not upload logo');}finally{setIsUploadingLogo(false);}
   }
 
   async function saveA4InvoiceSettings() {
@@ -259,7 +244,7 @@ function A4InvoiceDesignPageContent() {
     <div className="space-y-5">
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <Link
-          href="/backend"
+          href={fixedClinicId?"/clinic-admin":"/backend"}
           className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
         >
           ← Back to Backend
@@ -286,14 +271,14 @@ function A4InvoiceDesignPageContent() {
       <div className="rounded-3xl border border-slate-200 bg-white p-5">
         <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">A4-only branding controls</h2>
+            <h2 className="text-lg font-semibold text-slate-900">A4 invoice design</h2>
             <p className="mt-1 text-sm text-slate-500">
-              This page saves only <code>a4_invoice_*</code> fields. Thermal receipt and reprint branding stay on the shared receipt settings.
+              Choose the logo, colors and slogan used on this clinic’s A4 invoices.
             </p>
           </div>
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
-            <div className="font-semibold">Isolation check</div>
-            <div className="mt-1">Saving here never updates <code>logo</code>, <code>receipt_print_name</code>, or any thermal/shared receipt field.</div>
+            <div className="font-semibold">Separate print designs</div>
+            <div className="mt-1">Your thermal receipt design is managed in its own tab.</div>
           </div>
         </div>
 
@@ -307,7 +292,7 @@ function A4InvoiceDesignPageContent() {
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <h3 className="text-sm font-semibold text-slate-900">A4 logo</h3>
                 <p className="mt-1 text-xs text-slate-500">
-                  Uploads go to a dedicated A4 storage path and save only <code>a4_invoice_logo_url</code>.
+                  Upload a PNG or JPEG logo, up to 5 MB.
                 </p>
                 <div className="mt-3 space-y-3">
                   <input
@@ -319,7 +304,7 @@ function A4InvoiceDesignPageContent() {
                   <label className="flex cursor-pointer items-center justify-center rounded-2xl border border-dashed border-cyan-300 bg-cyan-50 px-4 py-3 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100">
                     <input
                       type="file"
-                      accept="image/*"
+                      accept="image/png,image/jpeg"
                       className="hidden"
                       onChange={(e) => {
                         const file = e.target.files?.[0];

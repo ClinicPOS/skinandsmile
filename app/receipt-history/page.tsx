@@ -443,7 +443,7 @@ export default function ReceiptHistoryPage() {
       const paymentRecord = treatmentPlanPaymentRecords.find((entry) => entry.id === selectedReceipt.id) || null;
       const plan = treatmentPlans.find((entry) => entry.id === paymentRecord?.treatment_plan_id) || null;
       const visitsCompleted = treatmentPlanVisits.filter((visit) => visit.treatment_plan_id === plan?.id).length;
-      const completedVisits = Math.max(visitsCompleted, plan?.clinic_patient_file_id ? 1 : 0);
+      const completedVisits = visitsCompleted;
       return generateTreatmentPlanPaymentInvoiceHtml({
         clinic: clinic as any,
         receiptNumber: selectedReceipt.title,

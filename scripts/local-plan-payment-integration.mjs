@@ -19,6 +19,7 @@ try{
  const concurrent=await Promise.all([pay({...payment,requestId:randomUUID(),amount:80}),pay({...payment,requestId:randomUUID(),amount:80})]);assert.deepEqual(concurrent.map(r=>r.status).sort(),[200,409]);
  const rows=await db(`treatment_plan_payment_records?treatment_plan_id=eq.${balance}&select=total_invoice_amount_settled`);assert.equal(rows.reduce((sum,r)=>sum+Number(r.total_invoice_amount_settled),0),130);
 
+ assert.equal((await db(`treatment_plan_visits?treatment_plan_id=eq.${balance}&select=id`)).length,0,'Payments do not create visits');
  assert.equal((await db(`activity_log?actor_id=eq.${rec}&action=eq.COLLECT_PLAN_PAYMENT&select=id`)).length,2);
  const anon={apikey:config.ANON_KEY,Authorization:`Bearer ${config.ANON_KEY}`,'Content-Type':'application/json'};const direct=await fetch(`${config.API_URL}/rest/v1/rpc/create_treatment_plan_payment_record_with_allocations`,{method:'POST',headers:anon,body:JSON.stringify({})});assert.notEqual(direct.status,200);
  const allocations=await db(`treatment_plan_payment_allocations?payment_id=in.(${(await db('treatment_plan_payment_records?treatment_plan_id=eq.'+balance+'&select=id')).map(r=>r.id).join(',')})&select=fee_amount,customer_charged_amount`);assert.ok(allocations.every(r=>Number(r.fee_amount)===0));assert.equal(allocations.reduce((sum,r)=>sum+Number(r.customer_charged_amount),0),130);

@@ -11,6 +11,11 @@ export async function GET(request: Request) {
   if (session.sessionMode === "clinic" ? session.clinicId !== clinicId : !!ensureManagerSession(session)) {
     return Response.json({ error: "Forbidden for this clinic." }, { status: 403 });
   }
+  const requestedParam = new URL(request.url).searchParams.get("patientIds");
+  const patientFilter = requestedParam === null ? null : [...new Set(requestedParam.split(","))];
+  if (patientFilter && (patientFilter.length > 200 || patientFilter.some(id => !isUuid(id)))) {
+    return Response.json({ error: "Valid patient IDs are required (maximum 200)." }, { status: 400 });
+  }
   try {
     const client = createProtectedDataClient();
     const ids = new Set<string>();
@@ -29,6 +34,7 @@ export async function GET(request: Request) {
       for (let offset = 0; ; offset += 500) {
         let query = client.from(table).select(table === "clinic_patient_files" ? "id, patient_id, file_no" : "id, patient_id").order("id").range(offset, offset + 499);
         query = table === "receipts" ? query.or(receiptScope) : query.eq("clinic_id", clinicId);
+        if (patientFilter) query = query.in("patient_id", patientFilter);
         const { data, error } = await query;
         if (error) throw error;
         for (const row of (data || []) as unknown as Array<{ patient_id: string; file_no?: string }>) {

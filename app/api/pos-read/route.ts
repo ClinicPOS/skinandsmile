@@ -40,10 +40,10 @@ export async function POST(request:Request){
  if(session&&!owner&&session.userRole!=='receptionist'&&session.userRole!=='clinic_manager'&&body.table!=='clinics')return Response.json({message:'Forbidden.'},{status:403});
  if(session?.userRole==='clinic_manager'){
   const access=await readNamedAccountAccess(session.accountId!,session.clinicId);
-  const permission=body.table==='doctors'?'doctors':body.table==='services'?'services':'reports';
+  const permission=body.table==='doctors'?'doctors':body.table==='services'?'services':body.table==='receptionist'?'receptionists':body.table==='clinics'&&access?.permissions.includes('receipt_design')?'receipt_design':'reports';
   if(!access?.permissions.includes(permission))return Response.json({message:'Forbidden.'},{status:403});
  }
- if(body.table==='receptionist')query.set('select','id,name,clinic_id,shift');
+ if(body.table==='receptionist')query.set('select','id,name,clinic_id,shift,is_active');
  if(parents[body.table]&&query.has('clinic_id')){
   const filter=query.get('clinic_id')!;
   if(!filter.startsWith('eq.')||!isUuid(filter.slice(3)))return Response.json({message:'Invalid clinic filter.'},{status:400});

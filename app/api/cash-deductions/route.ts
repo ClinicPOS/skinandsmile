@@ -152,12 +152,7 @@ export async function POST(request: Request) {
     return Response.json({ error: insertError?.message || "Failed saving cash deduction." }, { status: 500 });
   }
 
-  await supabase.from("cash_deduction_events").insert([{
-    deduction_id: insertedRow.id,
-    action: "created",
-    changed_by: context.receptionistId,
-    next_data: insertedRow,
-  }]);
+  // Activity logging is atomic in the database trigger.
 
   const entries = await listCashDeductions(supabase, registerSessionId);
   const updatedCashCollected = await computeRegisterSessionCashCollected(supabase, context);

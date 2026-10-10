@@ -192,7 +192,7 @@ type ReportsSessionResponse = {
   accessLabel?: string;
 };
 
-type DashboardTab = "overview" | "clinics_doctors" | "trends_demand" | "services" | "payments";
+type DashboardTab = "overview" | "clinics_doctors" | "doctors" | "trends_demand" | "services" | "payments";
 type ReportsQuickPreset =
   | "today"
   | "yesterday"
@@ -213,10 +213,11 @@ type ReportsDateSelection = {
 
 const TABS: Array<{ id: DashboardTab; label: string }> = [
   { id: "overview", label: "Overview" },
-  { id: "clinics_doctors", label: "Clinics & Doctors" },
+  { id: "clinics_doctors", label: "Clinic performance" },
+  { id: "doctors", label: "Doctor ranking" },
   { id: "trends_demand", label: "Trends" },
   { id: "services", label: "Services" },
-  { id: "payments", label: "Payments" },
+  { id: "payments", label: "Payment breakdown" },
 ];
 
 const QUICK_PRESETS: Array<{ id: ReportsQuickPreset; label: string }> = [
@@ -563,7 +564,7 @@ function renderExportHtml(data: DashboardResponse, clinicLabel: string, currentR
       </div>
       <h2>Clinic Comparison</h2>
       <table>
-        <thead><tr><th>Clinic</th><th>Net Sales</th><th>Expected Target</th><th>Target Attainment</th><th>Status</th></tr></thead>
+        <thead><tr><th>Clinic</th><th>Net collections</th><th>Expected Target</th><th>Target Attainment</th><th>Status</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="5">No data</td></tr>`}</tbody>
       </table>
     </body>
@@ -966,17 +967,17 @@ export default function ReportsPage() {
     XLSX.utils.book_append_sheet(workbook, summarySheet, "Executive Summary");
 
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
-      ["Clinic", "Status", "Net Sales", "Expected Target", "Target Attainment %", "Previous Period Change %", "Unique Patients", "Avg Net Sales / Patient"],
+      ["Clinic", "Status", "Net collections", "Expected Target", "Target Attainment %", "Previous Period Change %", "Unique Patients", "Average collections / patient"],
       ...data.clinicPerformance.map((row) => [row.clinicName, statusLabel(row.status), row.netSales, row.expectedTarget ?? "", row.targetAttainment ?? "", row.previousPeriodChangePercent ?? "", row.uniquePatients, row.averageNetSalesPerPatient]),
     ]), "Clinic Comparison");
 
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
-      ["Doctor", "Clinic", "Unique Patients", "Completed Visits", "Net Sales", "Avg Net Sales / Patient"],
+      ["Doctor", "Clinic", "Unique Patients", "Completed Visits", "Ranking credit", "Average credit / patient"],
       ...data.doctorPerformance.map((row) => [row.doctorName, row.clinicName, row.uniquePatients, row.completedVisits, row.netSales, row.averageNetSalesPerPatient]),
     ]), "Doctor Performance");
 
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
-      ["Month", "Net Sales", "Target", "Previous Year", "Below Target"],
+      ["Month", "Net collections", "Target", "Previous Year", "Below Target"],
       ...data.trends.monthly.map((row) => [row.month, row.netSales, row.target ?? "", row.previousYear ?? "", row.belowTarget == null ? "" : row.belowTarget ? "Yes" : "No"]),
     ]), "Monthly Trends");
 
@@ -1130,19 +1131,20 @@ export default function ReportsPage() {
 
   return (
     <ReportsFrame>
+      <div className="grid items-start gap-5 md:grid-cols-[190px_minmax(0,1fr)]"><aside className="rounded-2xl bg-slate-950 p-4 text-white md:sticky md:top-5 md:self-start"><p className="px-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-300">Executive reports</p><nav aria-label="CEO dashboard navigation" className="mt-3 flex flex-wrap gap-1 md:flex-col">{TABS.map(entry=><button key={entry.id} type="button" aria-current={tab===entry.id?'page':undefined} onClick={()=>setTab(entry.id)} className={`rounded-xl px-3 py-3 text-left text-sm font-medium transition ${tab===entry.id?'bg-cyan-900 text-white ring-1 ring-cyan-700':'text-slate-300 hover:bg-slate-800 hover:text-white'}`}>{entry.label}</button>)}</nav><p className="mt-5 hidden border-t border-slate-800 px-3 pt-4 text-xs leading-relaxed text-slate-400 md:block">Choose a clinic and period. The same filters apply to every report.</p></aside><div className="min-w-0 space-y-5">
       <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-teal-700">{accessLabel}</p>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">CEO Dashboard</h1>
-            <p className="mt-1 text-sm text-slate-500">Live performance across all clinics</p>
+            <p className="mt-1 text-sm text-slate-500">Collections, clinic performance and doctor rankings</p>
             <p className="mt-3 text-sm font-medium text-slate-700">
               {clinicLabel} • {selectedRangeLabel}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">Live</span>
+            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">Reporting</span>
             {lastUpdated ? (
               <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
                 Updated {new Date(lastUpdated).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
@@ -1203,7 +1205,7 @@ export default function ReportsPage() {
           selectedLabel={selectedRangeLabel}
           comparisonLabel={comparisonRangeLabel}
           activePreset={dateSelection.preset}
-          quickPresets={QUICK_PRESETS}
+          quickPresets={QUICK_PRESETS.filter(preset => ['today','yesterday','this_month','last_month'].includes(preset.id))}
           refreshing={refreshing}
           disableNext={!canMoveForward}
           onPresetSelect={handlePresetSelect}
@@ -1226,22 +1228,6 @@ export default function ReportsPage() {
         ) : null}
       </div>
 
-      <div className="grid auto-cols-max grid-flow-col gap-2 overflow-x-auto rounded-3xl border border-slate-200 bg-slate-50 p-1.5">
-        {TABS.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            onClick={() => setTab(entry.id)}
-            className={`rounded-2xl px-4 py-2 text-sm font-semibold transition ${
-              tab === entry.id
-                ? "bg-teal-700 text-white shadow-sm"
-                : "bg-white text-slate-600 hover:border-teal-200 hover:text-teal-800"
-            }`}
-          >
-            {entry.label}
-          </button>
-        ))}
-      </div>
 
       {error ? (
         <div className="rounded-3xl border border-rose-200 bg-rose-50 p-4 shadow-sm">
@@ -1275,10 +1261,11 @@ export default function ReportsPage() {
             <div className="space-y-5">
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 <ExecutiveKpiCard
-                  title="Net Sales"
+                  title="Net collections"
                   value={formatCurrency(data.overview?.netSales ?? null)}
                   comparison={netSalesComparison.text}
                   comparisonTone={netSalesComparison.tone}
+                  note="Money collected minus refunds"
                 />
                 <ExecutiveKpiCard
                   title="Target Attainment"
@@ -1296,7 +1283,7 @@ export default function ReportsPage() {
                 <ExecutiveKpiCard
                   title="Completed Visits"
                   value={String(data.overview?.completedVisits ?? 0)}
-                  note="Comparison is not currently returned by the dashboard API."
+                  note="Saved visits in the selected period"
                 />
                 <ExecutiveKpiCard
                   title="Average per Patient"
@@ -1312,12 +1299,13 @@ export default function ReportsPage() {
                 />
               </div>
 
+              <AttentionPanel items={data.attentionItems} />
               <ManagementSnapshotStrip items={managementSnapshot} />
 
               <div className="grid gap-4 xl:grid-cols-[minmax(0,1.9fr)_minmax(320px,1fr)]">
                 <SectionCard
                   title="Sales Performance"
-                  description="Net sales, target, and target attainment by clinic."
+                  description="Net collections and target progress by clinic."
                 >
                   {sortedClinicPerformance.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
@@ -1354,7 +1342,7 @@ export default function ReportsPage() {
                               contentStyle={{ borderRadius: "16px", border: "1px solid #e2e8f0", fontSize: 12 }}
                             />
                             <Legend wrapperStyle={{ fontSize: 12 }} />
-                            <Bar dataKey="netSales" name="Net Sales" fill="#0f766e" radius={[0, 6, 6, 0]} />
+                            <Bar dataKey="netSales" name="Net collections" fill="#0f766e" radius={[0, 6, 6, 0]} />
                             <Bar dataKey="expectedTarget" name="Expected Target" fill="#94a3b8" radius={[0, 6, 6, 0]} />
                           </BarChart>
                         </ResponsiveContainer>
@@ -1365,7 +1353,7 @@ export default function ReportsPage() {
                           <thead>
                             <tr className="text-left text-xs uppercase tracking-[0.15em] text-slate-500">
                               <th className="pb-2 pr-4 font-semibold">Clinic</th>
-                              <th className="pb-2 pr-4 font-semibold">Net Sales</th>
+                              <th className="pb-2 pr-4 font-semibold">Net collections</th>
                               <th className="pb-2 pr-4 font-semibold">Target</th>
                               <th className="pb-2 font-semibold">Target %</th>
                             </tr>
@@ -1393,7 +1381,7 @@ export default function ReportsPage() {
 
               <SectionCard
                 title="Cash Management"
-                description="Cash collected minus active commissions and expenses for the selected period."
+                description="Cash collected minus cash refunds, commissions and expenses for the selected period."
                 actions={(
                   <button
                     type="button"
@@ -1502,15 +1490,14 @@ export default function ReportsPage() {
                 ))}
               </div>
 
-              <AttentionPanel items={data.attentionItems} />
             </div>
           ) : null}
 
-          {tab === "clinics_doctors" ? (
+          {tab === "clinics_doctors" || tab === "doctors" ? (
             <div className="space-y-5">
-              <SectionCard
+              {tab === "clinics_doctors" && <SectionCard
                 title="Clinic Comparison"
-                description="Net sales, target pace, previous-period movement, and patient mix by clinic."
+                description="Money collected minus refunds, targets and patient activity by clinic."
               >
                 {data.clinicPerformance.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
@@ -1523,7 +1510,7 @@ export default function ReportsPage() {
                         <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-[0.15em] text-slate-500">
                           <th className="px-4 py-3 font-semibold">Clinic</th>
                           <th className="px-4 py-3 font-semibold">Status</th>
-                          <th className="px-4 py-3 font-semibold">Net Sales</th>
+                          <th className="px-4 py-3 font-semibold">Net collections</th>
                           <th className="px-4 py-3 font-semibold">Target</th>
                           <th className="px-4 py-3 font-semibold">Attainment</th>
                           <th className="px-4 py-3 font-semibold">vs Previous</th>
@@ -1568,9 +1555,9 @@ export default function ReportsPage() {
                     </table>
                   </div>
                 )}
-              </SectionCard>
+              </SectionCard>}
 
-              <SectionCard title="Doctor Performance" description="Doctor-level performance from receipts that include doctor assignments.">
+              {tab === "doctors" && <><AttentionPanel items={data.attentionItems.filter(item=>/doctor|ranking|treatment-plan/i.test(item))} /><SectionCard title="Doctor ranking" description="Ranking credit from recorded doctor assignments. Treatment-plan credit with an unresolved split stays pending and is excluded.">
                 {data.doctorPerformance.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center">
                     <p className="text-sm font-medium text-slate-700">No doctor performance data is available for this period.</p>
@@ -1585,7 +1572,7 @@ export default function ReportsPage() {
                           <th className="px-4 py-3 font-semibold">Clinic</th>
                           <th className="px-4 py-3 font-semibold">Patients</th>
                           <th className="px-4 py-3 font-semibold">Visits</th>
-                          <th className="px-4 py-3 font-semibold">Net Sales</th>
+                          <th className="px-4 py-3 font-semibold">Ranking credit</th>
                           <th className="px-4 py-3 font-semibold">Avg / Patient</th>
                         </tr>
                       </thead>
@@ -1604,7 +1591,7 @@ export default function ReportsPage() {
                     </table>
                   </div>
                 )}
-              </SectionCard>
+              </SectionCard></>}
             </div>
           ) : null}
 
@@ -1653,7 +1640,7 @@ export default function ReportsPage() {
                         contentStyle={{ borderRadius: "16px", border: "1px solid #e2e8f0", fontSize: 12 }}
                       />
                       <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-                      <Area type="monotone" dataKey="netSales" stroke="#0f766e" strokeWidth={2.5} fill="url(#gradNetSales)" name="Net Sales" dot={{ r: 3, fill: "#0f766e" }} activeDot={{ r: 5 }} />
+                      <Area type="monotone" dataKey="netSales" stroke="#0f766e" strokeWidth={2.5} fill="url(#gradNetSales)" name="Net collections" dot={{ r: 3, fill: "#0f766e" }} activeDot={{ r: 5 }} />
                       <Line type="monotone" dataKey="target" stroke="#0284c7" strokeWidth={2} strokeDasharray="6 3" name="Target" dot={false} />
                       {showSalesTrendPreviousYear ? (
                         <Line type="monotone" dataKey="previousYear" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="4 4" name="Previous Year" dot={false} />
@@ -1849,6 +1836,7 @@ export default function ReportsPage() {
           ) : null}
         </div>
       ) : null}
+      </div></div>
     </ReportsFrame>
   );
 }

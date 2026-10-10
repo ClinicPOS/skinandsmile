@@ -38,7 +38,7 @@ export function ClinicRankingCard({ rows, formatCurrency }: ClinicRankingCardPro
       <div className="flex items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold text-slate-950">Clinic Performance</h3>
-          <p className="mt-1 text-xs text-slate-500">Ranked by net sales for the selected period.</p>
+          <p className="mt-1 text-xs text-slate-500">Ranked by net collections for the selected period.</p>
         </div>
       </div>
 

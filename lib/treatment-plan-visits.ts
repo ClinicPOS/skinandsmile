@@ -1,11 +1,10 @@
 export function getTreatmentPlanCompletedVisitCount(
   recordedVisitCount: number,
-  hasImportedVisit: boolean
+  _hasImportedVisit?: boolean
 ): number {
-  return Math.max(
-    Math.max(0, Math.trunc(Number(recordedVisitCount) || 0)),
-    hasImportedVisit ? 1 : 0
-  );
+  // A clinic file identifies the patient; it is not a completed visit.
+  // Historical visits already have their own saved rows.
+  return Math.max(0, Math.trunc(Number(recordedVisitCount) || 0));
 }
 
 export function hasReachedTreatmentPlanVisitLimit(

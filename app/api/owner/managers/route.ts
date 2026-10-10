@@ -21,3 +21,10 @@ export async function POST(request:Request){const {session,error}=await authoriz
  return Response.json({saved:true,accountId:id,...(temporaryPassword?{temporaryPassword}:{})},{headers:{'Cache-Control':'no-store'}});
  }catch{return Response.json({error:'Manager setup could not complete. Refresh and check for a disabled account before retrying.'},{status:503});}
 }
+
+export async function DELETE(request:Request){
+ const {session,error}=await authorizeWorkspace(null,undefined,true);if(error||!session)return error!;
+ const b=await request.json().catch(()=>null);if(!isUuid(b?.accountId)||typeof b?.reason!=='string'||b.reason.trim().length<3||b.reason.length>1000)return Response.json({error:'Select a manager and enter a reason.'},{status:400});
+ const result=await createProtectedDataClient().rpc('owner_disable_manager',{p_owner_id:session.accountId,p_account_id:b.accountId,p_reason:b.reason.trim()});
+ return result.error?Response.json({error:'Could not remove access.'},{status:400}):Response.json({disabled:true},{headers:{'Cache-Control':'no-store'}});
+}

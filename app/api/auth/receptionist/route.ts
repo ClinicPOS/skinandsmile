@@ -12,9 +12,9 @@ export async function POST(request:Request){
  const attemptKey=loginAttemptKey('receptionist-pin',session.token+'\0'+body.receptionistId);
  const accountKey=loginAttemptKey('receptionist-account-pin',session.clinicId+'\0'+body.receptionistId);
  try{const attempt=await consumeLoginAttempt(attemptKey,5);const accountAttempt=await consumeLoginAttempt(accountKey,10);if(!attempt.allowed||!accountAttempt.allowed)return Response.json({error:'Too many PIN attempts. Try again in five minutes.'},{status:429});}catch{return Response.json({error:'PIN verification is unavailable. Try again.'},{status:503});}
- const db=createProtectedDataClient();const {data,error}=await db.from('receptionist').select('id,clinic_id,pin').eq('id',body.receptionistId).eq('clinic_id',session.clinicId!).maybeSingle();
+ const db=createProtectedDataClient();const {data,error}=await db.from('receptionist').select('id,clinic_id,pin,is_active').eq('id',body.receptionistId).eq('clinic_id',session.clinicId!).maybeSingle();
  if(error)return Response.json({error:'Could not verify receptionist. Try again.'},{status:503});
- if(!data||!data.pin||String(data.pin)!==body.pin)return Response.json({error:'Invalid receptionist or PIN.'},{status:403});
+ if(!data||data.is_active===false||!data.pin||String(data.pin)!==body.pin)return Response.json({error:'Invalid receptionist or PIN.'},{status:403});
  if(session.receptionistId&&session.receptionistId!==data.id)return Response.json({error:'Sign out before changing receptionist.'},{status:409});
  const saved=await sessionStorageFetch(`?token=eq.${encodeURIComponent(session.token)}`,{method:'PATCH',body:JSON.stringify({receptionist_id:data.id})});
  if(!saved.ok)return Response.json({error:'Could not save receptionist login. Try again.'},{status:503});

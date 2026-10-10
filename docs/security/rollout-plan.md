@@ -1,5 +1,7 @@
 # POS database security rollout preparation
 
+Historical preparation document. For the applied live release and current remaining checks, see [live-release-2026-10-10.md](live-release-2026-10-10.md).
+
 Status: session, clinical-note and patient-access stages are implemented and tested locally. Three permission migrations have been applied only to disposable local Supabase. Production deployment is not approved; financial access, production credentials and recovery verification remain release gates.
 
 ## Confirmed starting point

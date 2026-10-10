@@ -25,6 +25,11 @@ export async function POST(request:Request){const body=await request.json().catc
   if(key.endsWith('_color')&&value!=null&&(typeof value!=='string'||!/^#[0-9a-fA-F]{6}$/.test(value)))return Response.json({error:'Choose a valid color.'},{status:400});
   if(['receipt_qr_url','a4_invoice_logo_url'].includes(key)&&value){try{const url=new URL(String(value));if(!['https:'].includes(url.protocol)&&!(process.env.NODE_ENV!=='production'&&url.protocol==='http:'&&['127.0.0.1','localhost'].includes(url.hostname)))throw Error();if(/["'\s]/.test(String(value)))throw Error();}catch{return Response.json({error:'Use a valid secure web address.'},{status:400});}}
  }
+ if(kind==='services'){
+  if(data.pricing_type!=null&&!['fixed','variable'].includes(data.pricing_type))return Response.json({error:'Select fixed or range pricing.'},{status:400});
+  if(data.tooth_selection_mode!=null&&!['none','optional','required'].includes(data.tooth_selection_mode))return Response.json({error:'Invalid tooth selection.'},{status:400});
+  if(data.pricing_type==='variable'&&(typeof data.min_price!=='number'||typeof data.max_price!=='number'||data.min_price>data.max_price||typeof data.price!=='number'||data.price<data.min_price||data.price>data.max_price))return Response.json({error:'Minimum must not exceed maximum. Default price must be within the range.'},{status:400});
+ }
  if(kind==='services'&&body.action==='create'&&(typeof data.price!=='number'||![0,0.05].includes(data.vat_rate)))return Response.json({error:'Service price and VAT are required.'},{status:400});
  try{const {data:saved,error:saveError}=await createProtectedDataClient().rpc('manage_clinic_catalog',{p_account_id:session.accountId,p_clinic_id:body.clinicId,p_kind:kind,p_action:body.action,p_entity_id:body.action==='create'?null:body.id,p_data:data,p_reason:body.reason.trim()});
  if(saveError)return Response.json({error:saveError.code==='42501'?'Permission changed. Sign in again.':saveError.code==='P0002'?'Record not found in this clinic.':'Fields could not be saved. Check values and clinic ownership.'},{status:saveError.code==='42501'?403:saveError.code==='P0002'?404:400});

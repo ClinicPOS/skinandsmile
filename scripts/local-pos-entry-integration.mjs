@@ -18,6 +18,19 @@ try{
  assert.equal((await db(`treatment_plans?id=eq.${plan.requestId}&select=id`)).length,1);
  assert.equal((await db(`treatment_plan_visits?treatment_plan_id=eq.${plan.requestId}&select=id`)).length,2);
  assert.equal((await post({...plan,data:{...plan.data,title:'Changed'}})).status,409);
+ const freshPlan={requestId:randomUUID(),kind:'plan',data:{patient_id:patient,clinic_id:clinic,title:'TEST new five-visit plan',total_amount:200,planned_visits:5}};
+ assert.equal((await post(freshPlan)).status,200);
+ assert.equal((await db(`treatment_plan_visits?treatment_plan_id=eq.${freshPlan.requestId}&select=id`)).length,0,'New plans start with zero visits');
+ const visitDoctor=randomUUID();
+ await db('doctors',{method:'POST',body:JSON.stringify({id:visitDoctor,clinic_id:clinic,name:'TEST five-visit doctor',is_active:true})});
+ for(let count=1;count<=5;count++){
+  const response=await post({treatmentPlanId:freshPlan.requestId,requestId:randomUUID(),doctorId:visitDoctor,notes:'TEST saved visit '+count},token,'/api/treatment-plan-visits');
+  assert.equal(response.status,200,await response.clone().text());const saved=await response.json();
+  assert.equal(saved.completedVisits,count);assert.equal(saved.visit.visit_number,count);assert.equal(saved.visit.doctor_id,visitDoctor);
+  assert.equal(saved.plan.status,count===5?'Completed':'Active');
+ }
+ assert.equal((await post({treatmentPlanId:freshPlan.requestId,requestId:randomUUID(),doctorId:visitDoctor},token,'/api/treatment-plan-visits')).status,409);
+ await db(`doctors?id=eq.${visitDoctor}`,{method:'PATCH',body:JSON.stringify({is_active:false})});
  const deposit={requestId:randomUUID(),kind:'deposit',data:{patient_id:patient,clinic_id:clinic,amount:50,register_session_id:register,payment_method:'Cash',reason:'TEST protected deposit'}};
  for(const r of await Promise.all([post(deposit),post(deposit)]))assert.equal(r.status,200,await r.clone().text());
  assert.equal((await db(`patient_credits?id=eq.${deposit.requestId}&select=id`)).length,1);

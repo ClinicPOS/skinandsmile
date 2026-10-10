@@ -556,8 +556,7 @@ export default function ReceiptsPage() {
   const router = useRouter();
 
   const visibleReceptionists = useMemo(() => {
-    if (!allowedClinicId) return receptionists;
-    return receptionists.filter((person) => person.clinic_id === allowedClinicId);
+    return receptionists.filter((person) => person.is_active !== false && (!allowedClinicId || person.clinic_id === allowedClinicId));
   }, [receptionists, allowedClinicId]);
 
   const clinicCommissionStaff = useMemo(() => {
@@ -1844,6 +1843,8 @@ export default function ReceiptsPage() {
 
     if (receptionistsError) {
       console.error("Failed loading clinic receptionists", receptionistsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
       alert("Could not prepare report. Please try again.");
       return;
     }
@@ -1868,6 +1869,8 @@ export default function ReceiptsPage() {
 
     if (receiptsError) {
       console.error("Failed loading receipts for report", receiptsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
       alert("Could not load receipts for this report.");
       return;
     }
@@ -1890,6 +1893,8 @@ export default function ReceiptsPage() {
       .order("created_at", { ascending: true });
     if (paymentRecordsError) {
       console.warn("Failed loading payment records for report", paymentRecordsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
     } else {
       paymentRecordsForDay = (paymentRecordsData || []) as PaymentRecord[];
       paymentRecordsForDay.forEach((row) => {
@@ -1906,6 +1911,8 @@ export default function ReceiptsPage() {
         ]);
         if (allocRes.error) {
           console.warn("Failed loading payment allocations for report", allocRes.error);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
         } else {
           paymentAllocationsForDay = (allocRes.data || []) as PaymentAllocation[];
           const receiptIdByPaymentId = new Map<string, string>();
@@ -1923,6 +1930,8 @@ export default function ReceiptsPage() {
         }
         if (refundRes.error) {
           console.warn("Failed loading allocation refunds for report", refundRes.error);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
         } else {
           paymentAllocationRefundsForDay = (refundRes.data || []) as PaymentAllocationRefund[];
         }
@@ -1982,6 +1991,8 @@ export default function ReceiptsPage() {
 
       if (doctorsError) {
         console.error("Failed loading doctors for report", doctorsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
       } else {
         (doctorsData || []).forEach((doctor) => {
           doctorMap.set(String(doctor.id), String(doctor.name || ""));
@@ -1998,6 +2009,8 @@ export default function ReceiptsPage() {
 
       if (receiptItemsError) {
         console.error("Failed loading receipt items for report", receiptItemsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
       } else {
         const serviceIds = [...new Set((receiptItemsData || []).map((item) => item.service_id).filter(Boolean))];
         const serviceNameMap = new Map<string, string>();
@@ -2010,6 +2023,8 @@ export default function ReceiptsPage() {
 
           if (servicesError) {
             console.error("Failed loading services for report", servicesError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
           } else {
             (servicesData || []).forEach((service) => {
               serviceNameMap.set(String(service.id), String(service.name || ""));
@@ -2122,6 +2137,8 @@ export default function ReceiptsPage() {
         .in("id", [...refundReceiptIds]);
       if (refundReceiptError) {
         console.warn("Failed loading refund receipt metadata", refundReceiptError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
       } else {
         const refundReceiptMap = new Map<string, { created_at: string | null }>();
         (refundReceiptRows || []).forEach((receipt) => {
@@ -2169,6 +2186,8 @@ export default function ReceiptsPage() {
       .lte("created_at", endUtcIso);
     if (balancePaymentsError) {
       console.warn("Failed loading balance payments for report", balancePaymentsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
     } else {
       balanceCollectionsTotal = (balancePaymentsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
       cashBalanceCollectionsTotal = (balancePaymentsData || []).reduce(
@@ -2190,6 +2209,8 @@ export default function ReceiptsPage() {
       .lte("created_at", endUtcIso);
     if (depositsError) {
       console.warn("Failed loading patient deposits for report", depositsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
     } else {
       depositsReceivedTotal = (depositsData || []).reduce((s, p) => s + Number(p.amount || 0), 0);
       cashDepositsReceivedTotal = (depositsData || []).reduce(
@@ -2207,19 +2228,15 @@ export default function ReceiptsPage() {
       .eq("business_date", reportBusinessDate)
       .eq("status", "active")
       .order("created_at", { ascending: true });
-    if (cashDeductionError && cashDeductionError.code !== "42P01") {
+    if (cashDeductionError) {
       console.warn("Failed loading cash deductions for report", cashDeductionError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
     } else {
       activeCashDeductions = (cashDeductionData || []) as CashDeduction[];
     }
 
-    let planPatientDetails: Map<string, any>;
-    try {
-      planPatientDetails = new Map((await loadClinicHistoryPatients(activeClinic.id)).map(patient => [patient.id, patient]));
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Treatment-plan patient details could not be loaded.");
-      return;
-    }
+    let planPatientDetails = new Map<string, any>();
     const treatmentPlanRows: Array<(string | number)[]> = [];
     const treatmentPlanPaymentSummaries: Array<{
       methodVariant: PaymentMethodVariant;
@@ -2247,6 +2264,8 @@ export default function ReceiptsPage() {
       .order("created_at", { ascending: true });
     if (treatmentPlansCreatedError) {
       console.warn("Failed loading treatment plans created today", treatmentPlansCreatedError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
     } else {
       (treatmentPlansCreatedData || []).forEach((plan: any) => {
         treatmentPlansById.set(String(plan.id), plan);
@@ -2262,6 +2281,8 @@ export default function ReceiptsPage() {
       .lte("created_at", endUtcIso);
     if (treatmentPlanVisitsTodayError) {
       console.warn("Failed loading treatment plan visits today", treatmentPlanVisitsTodayError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
     } else {
       (treatmentPlanVisitsTodayData || []).forEach((visit: any) => {
         const planId = String(visit.treatment_plan_id || "");
@@ -2283,6 +2304,8 @@ export default function ReceiptsPage() {
       .order("created_at", { ascending: true });
     if (treatmentPlanPaymentRecordsError) {
       console.warn("Failed loading treatment plan payment records for report", treatmentPlanPaymentRecordsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
     } else {
       treatmentPlanPaymentRecordsForDay = (treatmentPlanPaymentRecordsData || []) as Array<(TreatmentPlanPaymentRecord & { treatment_plans?: any; patients?: any })>;
       treatmentPlanCollectionsTotal = treatmentPlanPaymentRecordsForDay.reduce((sum, payment) => sum + Number(payment.total_customer_charged_amount || 0), 0);
@@ -2299,6 +2322,8 @@ export default function ReceiptsPage() {
           .in("payment_id", treatmentPlanPaymentRecordIds);
         if (treatmentPlanPaymentAllocationsError) {
           console.warn("Failed loading treatment plan payment allocations for report", treatmentPlanPaymentAllocationsError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
         } else {
           treatmentPlanPaymentAllocationsForDay = (treatmentPlanPaymentAllocationsData || []) as TreatmentPlanPaymentAllocation[];
           treatmentPlanPaymentAllocationsForDay.forEach((allocation) => {
@@ -2324,6 +2349,8 @@ export default function ReceiptsPage() {
           .order("created_at", { ascending: true });
         if (missingPlansError) {
           console.warn("Failed loading treatment plan details for report", missingPlansError);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
         } else {
           (missingPlansData || []).forEach((plan: any) => {
             treatmentPlansById.set(String(plan.id), plan);
@@ -2350,9 +2377,13 @@ export default function ReceiptsPage() {
 
       if (allPlanPaymentRecordsResult.error) {
         console.warn("Failed loading structured treatment-plan payments for report", allPlanPaymentRecordsResult.error);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
       }
       if (allLegacyPlanPaymentsResult.error) {
         console.warn("Failed loading legacy treatment-plan payments for report", allLegacyPlanPaymentsResult.error);
+      alert("Required report data could not be loaded. EOD was not exported. Please retry.");
+      return;
       }
       const structuredPayments = (allPlanPaymentRecordsResult.data || []) as TreatmentPlanPaymentRecord[];
       const legacyPayments = (allLegacyPlanPaymentsResult.data || []) as Array<{
@@ -2371,11 +2402,24 @@ export default function ReceiptsPage() {
           asOf: endUtcIso,
         }));
       });
+      if (allPlanVisitsResult.error) { alert("Treatment visits could not be loaded. EOD was not exported. Please retry."); return; }
       if (!allPlanVisitsResult.error) {
         (allPlanVisitsResult.data || []).forEach((visit: any) => {
           const planId = String(visit.treatment_plan_id || "");
           treatmentPlanVisitCounts.set(planId, (treatmentPlanVisitCounts.get(planId) || 0) + 1);
         });
+      }
+
+      const reportPatientIds = [...new Set([
+        ...[...treatmentPlansById.values()].map(plan => String(plan.patient_id)),
+        ...treatmentPlanPaymentRecordsForDay.map(payment => String(payment.patient_id)),
+      ])];
+      try {
+        planPatientDetails = new Map((await loadClinicHistoryPatients(activeClinic.id, reportPatientIds)).map(patient => [patient.id, patient]));
+        if (reportPatientIds.some(id => !planPatientDetails.has(id))) throw new Error("Some treatment-plan patient details are missing. Please retry the export.");
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "Treatment-plan patient details could not be loaded.");
+        return;
       }
 
       [...treatmentPlansById.values()].forEach((plan: any) => {
@@ -2384,10 +2428,7 @@ export default function ReceiptsPage() {
         const totalAmount = Number(plan.total_amount || 0);
         const rollup = treatmentPlanRollups.get(planId) || computeTreatmentPlanRollup(plan, { asOf: endUtcIso });
         const paidToDate = rollup.totalPaidToDate;
-        const completedVisits = Math.max(
-          treatmentPlanVisitCounts.get(planId) || 0,
-          plan?.clinic_patient_file_id ? 1 : 0
-        );
+        const completedVisits = (treatmentPlanVisitCounts.get(planId) || 0);
         treatmentPlanRows.push([
           new Date(plan.created_at || now).toLocaleTimeString("en-US", {
             timeZone: "Asia/Dubai",
@@ -2509,10 +2550,7 @@ export default function ReceiptsPage() {
         });
       });
 
-      const completedVisits = Math.max(
-        treatmentPlanVisitCounts.get(planId) || 0,
-        plan?.clinic_patient_file_id ? 1 : 0
-      );
+      const completedVisits = (treatmentPlanVisitCounts.get(planId) || 0);
       treatmentPlanPaymentRows.push([
         new Date(payment.created_at || now).toLocaleTimeString("en-US", {
           timeZone: "Asia/Dubai",
@@ -4076,7 +4114,9 @@ export default function ReceiptsPage() {
     if (patientIdToPersist) {
       const patientSaveResult = await savePatientDetails(patientIdToPersist);
       if (!patientSaveResult.ok) {
-        console.warn("Patient details could not be fully saved before receipt completion.");
+        alert("The patient details could not be saved. Payment has not been processed. Please retry saving the patient details first.");
+        setIsSavingReceipt(false);
+        return false;
       }
     }
 
