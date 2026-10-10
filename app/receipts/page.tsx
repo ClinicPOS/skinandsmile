@@ -2255,13 +2255,32 @@ export default function ReceiptsPage() {
     let treatmentPlanPaymentAllocationsForDay: TreatmentPlanPaymentAllocation[] = [];
     const treatmentPlanAllocationsByPaymentId = new Map<string, TreatmentPlanPaymentAllocation[]>();
 
-    const { data: treatmentPlansCreatedData, error: treatmentPlansCreatedError } = await supabase
+    const [
+      { data: treatmentPlansCreatedData, error: treatmentPlansCreatedError },
+      { data: treatmentPlanVisitsTodayData, error: treatmentPlanVisitsTodayError },
+      { data: treatmentPlanPaymentRecordsData, error: treatmentPlanPaymentRecordsError }
+    ] = await Promise.all([
+      supabase
       .from("treatment_plans")
       .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, cancelled_at")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: true }),
+      supabase
+      .from("treatment_plan_visits")
+      .select("treatment_plan_id")
+      .in("receptionist_id", receptionistIds)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso),
+      supabase
+      .from("treatment_plan_payment_records")
+      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid)")
+      .eq("clinic_id", activeClinic.id)
+      .gte("created_at", startUtcIso)
+      .lte("created_at", endUtcIso)
+      .order("created_at", { ascending: true })
+    ]);
     if (treatmentPlansCreatedError) {
       console.warn("Failed loading treatment plans created today", treatmentPlansCreatedError);
       alert("Required report data could not be loaded. EOD was not exported. Please retry.");
@@ -2273,12 +2292,7 @@ export default function ReceiptsPage() {
       });
     }
 
-    const { data: treatmentPlanVisitsTodayData, error: treatmentPlanVisitsTodayError } = await supabase
-      .from("treatment_plan_visits")
-      .select("treatment_plan_id")
-      .in("receptionist_id", receptionistIds)
-      .gte("created_at", startUtcIso)
-      .lte("created_at", endUtcIso);
+
     if (treatmentPlanVisitsTodayError) {
       console.warn("Failed loading treatment plan visits today", treatmentPlanVisitsTodayError);
       alert("Required report data could not be loaded. EOD was not exported. Please retry.");
@@ -2295,13 +2309,7 @@ export default function ReceiptsPage() {
     // again on every visit.
     let treatmentPlanCollectionsTotal = 0;
     let treatmentPlanInitialSalesTotal = 0;
-    const { data: treatmentPlanPaymentRecordsData, error: treatmentPlanPaymentRecordsError } = await supabase
-      .from("treatment_plan_payment_records")
-      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid)")
-      .eq("clinic_id", activeClinic.id)
-      .gte("created_at", startUtcIso)
-      .lte("created_at", endUtcIso)
-      .order("created_at", { ascending: true });
+
     if (treatmentPlanPaymentRecordsError) {
       console.warn("Failed loading treatment plan payment records for report", treatmentPlanPaymentRecordsError);
       alert("Required report data could not be loaded. EOD was not exported. Please retry.");
@@ -2416,6 +2424,9 @@ export default function ReceiptsPage() {
       ])];
       try {
         planPatientDetails = new Map((await loadClinicHistoryPatients(activeClinic.id, reportPatientIds)).map(patient => [patient.id, patient]));
+        for (const patient of planPatientDetails.values()) {
+          if (patient.clinic_file_no) clinicFileNumbers.set(String(patient.id), String(patient.clinic_file_no));
+        }
         if (reportPatientIds.some(id => !planPatientDetails.has(id))) throw new Error("Some treatment-plan patient details are missing. Please retry the export.");
       } catch (error) {
         alert(error instanceof Error ? error.message : "Treatment-plan patient details could not be loaded.");

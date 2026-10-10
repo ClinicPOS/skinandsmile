@@ -1,0 +1,15 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+import ts from 'typescript';
+const exports={};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/clinic-file-numbers.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports});
+const ids=Array.from({length:401},(_,i)=>'patient-'+i);
+let calls=0,fail=false;
+const client={from(table){assert.equal(table,'clinic_patient_files');let batch;const q={select(){return q},eq(key,value){assert.equal(key,'clinic_id');assert.equal(value,'clinic-a');return q},order(){return q},range(){return q},in(key,value){assert.equal(key,'patient_id');assert.ok(value.length<=200);batch=value;return q},then(resolve){calls++;resolve(fail?{error:{message:'unavailable'}}:{data:batch.map(id=>({patient_id:id,file_no:'007'})),error:null})}};return q}};
+const result=await exports.loadClinicFileNumbers(client,'clinic-a',ids);
+assert.equal(calls,3);assert.equal(result.size,401);
+assert.ok([...result.values()].every(value=>value==='007'));
+calls=0;assert.equal((await exports.loadClinicFileNumbers(client,'clinic-a',[])).size,0);assert.equal(calls,0);
+fail=true;await assert.rejects(exports.loadClinicFileNumbers(client,'clinic-a',[ids[0]]),/could not be loaded/);
+console.log('PASS: file lookup batches all 401 requested patients, retains leading zeros, skips empty reports and fails closed on read errors.');

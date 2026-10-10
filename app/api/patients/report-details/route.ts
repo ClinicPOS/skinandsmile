@@ -49,7 +49,7 @@ export async function POST(request: Request) {
       if (error) throw error;
       patients.push(...(data || []));
     }
-    const files = await loadClinicFileNumbers(client, clinicId);
+    const files = await loadClinicFileNumbers(client, clinicId, ids);
     return Response.json({ patients, fileNumbers: Array.from(files) }, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return Response.json({ error: "Patient details for the report could not be loaded. Please try again." }, { status: 503 });
