@@ -67,6 +67,12 @@ export function createEodReadFetch(network: typeof fetch = fetch): typeof fetch 
           url.searchParams.set("offset", String(offset));
           url.searchParams.set("limit", String(pageSize));
           const response = await network(url, { ...init, headers, cache: "no-store" });
+          // Existing scoped helpers ask for the next page to detect completion.
+          // With an exact count, PostgREST can signal that empty page as 416.
+          const emptyRange = response.headers.get("content-range")?.match(/^\*\/(\d+)$/);
+          if (response.status === 416 && rows.length === 0 && emptyRange && start >= Number(emptyRange[1])) {
+            return Response.json([], { headers: { "Cache-Control": "no-store", "Content-Range": response.headers.get("content-range")! } });
+          }
           if (!response.ok) return response;
           const page = await response.json();
           if (!Array.isArray(page)) throw new Error("Unexpected EOD database response.");

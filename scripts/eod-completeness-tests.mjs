@@ -21,6 +21,9 @@ const rows=await (await reader(url)).json();assert.equal(rows.length,2301);asser
 const count=requests.length;assert.deepEqual(await (await reader(url)).json(),rows);assert.equal(requests.length,count,'Identical reads are shared only within this request');
 await exports.createEodReadFetch(network)(url);assert.ok(requests.length>count,'A new export must read fresh data');
 const range=await (await reader(url+'&offset=5&limit=7')).json();assert.equal(range.length,7);assert.equal(range[0].id,'5');
+const emptyReader=exports.createEodReadFetch(async()=>Response.json({code:'PGRST103'},{status:416,headers:{'Content-Range':'*/1000'}}));
+assert.deepEqual(await (await emptyReader(url+'&offset=1000&limit=500')).json(),[],'An exact full final page must finish successfully');
+assert.equal((await emptyReader(url+'&offset=500&limit=500')).status,416,'Unexpected out-of-range errors must still fail closed');
 failPage=true;assert.equal((await exports.createEodReadFetch(network)(url)).status,503,'A failed later page must not return partial records');failPage=false;
 omitCount=true;await assert.rejects(exports.createEodReadFetch(network)(url),/completeness/);omitCount=false;
 await assert.rejects(reader(url,{method:'POST'}),/reads only/);
