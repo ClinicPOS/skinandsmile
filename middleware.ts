@@ -23,6 +23,8 @@ function isPublicPath(pathname: string) {
   return PUBLIC_PAGE_PATHS.has(pathname)
     // This route permits only clinic names without login; all other reads verify sessions itself.
     || pathname === '/api/pos-read'
+    // This endpoint verifies the current session and clinic itself, once per export.
+    || pathname === '/api/workspace/eod-export'
     || pathname.startsWith("/images/")
     || pathname.startsWith("/fonts/")
     || PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))

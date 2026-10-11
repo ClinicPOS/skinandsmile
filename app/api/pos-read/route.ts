@@ -1,6 +1,5 @@
 import {createProtectedDataClient} from '../../../lib/protected-data-server';
 import {readAppSession} from '../../../lib/api-session';
-import {readNamedAccountAccess} from '../../../lib/account-access';
 import {isUuid} from '../../../lib/patient-mutation-validation';
 import {serverApiKeyHeaders} from '../../../lib/server-api-key-headers';
 export const dynamic='force-dynamic';
@@ -39,9 +38,10 @@ export async function POST(request:Request){
  let owner=session?.userRole==='owner';
  if(session&&!owner&&session.userRole!=='receptionist'&&session.userRole!=='clinic_manager'&&body.table!=='clinics')return Response.json({message:'Forbidden.'},{status:403});
  if(session?.userRole==='clinic_manager'){
-  const access=await readNamedAccountAccess(session.accountId!,session.clinicId);
-  const permission=body.table==='doctors'?'doctors':body.table==='services'?'services':body.table==='receptionist'?'receptionists':body.table==='clinics'&&access?.permissions.includes('receipt_design')?'receipt_design':'reports';
-  if(!access?.permissions.includes(permission))return Response.json({message:'Forbidden.'},{status:403});
+  // readAppSession already verified current account and clinic permissions for this request.
+  const access=session;
+  const permission=body.table==='doctors'?'doctors':body.table==='services'?'services':body.table==='receptionist'?'receptionists':body.table==='clinics'&&access.permissions?.includes('receipt_design')?'receipt_design':'reports';
+  if(!access.permissions?.includes(permission))return Response.json({message:'Forbidden.'},{status:403});
  }
  if(body.table==='receptionist')query.set('select','id,name,clinic_id,shift,is_active');
  if(parents[body.table]&&query.has('clinic_id')){

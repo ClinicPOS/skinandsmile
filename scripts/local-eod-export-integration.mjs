@@ -18,7 +18,10 @@ const localFetch=async (input,init={})=>{
  const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
  const resolved=url.startsWith('/')?`http://127.0.0.1:3001${url}`:url;
  assert.ok(resolved.startsWith(status.API_URL+'/')||resolved.startsWith('http://127.0.0.1:3001/'),'Remote network access is forbidden');
- if(resolved.startsWith('http://127.0.0.1:3001/'))return fetch(resolved,{...init,headers:{...init.headers,Cookie:`app-auth=${token}`}});
+ if(resolved.startsWith('http://127.0.0.1:3001/')){
+  if(new URL(resolved).pathname==='/api/workspace/eod-export')init={...init,body:JSON.stringify({...JSON.parse(init.body),day:process.env.LOCAL_EOD_REPORT_DAY||'2026-10-07'})};
+  return fetch(resolved,{...init,headers:{...init.headers,Cookie:`app-auth=${token}`}});
+ }
  const parsed=new URL(resolved);if(process.env.LOCAL_EOD_FAIL_TABLE && parsed.pathname==='/rest/v1/'+process.env.LOCAL_EOD_FAIL_TABLE)return Response.json({message:'Injected local read failure',code:'TEST'},{status:503});if(parsed.pathname.startsWith('/rest/v1/')&&(!init.method||init.method==='GET'||init.method==='HEAD')){const h=new Headers(init.headers);return fetch('http://127.0.0.1:3001/api/pos-read',{method:'POST',headers:{'Content-Type':'application/json',Cookie:'app-auth='+token},body:JSON.stringify({table:parsed.pathname.slice('/rest/v1/'.length),query:parsed.search.slice(1),range:h.get('range'),accept:h.get('accept'),count:h.get('prefer')?.includes('count=exact')?'exact':null})});}
  return fetch(resolved,init);
 };
@@ -45,7 +48,7 @@ const alerts=[];
 const reportDay=process.env.LOCAL_EOD_REPORT_DAY||'2026-10-07';assert.match(reportDay,/^\d{4}-\d{2}-\d{2}$/);
 const reportStart=new Date(`${reportDay}T00:00:00+04:00`).toISOString(),reportEnd=new Date(Date.parse(reportStart)+86400000-1).toISOString();
 class ReportDate extends Date {constructor(...args){super(...(args.length?args:[`${reportDay}T08:00:00Z`]));}static now(){return Date.parse(`${reportDay}T08:00:00Z`);}}
- const scope={exports:{},supabase:client,activeClinic:{id:clinic,name:'TEST ONLY CLINIC A'},XLSX:{...XLSX,writeFile:wb=>{workbook=wb;}},fetch:localFetch,alert:message=>alerts.push(message),console,Date:ReportDate,Intl,Response,URL,URLSearchParams,process:{env:{}},crypto:webcrypto};
+ const scope={exports:{},supabase:client,activeClinic:{id:clinic,name:'TEST ONLY CLINIC A'},isDownloadingEod:false,setIsDownloadingEod:()=>{},performance,Error,XLSX:{...XLSX,writeFile:wb=>{workbook=wb;}},fetch:localFetch,alert:message=>alerts.push(message),console,Date:ReportDate,Intl,Response,URL,URLSearchParams,process:{env:{}},crypto:webcrypto};
 scope.roundCurrency=loadModule(path.resolve('lib/money.ts')).roundCurrency;
 const names=new Set(['computeTreatmentPlanRollup','extractLegacyCashAmount','getBusinessDayKeyForReporting','getPaymentBreakdownForReporting','getDubaiBusinessDate','getInstallmentFeeProvider','paymentVariantLabel','reportClinicFileNumber','summarizeStoredAllocationCollectionsForReporting','summarizeStoredAllocationRowsForReporting','truncateCurrency','parsePaymentMethodBreakdown','loadClinicHistoryPatients']);
 for(const statement of source.statements){
@@ -61,7 +64,11 @@ const program=ts.transpileModule(`${helpers}\n${target.getText(source)}\nexports
 vm.runInNewContext(program,scope);
 try{
  await rest('active_sessions',{method:'POST',body:JSON.stringify({token,session_mode:'clinic',clinic_id:clinic,user_role:'receptionist',created_at:new Date().toISOString()})});
+ scope.activeClinic.name=(await (await rest(`clinics?id=eq.${clinic}&select=name`)).json())[0].name;
+ const exportStarted=performance.now();
  await scope.exports.run();
+ const preparationMs=Math.round(performance.now()-exportStarted);
+ if(process.env.LOCAL_EOD_TIMING_OUTPUT)fs.writeFileSync(process.env.LOCAL_EOD_TIMING_OUTPUT,JSON.stringify({preparationMs,reportDay,source:process.env.LOCAL_EOD_SOURCE?'previous browser reads':'single server request'}));
  if(process.env.LOCAL_EOD_FAIL_TABLE){
    assert.equal(workbook,undefined,'Failed required read must prevent export');
    assert.ok(alerts.some(message=>message.includes('not exported')||message.includes('Could not load')));
