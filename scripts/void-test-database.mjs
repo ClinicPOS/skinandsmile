@@ -33,7 +33,7 @@ export async function createVoidTestDatabase() {
   await db.exec(fs.readFileSync('supabase/migrations/20261008185229_lock_checkout_register.sql','utf8'));
   await db.exec(fs.readFileSync('supabase/migrations/20261008040000_protected_balance_payment.sql','utf8'));
   await db.exec(fs.readFileSync('supabase/migrations/20261008180415_protected_plan_payment.sql','utf8'));
-  for (const file of ['20261007162150_activity_log_and_correction_approvers.sql','20261007180412_approved_receipt_refunds.sql','20261007215053_receipt_corrections_and_eod_status.sql','20261008010000_whole_receipt_void.sql','20261012171650_safe_receipt_void.sql']) {
+  for (const file of ['20261007162150_activity_log_and_correction_approvers.sql','20261007180412_approved_receipt_refunds.sql','20261007215053_receipt_corrections_and_eod_status.sql','20261008010000_whole_receipt_void.sql','20261012180113_safe_receipt_void_20261012.sql']) {
     try { await db.exec(fs.readFileSync(`supabase/migrations/${file}`,'utf8')); }
     catch(error) { throw new Error(`${file}: ${error.message}`, {cause:error}); }
   }
