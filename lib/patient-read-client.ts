@@ -1,8 +1,8 @@
 import type { Patient } from "./types";
 import type { ClinicPatientFileRecord } from "./clinic-patient-files";
 
-export async function loadClinicPatientRecords(clinicId: string): Promise<{ patients: Patient[]; files: ClinicPatientFileRecord[] }> {
-  const response = await fetch(`/api/patients/clinic-records?${new URLSearchParams({ clinicId })}`, { cache: "no-store" });
+export async function loadClinicPatientRecords(clinicId: string, patientIds?: string[]): Promise<{ patients: Patient[]; files: ClinicPatientFileRecord[] }> {
+  const response = await fetch(`/api/patients/clinic-records?${new URLSearchParams({ clinicId, ...(patientIds ? {patientIds: patientIds.join(",")} : {}) })}`, { cache: "no-store" });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || "Clinic patient records could not be loaded.");
   return body;
@@ -40,8 +40,8 @@ export async function loadClinicHistoryPatients(clinicId?: string | null, patien
   return body.patients;
 }
 
-export async function loadClinicFileIndex(clinicId?: string | null): Promise<ClinicPatientFileRecord[]> {
-  if (clinicId) return (await loadClinicPatientRecords(clinicId)).files;
+export async function loadClinicFileIndex(clinicId?: string | null, patientIds?: string[]): Promise<ClinicPatientFileRecord[]> {
+  if (clinicId) return (await loadClinicPatientRecords(clinicId, patientIds)).files;
   const response = await fetch("/api/admin/clinic-files", { cache: "no-store" });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || "Clinic files could not be loaded.");

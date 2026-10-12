@@ -328,6 +328,7 @@ export function SearchPatientModal({
 }) {
   const [view, setView] = useState<"search" | "profile">("search");
   const [query, setQuery] = useState("");
+  const [patientDisplayLimit, setPatientDisplayLimit] = useState(100);
   const [selectedPatient, setSelectedPatient] = useState<FullPatient | null>(null);
   const [showEditModal, setShowEditModal] = useState(false);
   const [notes, setNotes] = useState<PatientNote[]>([]);
@@ -381,6 +382,7 @@ export function SearchPatientModal({
   const [visitNotes, setVisitNotes] = useState("");
   const [savingTreatmentVisit, setSavingTreatmentVisit] = useState(false);
   const visitRequest = useRef<{ fingerprint: string; id: string } | null>(null);
+  const profileLoadGeneration = useRef(0);
   const [paymentPlanId, setPaymentPlanId] = useState<string | null>(null);
   const [planPaymentAmount, setPlanPaymentAmount] = useState("");
   const [planPaymentMode, setPlanPaymentMode] = useState<PlanPaymentMode>("Cash");
@@ -389,6 +391,7 @@ export function SearchPatientModal({
   const [savingTreatmentPayment, setSavingTreatmentPayment] = useState(false);
 
   useEffect(() => {
+    if (!isOpen) profileLoadGeneration.current++;
     if (isOpen) {
       setQuery("");
       setExpandedNoteIds(new Set());
@@ -724,6 +727,7 @@ export function SearchPatientModal({
   }
 
   async function openProfile(patient: FullPatient) {
+    const generation = ++profileLoadGeneration.current;
     setSelectedPatient(patient);
     setView("profile");
     setIsLoadingProfile(true);
@@ -745,125 +749,99 @@ export function SearchPatientModal({
     setExpandedProfileSections(new Set());
     resetTreatmentPlanForms();
 
-    const notesQuery = loadPatientNotes(patient.id);
+    try {
+      const notesQuery = loadPatientNotes(patient.id);
 
-    let plansQuery = supabase
-      .from("treatment_plans")
-      .select("*")
-      .eq("patient_id", patient.id)
-      .order("created_at", { ascending: false });
-    if (clinicId) plansQuery = plansQuery.eq("clinic_id", clinicId);
+      let plansQuery = supabase
+        .from("treatment_plans")
+        .select("*")
+        .eq("patient_id", patient.id)
+        .order("created_at", { ascending: false });
+      if (clinicId) plansQuery = plansQuery.eq("clinic_id", clinicId);
 
-    const [notesResult, doctorsResult, receptionistsResult, clinicsResult, allReceptionistsResult, receiptsResult, servicesResult, plansResult, historicalVisitsResult] = await Promise.all([
-      notesQuery,
-      supabase.from("doctors").select("id, name, clinic_id, is_active"),
-      supabase.from("receptionist").select("id, name"),
-      supabase.from("clinics").select("id, name"),
-      clinicId
-        ? supabase.from("receptionist").select("id, clinic_id")
-        : Promise.resolve({ data: [] as { id: string; clinic_id: string | null }[] }),
-      supabase.from("receipts").select("*").eq("patient_id", patient.id).order("created_at", { ascending: false }),
-      supabase.from("services").select("id, name, price, clinic_id"),
-      plansQuery,
-      patient.clinic_patient_file_id
-        ? supabase
-            .from("patient_treatment_visits")
-            .select("id, visit_date, treatment_description, fee_aed, original_dentist_name, visit_sequence")
-            .eq("patient_file_id", patient.clinic_patient_file_id)
-            .order("visit_date", { ascending: false })
-        : Promise.resolve({ data: [] as HistoricalVisit[] }),
-    ]);
-
-    let receiptsQuery = supabase
-      .from("receipts")
-      .select("created_at")
-      .eq("patient_id", patient.id)
-      .order("created_at", { ascending: false })
-      .limit(1);
-    // receptionist_id is a uuid — an .eq() sentinel would 400, so skip the
-    // query entirely when the clinic has no receptionists.
-    let skipLastVisit = false;
-    if (clinicId) {
-      const ids = receptionistIdsForClinic(
-        (allReceptionistsResult.data as { id: string; clinic_id: string | null }[]) || [],
-        clinicId
-      );
-      if (ids.length === 0) {
-        skipLastVisit = true;
-      } else {
-        receiptsQuery = receiptsQuery.in("receptionist_id", ids);
-      }
-    }
-    const lastVisitResult = skipLastVisit
-      ? { data: [] as { created_at: string }[] }
-      : await receiptsQuery;
-
-    let scopedProfileReceipts = (receiptsResult.data as Receipt[]) || [];
-    if (clinicId) {
-      const ids = new Set(
-        receptionistIdsForClinic(
-          (allReceptionistsResult.data as { id: string; clinic_id: string | null }[]) || [],
-          clinicId
-        )
-      );
-      scopedProfileReceipts = ids.size === 0
-        ? []
-        : scopedProfileReceipts.filter((receipt) => receipt.receptionist_id != null && ids.has(receipt.receptionist_id));
-    }
-
-    let profileItemsData: ReceiptItem[] = [];
-    const profileReceiptIds = scopedProfileReceipts.map((receipt) => receipt.id);
-    if (profileReceiptIds.length > 0) {
-      const { data: itemsData } = await supabase
-        .from("receipt_items")
-        .select("receipt_id, service_id, quantity, price, total")
-        .in("receipt_id", profileReceiptIds);
-      profileItemsData = (itemsData as ReceiptItem[]) || [];
-    }
-
-    const plansData = (plansResult.data as TreatmentPlan[]) || [];
-    let visitsData: TreatmentPlanVisit[] = [];
-    let paymentsData: TreatmentPlanPayment[] = [];
-    let paymentRecordsData: TreatmentPlanPaymentRecord[] = [];
-    const planIds = plansData.map((plan) => plan.id);
-    if (planIds.length > 0) {
-      const [visitsResult, paymentsResult, paymentRecordsResult] = await Promise.all([
-        supabase
-          .from("treatment_plan_visits")
-          .select("*")
-          .in("treatment_plan_id", planIds)
-          .order("visit_number", { ascending: false }),
-        supabase
-          .from("treatment_plan_payments")
-          .select("*").neq("status", "cancelled")
-          .in("treatment_plan_id", planIds)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("treatment_plan_payment_records")
-          .select("*")
-          .in("treatment_plan_id", planIds)
-          .order("created_at", { ascending: false }),
+      const [notesResult, doctorsResult, receptionistsResult, clinicsResult, receiptsResult, servicesResult, plansResult, historicalVisitsResult] = await Promise.all([
+        notesQuery,
+        supabase.from("doctors").select("id, name, clinic_id, is_active"),
+        supabase.from("receptionist").select("id, name, clinic_id"),
+        supabase.from("clinics").select("id, name"),
+        supabase.from("receipts").select("*").eq("patient_id", patient.id).order("created_at", { ascending: false }),
+        supabase.from("services").select("id, name, price, clinic_id"),
+        plansQuery,
+        patient.clinic_patient_file_id
+          ? supabase
+              .from("patient_treatment_visits")
+              .select("id, visit_date, treatment_description, fee_aed, original_dentist_name, visit_sequence")
+              .eq("patient_file_id", patient.clinic_patient_file_id)
+              .order("visit_date", { ascending: false })
+          : Promise.resolve({ data: [] as HistoricalVisit[] }),
       ]);
-      visitsData = (visitsResult.data as TreatmentPlanVisit[]) || [];
-      paymentsData = (paymentsResult.data as TreatmentPlanPayment[]) || [];
-      paymentRecordsData = (paymentRecordsResult.data as TreatmentPlanPaymentRecord[]) || [];
-    }
+      if (generation !== profileLoadGeneration.current) return;
 
-    if (notesResult.error) alert("Clinical notes could not be loaded. Please refresh before adding or editing notes.");
-    setNotes((notesResult.data as PatientNote[]) || []);
-    setProfileReceipts(scopedProfileReceipts);
-    setProfileReceiptItems(profileItemsData);
-    setProfileServices((servicesResult.data as LookupItem[]) || []);
-    setTreatmentPlans(plansData);
-    setTreatmentPlanVisits(visitsData);
-    setTreatmentPlanPayments(paymentsData);
-    setTreatmentPlanPaymentRecords(paymentRecordsData);
-    setDoctors((doctorsResult.data as LookupItem[]) || []);
-    setReceptionists((receptionistsResult.data as LookupItem[]) || []);
-    setClinics((clinicsResult.data as LookupItem[]) || []);
-    setLastVisit(lastVisitResult.data?.[0]?.created_at || null);
-    setHistoricalVisits((historicalVisitsResult.data as HistoricalVisit[]) || []);
-    setIsLoadingProfile(false);
+      let scopedProfileReceipts = (receiptsResult.data as Receipt[]) || [];
+      if (clinicId) {
+        const ids = new Set(
+          receptionistIdsForClinic(
+            (receptionistsResult.data as { id: string; clinic_id: string | null }[]) || [],
+            clinicId
+          )
+        );
+        scopedProfileReceipts = ids.size === 0
+          ? []
+          : scopedProfileReceipts.filter((receipt) => receipt.receptionist_id != null && ids.has(receipt.receptionist_id));
+      }
+
+      const plansData = (plansResult.data as TreatmentPlan[]) || [];
+      const profileReceiptIds = scopedProfileReceipts.map((receipt) => receipt.id);
+      const planIds = plansData.map((plan) => plan.id);
+      // Keep this bounded lookup: the receipt list can be capped by the data API.
+      const clinicReceptionistIds = receptionistIdsForClinic(
+        (receptionistsResult.data as { id: string; clinic_id: string | null }[]) || [],
+        clinicId || ""
+      );
+      let lastVisitQuery = supabase.from("receipts").select("created_at")
+        .eq("patient_id", patient.id).order("created_at", { ascending: false }).limit(1);
+      if (clinicId && clinicReceptionistIds.length) {
+        lastVisitQuery = lastVisitQuery.in("receptionist_id", clinicReceptionistIds);
+      }
+      // Receipt details and plan details depend on the first batch, but not on each other.
+      const [itemsResult, visitsResult, paymentsResult, paymentRecordsResult, lastVisitResult] = await Promise.all([
+        profileReceiptIds.length
+          ? supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total").in("receipt_id", profileReceiptIds)
+          : Promise.resolve({ data: [] }),
+        planIds.length
+          ? supabase.from("treatment_plan_visits").select("*").in("treatment_plan_id", planIds).order("visit_number", { ascending: false })
+          : Promise.resolve({ data: [] }),
+        planIds.length
+          ? supabase.from("treatment_plan_payments").select("*").neq("status", "cancelled").in("treatment_plan_id", planIds).order("created_at", { ascending: false })
+          : Promise.resolve({ data: [] }),
+        planIds.length
+          ? supabase.from("treatment_plan_payment_records").select("*").in("treatment_plan_id", planIds).order("created_at", { ascending: false })
+          : Promise.resolve({ data: [] }),
+        clinicId && !clinicReceptionistIds.length ? Promise.resolve({ data: [] }) : lastVisitQuery,
+      ]);
+      if (generation !== profileLoadGeneration.current) return;
+
+      if (notesResult.error) alert("Clinical notes could not be loaded. Please refresh before adding or editing notes.");
+      setNotes((notesResult.data as PatientNote[]) || []);
+      setProfileReceipts(scopedProfileReceipts);
+      setProfileReceiptItems((itemsResult.data as ReceiptItem[]) || []);
+      setProfileServices((servicesResult.data as LookupItem[]) || []);
+      setTreatmentPlans(plansData);
+      setTreatmentPlanVisits((visitsResult.data as TreatmentPlanVisit[]) || []);
+      setTreatmentPlanPayments((paymentsResult.data as TreatmentPlanPayment[]) || []);
+      setTreatmentPlanPaymentRecords((paymentRecordsResult.data as TreatmentPlanPaymentRecord[]) || []);
+      setDoctors((doctorsResult.data as LookupItem[]) || []);
+      setReceptionists((receptionistsResult.data as LookupItem[]) || []);
+      setClinics((clinicsResult.data as LookupItem[]) || []);
+      setLastVisit(lastVisitResult.data?.[0]?.created_at || null);
+      setHistoricalVisits((historicalVisitsResult.data as HistoricalVisit[]) || []);
+    } catch (error) {
+      if (generation === profileLoadGeneration.current) {
+        alert(error instanceof Error ? error.message : "Patient profile could not be loaded. Please try again.");
+      }
+    } finally {
+      if (generation === profileLoadGeneration.current) setIsLoadingProfile(false);
+    }
   }
 
   function toggleNote(id: string) {
@@ -1269,7 +1247,7 @@ export function SearchPatientModal({
               <input
                 type="text"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => {setQuery(e.target.value);setPatientDisplayLimit(100);}}
                 placeholder="Search by name, phone, email, Emirates ID, passport…"
                 className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
                 autoFocus
@@ -1278,7 +1256,7 @@ export function SearchPatientModal({
                 {filteredPatients.length === 0 && (
                   <p className="py-6 text-center text-sm text-slate-400">No patients found</p>
                 )}
-                {filteredPatients.map((patient) => {
+                {filteredPatients.slice(0,patientDisplayLimit).map((patient) => {
                   const owed = outstandingByPatient.get(patient.id);
                   return (
                     <button
@@ -1305,6 +1283,7 @@ export function SearchPatientModal({
                     </button>
                   );
                 })}
+                {filteredPatients.length>patientDisplayLimit&&<button type="button" className="rounded border px-4 py-2" onClick={()=>setPatientDisplayLimit(value=>value+100)}>Show more patients ({filteredPatients.length-patientDisplayLimit} remaining)</button>}
               </div>
 
             </div>

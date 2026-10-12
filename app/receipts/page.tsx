@@ -1,4 +1,5 @@
 "use client";
+import { patientDetailChanges } from "../../lib/patient-detail-changes";
 import {savePosPreference} from "../../lib/pos-preference-client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -458,6 +459,12 @@ export default function ReceiptsPage() {
   const [, setShowPrintModal] = useState(false);
   const [isSavingReceipt, setIsSavingReceipt] = useState(false);
   const checkoutRequest = useRef<{ id: string; clinicId: string } | null>(null);
+  const patientLoadGeneration = useRef(0);
+  const pendingPatientLoad = useRef<{
+    clinicId: string;
+    session: typeof accessSession;
+    promise: ReturnType<typeof loadClinicPatientRecords>;
+  } | null>(null);
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
   const [isDownloadingEod, setIsDownloadingEod] = useState(false);
   const [isPosUnlocked, setIsPosUnlocked] = useState(false);
@@ -917,6 +924,7 @@ export default function ReceiptsPage() {
   }
 
   async function loadClinicScopedPatientData(clinicId: string | null | undefined) {
+    const generation = ++patientLoadGeneration.current;
     if (!clinicId) {
       setClinicPatientFiles([]);
       setPatients([]);
@@ -924,10 +932,23 @@ export default function ReceiptsPage() {
     }
 
     try {
-      const records = await loadClinicPatientRecords(clinicId);
+      // Share only an overlapping load in this page and session, never cached patient data.
+      let pending = pendingPatientLoad.current;
+      if (!pending || pending.clinicId !== clinicId || pending.session !== accessSession) {
+        pending = { clinicId, session: accessSession, promise: loadClinicPatientRecords(clinicId) };
+        pendingPatientLoad.current = pending;
+      }
+      let records;
+      try {
+        records = await pending.promise;
+      } finally {
+        if (pendingPatientLoad.current === pending) pendingPatientLoad.current = null;
+      }
+      if (generation !== patientLoadGeneration.current) return;
       setClinicPatientFiles(records.files);
       setPatients(records.patients);
     } catch (error) {
+      if (generation !== patientLoadGeneration.current) return;
       setClinicPatientFiles([]);
       setPatients([]);
       alert(error instanceof Error ? error.message : "Clinic patient records could not be loaded.");
@@ -935,6 +956,7 @@ export default function ReceiptsPage() {
   }
 
   async function loadData(initialClinicId?: string | null) {
+    const patientLoad = loadClinicScopedPatientData(initialClinicId || allowedClinicId || null);
     const [
       doctorResult,
       receptionistResult,
@@ -985,7 +1007,7 @@ export default function ReceiptsPage() {
       setPatientCredits((patientCreditsResult.value.data || []) as PatientCredit[]);
     }
 
-    await loadClinicScopedPatientData(initialClinicId || allowedClinicId || null);
+    await patientLoad;
   }
 
   async function refetchBalancePayments() {
@@ -1513,9 +1535,10 @@ export default function ReceiptsPage() {
     }
 
     const payload = buildPatientDetailsPayload();
-    const sanitizedPayload = Object.fromEntries(
-      Object.entries(payload).filter(([, value]) => value !== null && value !== "")
-    ) as Record<string, string>;
+    const sanitizedPayload = patientDetailChanges(
+      patients.find(patient => patient.id === patientIdToSave),
+      Object.fromEntries(Object.entries(payload).filter(([,value]) => value !== null && value !== "")) as Record<string,string>
+    );
 
     if (Object.keys(sanitizedPayload).length === 0) {
       return { ok: true as const, error: null as Error | null };

@@ -1,0 +1,21 @@
+{
+  "environment": "Local synthetic data; actual profile function; 25 ms per mocked query. Not deployed latency.",
+  "before": {
+    "medianMs": 124.51,
+    "dataRequests": 13
+  },
+  "after": {
+    "medianMs": 65.66,
+    "dataRequests": 12
+  },
+  "checks": [
+    "matching profile data",
+    "latest patient wins concurrent loads",
+    "loading clears on failure",
+    "empty clinic last-visit lookup skipped",
+    "overlapping clinic requests share one read",
+    "fresh loads are not cached",
+    "clinic and session changes discard stale results",
+    "failed clinic loads clear and allow retry"
+  ]
+}

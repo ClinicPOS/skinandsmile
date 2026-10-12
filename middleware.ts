@@ -8,6 +8,13 @@ import {
 
 const PUBLIC_PAGE_PATHS = new Set(["/login", "/login/staff"]);
 const PUBLIC_API_PREFIXES = ["/api/auth/"];
+// These routes authenticate the current session and authorize the clinic/role
+// themselves before any data access. A second middleware verification adds two
+// session-storage round trips for each receptionist request.
+const SELF_AUTHENTICATED_API_PATHS = new Set([
+  '/api/receipts/checkout', '/api/receipts/history', '/api/patients/search',
+  '/api/patients/history', '/api/patients/clinic-records', '/api/workspace/refunds',
+]);
 const PUBLIC_REPORTS_API_PATHS = new Set([
   "/api/reports/login",
   "/api/reports/logout",
@@ -21,6 +28,7 @@ const REPORTS_ONLY_ALLOWED_API_PATHS = new Set([
 
 function isPublicPath(pathname: string) {
   return PUBLIC_PAGE_PATHS.has(pathname)
+    || SELF_AUTHENTICATED_API_PATHS.has(pathname)
     // This route permits only clinic names without login; all other reads verify sessions itself.
     || pathname === '/api/pos-read'
     // This endpoint verifies the current session and clinic itself, once per export.

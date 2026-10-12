@@ -1,0 +1,69 @@
+{
+  "date": "2026-10-12",
+  "environment": "Local synthetic fixtures; PostgreSQL WASM and React server rendering. No production contact.",
+  "patientSearch": {
+    "patients": 10000,
+    "filterMs": 0.4,
+    "beforeRenderMs": 157.88,
+    "afterRenderMs": 1.55,
+    "beforeHtmlBytes": 4767611,
+    "afterHtmlBytes": 48011
+  },
+  "unchangedPatientSave": {
+    "simulatedRoundTripMs": 25,
+    "beforeMs": 31.76,
+    "afterMs": 2,
+    "beforeRequests": 6,
+    "afterRequests": 0
+  },
+  "receiptHistory": {
+    "datasetReceipts": 10000,
+    "oldQueryMs": 11.19,
+    "newQueryMs": 2.1,
+    "oldPayloadBytes": 647001,
+    "newPayloadBytes": 32197,
+    "oldVisibleRows": 1000,
+    "newVisibleRows": 50,
+    "plan": [
+      {
+        "QUERY PLAN": "Limit  (cost=0.35..5.33 rows=50 width=487) (actual time=0.163..0.372 rows=50.00 loops=1)"
+      },
+      {
+        "QUERY PLAN": "  Buffers: shared hit=3"
+      },
+      {
+        "QUERY PLAN": "  ->  Incremental Sort  (cost=0.35..996.29 rows=10000 width=487) (actual time=0.159..0.207 rows=50.00 loops=1)"
+      },
+      {
+        "QUERY PLAN": "        Sort Key: created_at DESC, id DESC"
+      },
+      {
+        "QUERY PLAN": "        Presorted Key: created_at"
+      },
+      {
+        "QUERY PLAN": "        Full-sort Groups: 2  Sort Method: quicksort  Average Memory: 21kB  Peak Memory: 21kB"
+      },
+      {
+        "QUERY PLAN": "        Buffers: shared hit=3"
+      },
+      {
+        "QUERY PLAN": "        ->  Index Scan using receipts_created_at_idx on receipts  (cost=0.29..546.28 rows=10000 width=487) (actual time=0.065..0.102 rows=51.00 loops=1)"
+      },
+      {
+        "QUERY PLAN": "              Filter: (clinic_id = 'a52edafb-73eb-4007-99bc-ef52c1379da3'::uuid)"
+      },
+      {
+        "QUERY PLAN": "              Index Searches: 1"
+      },
+      {
+        "QUERY PLAN": "              Buffers: shared hit=3"
+      },
+      {
+        "QUERY PLAN": "Planning Time: 0.156 ms"
+      },
+      {
+        "QUERY PLAN": "Execution Time: 0.609 ms"
+      }
+    ]
+  }
+}
