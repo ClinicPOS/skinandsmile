@@ -1,0 +1,107 @@
+{
+  "date": "2026-10-12",
+  "environment": "Local Next.js development server + synthetic localhost REST adapter + PostgreSQL WASM. Cold timings include compilation; HTML timings exclude browser hydration. No production contacted.",
+  "page": {
+    "cold": {
+      "ms": 3167.3,
+      "databaseRequests": [
+        "/rest/v1/active_sessions",
+        "/rest/v1/receptionist"
+      ],
+      "serverTiming": null,
+      "bytes": 14631
+    },
+    "warm": {
+      "ms": 76.7,
+      "databaseRequests": [
+        "/rest/v1/active_sessions",
+        "/rest/v1/receptionist"
+      ],
+      "serverTiming": null,
+      "bytes": 14631
+    }
+  },
+  "receiptHistory": {
+    "cold": {
+      "ms": 368,
+      "databaseRequests": [
+        "/rest/v1/active_sessions",
+        "/rest/v1/receptionist",
+        "/rest/v1/rpc/pos_receipt_history_page"
+      ],
+      "serverTiming": "history;dur=21.4",
+      "bytes": 695
+    },
+    "warm": {
+      "ms": 42.6,
+      "databaseRequests": [
+        "/rest/v1/active_sessions",
+        "/rest/v1/receptionist",
+        "/rest/v1/rpc/pos_receipt_history_page"
+      ],
+      "serverTiming": "history;dur=17.0",
+      "bytes": 695
+    }
+  },
+  "patientSearch": {
+    "cold": {
+      "ms": 201.2,
+      "databaseRequests": [
+        "/rest/v1/active_sessions",
+        "/rest/v1/receptionist",
+        "/rest/v1/clinic_patient_files"
+      ],
+      "serverTiming": "session;dur=35.5, search;dur=13.7, total;dur=51.0",
+      "bytes": 131
+    },
+    "warm": {
+      "ms": 93.8,
+      "databaseRequests": [
+        "/rest/v1/active_sessions",
+        "/rest/v1/receptionist",
+        "/rest/v1/clinic_patient_files"
+      ],
+      "serverTiming": "session;dur=51.7, search;dur=14.3, total;dur=66.8",
+      "bytes": 131
+    }
+  },
+  "voidRequestSave": {
+    "cold": {
+      "ms": 284.9,
+      "databaseRequests": [
+        "/rest/v1/active_sessions",
+        "/rest/v1/receptionist",
+        "/rest/v1/receipts",
+        "/rest/v1/receipt_refund_requests",
+        "/rest/v1/rpc/prepare_pos_void",
+        "/rest/v1/rpc/transition_receipt_refund"
+      ],
+      "serverTiming": null,
+      "bytes": 1156
+    },
+    "warm": {
+      "ms": 114.6,
+      "databaseRequests": [
+        "/rest/v1/active_sessions",
+        "/rest/v1/receptionist",
+        "/rest/v1/receipts",
+        "/rest/v1/receipt_refund_requests",
+        "/rest/v1/rpc/prepare_pos_void",
+        "/rest/v1/rpc/transition_receipt_refund"
+      ],
+      "serverTiming": null,
+      "bytes": 1156
+    }
+  },
+  "idempotentRetry": {
+    "ms": 85.6,
+    "databaseRequests": [
+      "/rest/v1/active_sessions",
+      "/rest/v1/receptionist",
+      "/rest/v1/receipts",
+      "/rest/v1/receipt_refund_requests"
+    ],
+    "serverTiming": null,
+    "bytes": 1151
+  }
+}

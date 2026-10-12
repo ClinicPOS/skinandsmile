@@ -11,7 +11,7 @@ const deps = {
   '../../../../lib/protected-data-server': { createProtectedDataClient: () => { calls++; return {from: () => chain}; } },
   '../../../../lib/patient-mutation-validation': { isUuid: v => typeof v === 'string' && /^[a-f0-9-]{36}$/.test(v) },
 };
-const scope = {exports:{}, require:n => deps[n], URL, Response};
+const scope = {exports:{}, require:n => deps[n], URL, Response, performance};
 vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,scope);
 const clinic='11111111-1111-4111-8111-111111111111', other='22222222-2222-4222-8222-222222222222';
 const request = (id,q='') => new Request(`http://localhost/api/patients/search?${new URLSearchParams({clinicId:id,q})}`);

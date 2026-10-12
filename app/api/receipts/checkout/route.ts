@@ -20,8 +20,10 @@ export async function GET(request:Request) {
   } catch { return Response.json({error:'Checkout lookup is unavailable.'},{status:503}); }
 }
 export async function POST(request:Request) {
+  const started=performance.now();
   const {session,errorResponse}=await readAppSession(createServerSupabaseClient());
   if(errorResponse||!session) return errorResponse!;
+  const sessionReady=performance.now();
   if(session.sessionMode!=='clinic'||session.userRole!=='receptionist'||!session.receptionistId)return Response.json({error:'Sign in as a receptionist and open the register first.'},{status:403});
   if(session.sessionMode!=='clinic' && ensureManagerSession(session)) return Response.json({error:'Forbidden.'},{status:403});
   let checkout: ReturnType<typeof validateCheckoutBody>;
@@ -34,6 +36,7 @@ export async function POST(request:Request) {
     return Response.json({error:'Forbidden for this clinic or receptionist.'},{status:403});
   }
   try {
+    const databaseStarted=performance.now();
     const {data,error}=await createProtectedDataClient().rpc('complete_pos_checkout',{p_request_id:checkout.requestId,p_payload:{...checkout.payload,audit_actor:await auditActor(session)}});
     if(error) {
       console.error('Checkout database verification failed',{code:error.code,message:error.message});
@@ -41,6 +44,6 @@ export async function POST(request:Request) {
       return Response.json({error:status===403?'A patient, staff member, service or register does not belong to this clinic.':status===409?'Checkout details changed, credit is unavailable, or a reference/request ID was already used. Review the transaction before retrying.':status===400?'Checkout amounts do not reconcile. Review the cart and payment.':'Checkout could not be confirmed. Retry with the same details and request ID.'},{status});
     }
     if(data?.receipt?.status==='VOIDED')return Response.json({error:'This receipt was voided. No new payment was recorded. Review receipt history before starting a new transaction.'},{status:409});
-    return Response.json(data,{headers:{'Cache-Control':'no-store'}});
+    return Response.json(data,{headers:{'Cache-Control':'no-store','Server-Timing':`session;dur=${(sessionReady-started).toFixed(1)}, checkout;dur=${(performance.now()-databaseStarted).toFixed(1)}, total;dur=${(performance.now()-started).toFixed(1)}`}});
   } catch { return Response.json({error:'Checkout is unavailable. Retry with the same details and request ID.'},{status:503}); }
 }

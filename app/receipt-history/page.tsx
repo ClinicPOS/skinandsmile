@@ -1,7 +1,7 @@
 "use client";
 
 import { ReceiptVoidButton } from "../../components/receipt-void-button";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { loadClinicHistoryPatients, loadClinicFileIndex } from "../../lib/patient-read-client";
@@ -16,6 +16,7 @@ import { mapRegularReceiptRenderLine, summarizeRegularReceiptForRender } from ".
 
 type Receipt = {
   status?: string;
+  clinic_id?: string | null;
   id: string;
   receipt_number?: number | null;
   patient_id: string;
@@ -77,6 +78,7 @@ type ReceiptItem = {
 
 type HistoryEntry = {
   status?: string;
+  clinic_id: string;
   id: string;
   kind: "receipt" | "treatment-plan";
   title: string;
@@ -122,19 +124,37 @@ export default function ReceiptHistoryPage() {
   const [treatmentPlans, setTreatmentPlans] = useState<TreatmentPlan[]>([]);
   const [treatmentPlanVisits, setTreatmentPlanVisits] = useState<TreatmentPlanVisit[]>([]);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
+  const [selectedHistoryClinicId, setSelectedHistoryClinicId] = useState("");
+  const historyClinicId = allowedClinicId || selectedHistoryClinicId;
+  const [historyPage, setHistoryPage] = useState(0);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const historyGeneration = useRef(0);
   const [selectedReceiptId, setSelectedReceiptId] = useState<string>("");
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
 
-  async function fetchAllRows(table: string, select: string): Promise<any[]> {
+  useEffect(() => {
+    if (!isLoaded || allowedClinicId) return;
+    let cancelled=false;
+    void supabase.from("clinics").select("*").order("name").then(({data,error})=>{
+      if (cancelled) return;
+      if (error) {alert("Clinics could not be loaded.");return;}
+      setClinics(data || []);setSelectedHistoryClinicId(current=>current || data?.[0]?.id || "");
+    });
+    return ()=>{cancelled=true;};
+  },[isLoaded,allowedClinicId]);
+
+  async function fetchAllRows(table: string, select: string, field?: string, ids?: string[]): Promise<any[]> {
     const BATCH = 1000;
     let all: any[] = [];
     let from = 0;
     while (true) {
-      const { data, error } = await supabase
-        .from(table)
-        .select(select)
-        .range(from, from + BATCH - 1);
-      if (error || !data || data.length === 0) break;
+      let query = supabase.from(table).select(select).order("id").range(from, from+BATCH-1);
+      if (field && ids) query = query.in(field, ids);
+      if (table === "treatment_plan_payments") query = query.neq("status","cancelled");
+      const {data,error} = await query;
+      if (error) throw new Error("Receipt history details could not be loaded.");
+      if (!data || data.length === 0) break;
       all = all.concat(data);
       if (data.length < BATCH) break;
       from += BATCH;
@@ -143,30 +163,49 @@ export default function ReceiptHistoryPage() {
   }
 
   useEffect(() => {
-    if (!isLoaded) return;
-    void loadHistory().catch(error => {
+    if (!isLoaded || !historyClinicId) return;
+    const generation = ++historyGeneration.current;
+    queueMicrotask(()=>{if(generation===historyGeneration.current)setHistoryLoading(true);});
+    void loadHistory(generation).catch(error => {
+      if (generation !== historyGeneration.current) return;
       setPatients([]); setHistoryEntries([]);
       alert(error instanceof Error ? error.message : "Receipt history could not be loaded.");
-    });
-  }, [isLoaded, allowedClinicId]);
+    }).finally(() => { if (generation === historyGeneration.current) setHistoryLoading(false); });
+    return () => { historyGeneration.current++; };
+  }, [isLoaded, historyClinicId, historyPage]);
 
-  async function loadHistory() {
+  async function loadHistory(generation: number) {
+    if (!historyClinicId) throw new Error("Select a clinic to view receipt history.");
+    const response = await fetch(`/api/receipts/history?${new URLSearchParams({clinicId: historyClinicId, offset: String(historyPage*50)})}`, {cache: 'no-store'});
+    const page = await response.json();
+    if (!response.ok) throw new Error(page.error || "Receipt history could not be loaded.");
+    const receiptIds = page.receipts.map((row: Receipt) => row.id);
+    const planIds = [...new Set<string>(page.planPayments.map((row: TreatmentPlanPaymentRecord) => row.treatment_plan_id))];
+    const paymentIds = page.planPayments.map((row: TreatmentPlanPaymentRecord) => row.id);
+    const patientIds = [...new Set<string>([...page.receipts,...page.planPayments].map((row: Receipt) => row.patient_id).filter(Boolean))];
+    const empty = Promise.resolve({data: [],error: null});
+    const linkedRows = async (table:string,select:string,field:string,ids:string[]) => ({data: await fetchAllRows(table,select,field,ids), error:null});
     const [receiptResult, patientResult, doctorResult, receptionistResult, serviceResult, itemResult, clinicResult, clinicPatientFileResult, treatmentPlanResult, treatmentPlanVisitResult, treatmentPlanPaymentResult, legacyTreatmentPlanPaymentResult, treatmentPlanAllocationResult] = await Promise.all([
-      supabase.from("receipts").select("*").order("created_at", { ascending: false }),
-      loadClinicHistoryPatients(allowedClinicId),
+      Promise.resolve({data: page.receipts,error: null}),
+      loadClinicHistoryPatients(historyClinicId, patientIds),
       supabase.from("doctors").select("id, name").order("name", { ascending: true }),
       supabase.from("receptionist").select("id, name, clinic_id").order("name", { ascending: true }),
       supabase.from("services").select("id, name, price, standard_price, pricing_type").order("name", { ascending: true }),
-      supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total, original_price, service_name_snapshot, teeth, allocated_global_discount_amount, taxable_amount, vat_rate, vat_amount, final_line_total"),
+      receiptIds.length ? linkedRows("receipt_items","receipt_id, service_id, quantity, price, total, original_price, service_name_snapshot, teeth, allocated_global_discount_amount, taxable_amount, vat_rate, vat_amount, final_line_total","receipt_id",receiptIds) : empty,
       supabase.from("clinics").select("*"),
-      loadClinicFileIndex(allowedClinicId),
-      supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_visits").select("id, treatment_plan_id, visit_number, created_at").order("visit_number", { ascending: true }),
-      supabase.from("treatment_plan_payment_records").select("*").order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_payments").select("*").neq("status", "cancelled").order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_payment_allocations").select("*").order("created_at", { ascending: false }),
+      loadClinicFileIndex(historyClinicId, patientIds),
+      planIds.length ? supabase.from("treatment_plans").select("*").in("id", planIds) : empty,
+      planIds.length ? linkedRows("treatment_plan_visits","id, treatment_plan_id, visit_number, created_at","treatment_plan_id",planIds) : empty,
+      planIds.length ? linkedRows("treatment_plan_payment_records","*","treatment_plan_id",planIds) : empty,
+      planIds.length ? linkedRows("treatment_plan_payments","*","treatment_plan_id",planIds) : empty,
+      paymentIds.length ? linkedRows("treatment_plan_payment_allocations","*","payment_id",paymentIds) : empty,
     ]);
 
+    if (generation !== historyGeneration.current) return;
+    for (const result of [receiptResult,doctorResult,receptionistResult,serviceResult,itemResult,clinicResult,treatmentPlanResult,treatmentPlanVisitResult,treatmentPlanPaymentResult,legacyTreatmentPlanPaymentResult,treatmentPlanAllocationResult]) {
+      if (result.error) throw new Error("Receipt details could not be loaded. Please retry.");
+    }
+    setHasMoreHistory(page.hasMore);
     const receiptsRows = (receiptResult.data as Receipt[]) || [];
     const treatmentPlanRows = (treatmentPlanResult.data as TreatmentPlan[]) || [];
     const treatmentPlanVisitRows = (treatmentPlanVisitResult.data as TreatmentPlanVisit[]) || [];
@@ -176,6 +215,7 @@ export default function ReceiptHistoryPage() {
 
     const regularEntries: HistoryEntry[] = receiptsRows.map((receipt) => ({
       id: receipt.id,
+      clinic_id: receipt.clinic_id || historyClinicId,
       kind: "receipt" as const,
       title: `Receipt ${receipt.receipt_number ? `#${String(receipt.receipt_number).padStart(5, "0")}` : `#${receipt.id.slice(0, 8).toUpperCase()}`}`,
       subtitle: "Regular receipt",
@@ -196,10 +236,11 @@ export default function ReceiptHistoryPage() {
       credit_applied: (receipt as any).credit_applied ?? null,
     }));
 
-    const planEntries: HistoryEntry[] = treatmentPlanPaymentRows.map((record) => {
+    const planEntries: HistoryEntry[] = (page.planPayments as TreatmentPlanPaymentRecord[]).map((record) => {
       const plan = treatmentPlanRows.find((entry) => entry.id === record.treatment_plan_id) || null;
       return {
         id: record.id,
+        clinic_id: record.clinic_id,
         kind: "treatment-plan" as const,
         title: `Treatment Plan Payment ${record.id.slice(0, 8).toUpperCase()}`,
         subtitle: plan?.title || "Treatment plan payment",
@@ -228,6 +269,7 @@ export default function ReceiptHistoryPage() {
       return right - left;
     });
 
+    setSelectedReceiptId(combinedEntries[0]?.id || "");
     setReceipts(receiptsRows);
     setPatients((patientResult as Patient[]) || []);
     setDoctors((doctorResult.data as LookupItem[]) || []);
@@ -249,12 +291,9 @@ export default function ReceiptHistoryPage() {
   }
 
   const visibleReceipts = useMemo(() => {
-    if (!allowedClinicId) return historyEntries;
-    const clinicReceptionistIds = new Set(
-      receptionists.filter((receptionist) => receptionist.clinic_id === allowedClinicId).map((receptionist) => receptionist.id)
-    );
-    return historyEntries.filter((entry) => clinicReceptionistIds.has(entry.receptionist_id));
-  }, [allowedClinicId, historyEntries, receptionists]);
+    if (!historyClinicId) return historyEntries;
+    return historyEntries.filter((entry) => entry.clinic_id === historyClinicId);
+  }, [historyClinicId, historyEntries]);
 
   useEffect(() => {
     if (!selectedReceiptId && visibleReceipts.length > 0) {
@@ -698,7 +737,13 @@ export default function ReceiptHistoryPage() {
                 </button>
               ))}
 
-              {visibleReceipts.length === 0 && (
+              {!allowedClinicId&&<label>Clinic<select aria-label="History clinic" value={selectedHistoryClinicId} onChange={event=>{setSelectedHistoryClinicId(event.target.value);setHistoryPage(0);}} className="ml-2 rounded border p-2">{clinics.map(clinic=><option key={clinic.id} value={clinic.id}>{clinic.name}</option>)}</select></label>}
+              <div className="flex items-center gap-3">
+                <button disabled={historyLoading || historyPage===0} onClick={()=>setHistoryPage(value=>value-1)} className="rounded border px-3 py-2">Previous</button>
+                <span>Page {historyPage+1}{historyLoading?" - Loading...":""}</span>
+                <button disabled={historyLoading || !hasMoreHistory} onClick={()=>setHistoryPage(value=>value+1)} className="rounded border px-3 py-2">Next</button>
+              </div>
+              {!historyLoading && visibleReceipts.length === 0 && (
                 <div className="rounded-2xl border border-dashed border-teal-200 bg-teal-50/60 p-8 text-center text-sm text-teal-800">
                   No receipts have been saved yet.
                 </div>
