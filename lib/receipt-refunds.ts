@@ -582,7 +582,7 @@ export async function createLegacyBackedRefund(params: {
   }
 
   const [{ data: refundData, error: refundError }, { data: refundItemsData, error: refundItemsError }] = await Promise.all([
-    params.supabase.from("refunds").select("*").eq("id", refundId).single(),
+    params.supabase.from("refunds").select("*").is("accounting_void_request_id", null).eq("id", refundId).single(),
     params.supabase.from("refund_items").select("*").eq("refund_id", refundId),
   ]);
 

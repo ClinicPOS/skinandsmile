@@ -406,7 +406,7 @@ export function PosPlanCheckoutModal({
           structuredPaymentRecord = pmtData as { payment_record_id: string; created_at: string };
           const { data: legacyPayments, error: legacyPaymentsError } = await supabase
             .from("treatment_plan_payments")
-            .select("*")
+            .select("*").neq("status", "cancelled")
             .eq("treatment_plan_id", planData.id)
             .order("created_at", { ascending: false });
           if (legacyPaymentsError) {

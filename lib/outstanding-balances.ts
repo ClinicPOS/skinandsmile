@@ -14,7 +14,7 @@ export function rollupBalance(
   balance: OutstandingBalance,
   payments: BalancePayment[]
 ): BalanceRollup {
-  const paid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const paid = payments.filter(payment=>payment.status!=="cancelled").reduce((s, p) => s + Number(p.amount || 0), 0);
   const original = Number(balance.original_amount || 0);
   const remaining = Math.max(0, original - paid);
   const status: BalanceStatus = paid <= 0 ? "Unpaid" : remaining <= 0.0049 ? "Paid" : "Partial";

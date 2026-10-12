@@ -40,6 +40,7 @@ export async function POST(request:Request) {
       const status=error.code==='42501'?403:['23505','23514'].includes(error.code)?409:['22023','22P02'].includes(error.code)?400:503;
       return Response.json({error:status===403?'A patient, staff member, service or register does not belong to this clinic.':status===409?'Checkout details changed, credit is unavailable, or a reference/request ID was already used. Review the transaction before retrying.':status===400?'Checkout amounts do not reconcile. Review the cart and payment.':'Checkout could not be confirmed. Retry with the same details and request ID.'},{status});
     }
+    if(data?.receipt?.status==='VOIDED')return Response.json({error:'This receipt was voided. No new payment was recorded. Review receipt history before starting a new transaction.'},{status:409});
     return Response.json(data,{headers:{'Cache-Control':'no-store'}});
   } catch { return Response.json({error:'Checkout is unavailable. Retry with the same details and request ID.'},{status:503}); }
 }

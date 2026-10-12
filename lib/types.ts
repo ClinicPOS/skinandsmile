@@ -173,6 +173,7 @@ export type OutstandingBalance = {
 };
 
 export type BalancePayment = {
+  status?: "completed" | "cancelled";
   id: string;
   outstanding_balance_id: string;
   amount: number;
@@ -184,6 +185,7 @@ export type BalancePayment = {
 };
 
 export type PatientCredit = {
+  status?: "completed" | "cancelled";
   id: string;
   patient_id: string;
   clinic_id: string;
@@ -231,6 +233,7 @@ export type TreatmentPlanVisit = {
 };
 
 export type TreatmentPlanPayment = {
+  status?: "completed" | "cancelled";
   id: string;
   treatment_plan_id: string;
   patient_id: string;

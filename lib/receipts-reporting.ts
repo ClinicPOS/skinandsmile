@@ -125,7 +125,7 @@ export function summarizeStoredAllocationRowsForReporting(rows: PaymentAllocatio
   let tabbyCardFee = 0;
   let tamaraFee = 0;
 
-  rows.forEach((row) => {
+  rows.filter(row => row.status !== "voided").forEach((row) => {
     const invoiceAllocated = Number(row.invoice_allocation_amount || 0);
     const feeAmount = Number(row.fee_amount || 0);
     const reference = String(row.provider_reference_number || "").trim();
@@ -213,7 +213,7 @@ export function summarizeStoredAllocationCollectionsForReporting(rows: PaymentAl
     tamaraSurcharge: 0,
   };
 
-  rows.forEach((row) => {
+  rows.filter(row => row.status !== "voided").forEach((row) => {
     const customerChargedAmount = Number(row.customer_charged_amount || 0);
     const invoiceAllocationAmount = Number(row.invoice_allocation_amount || 0);
     const feeAmount = Number(row.fee_amount || 0);

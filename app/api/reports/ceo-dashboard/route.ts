@@ -385,12 +385,12 @@ export async function POST(request: Request) {
     const rows: RowType[] = [];
     for (let index = 0; index < ids.length; index += chunkSize) {
       const chunk = ids.slice(index, index + chunkSize);
-      const chunkRows = await fetchAllPages<RowType>((from, to) => supabase
-        .from(tableName)
-        .select(selectClause)
-        .in(filterColumn, chunk)
-        .order("id", { ascending: true })
-        .range(from, to) as unknown as PromiseLike<{ data: RowType[] | null; error: { message?: string; code?: string } | null }>);
+      const chunkRows = await fetchAllPages<RowType>((from, to) => {
+        let query = supabase.from(tableName).select(selectClause);
+        if (["balance_payments", "patient_credits", "treatment_plan_payments"].includes(tableName)) query = query.neq("status", "cancelled");
+        if (["refunds", "payment_allocation_refunds"].includes(tableName)) query = query.is("accounting_void_request_id", null);
+        return query.in(filterColumn, chunk).order("id", {ascending:true}).range(from,to) as unknown as PromiseLike<{data: RowType[] | null;error: {message?: string;code?: string} | null}>;
+      });
       rows.push(...chunkRows);
     }
     return rows;
@@ -435,7 +435,7 @@ export async function POST(request: Request) {
   const fetchRefunds = async (startIso: string, endIso: string) => {
     const rows=await fetchAllPages<RefundRow>((from, to) => supabase
       .from("refunds")
-      .select("id, receipt_id, total_amount, payment_method, created_at")
+      .select("id, receipt_id, total_amount, payment_method, created_at").is("accounting_void_request_id", null)
       .gte("created_at", startIso)
       .lt("created_at", endIso)
       .order("created_at", { ascending: true })
@@ -514,7 +514,7 @@ export async function POST(request: Request) {
         : "id, clinic_id, amount, receptionist_id, payment_method, created_at"+(tableName==='treatment_plan_payments'?',source_payment_record_id':'');
       const rows = await fetchAllPages<CashSupplementRow>((from, to) => supabase
         .from(tableName)
-        .select(selectClause)
+        .select(selectClause).neq("status", "cancelled")
         .gte("created_at", startIso)
         .lt("created_at", endIso)
         .order("created_at", { ascending: true })
@@ -1043,7 +1043,7 @@ export async function POST(request: Request) {
     }
     // Refunds belong to their return date, including returns of older payments.
     allocationRefundRows=await fetchAllPages<PaymentAllocationRefundRow>((from,to)=>supabase.from('payment_allocation_refunds')
-      .select('id,refund_id,payment_id,payment_allocation_id,refunded_treatment_amount,total_returned_amount,reversed_fee_amount,created_at')
+      .select('id,refund_id,payment_id,payment_allocation_id,refunded_treatment_amount,total_returned_amount,reversed_fee_amount,created_at').is("accounting_void_request_id", null)
       .in('clinic_id',clinicIds).eq('status','completed').gte('created_at',currentRange.startUtcIso).lt('created_at',currentRange.endUtcIso)
       .order('id').range(from,to));
     const refundAllocations=await fetchRowsByIdsInBatches<PaymentAllocationRow>('payment_allocations','id,payment_id,method_group,method_variant,treatment_net_amount,fee_amount,refunded_treatment_amount,refunded_fee_amount,customer_charged_amount','id',[...new Set(allocationRefundRows.map(row=>row.payment_allocation_id))]);

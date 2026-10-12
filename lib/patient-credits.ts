@@ -3,7 +3,7 @@ import type { PatientCredit } from "./types";
 // Sum of the patient's credit ledger (deposits positive, applications
 // negative). Clamped at 0 so a bad row can never show negative credit.
 export function availableCredit(credits: PatientCredit[]): number {
-  const sum = credits.reduce((s, c) => s + Number(c.amount || 0), 0);
+  const sum = credits.filter(credit=>credit.status!=="cancelled").reduce((s, c) => s + Number(c.amount || 0), 0);
   return Math.max(0, Math.round(sum * 100) / 100);
 }
 

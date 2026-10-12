@@ -99,7 +99,7 @@ export default function ReceiptLogClient() {
       supabase.from("clinics").select("*"),
       supabase.from("doctors").select("*"),
       supabase.from("services").select("id, name, price, standard_price, pricing_type"),
-      supabase.from("refunds").select("*"),
+      supabase.from("refunds").select("*").is("accounting_void_request_id", null),
     ]);
     if (receiptsRes.status === "fulfilled") setReceipts(receiptsRes.value.data || []);
     if (patientsRes.status === "fulfilled") setPatients(patientsRes.value || []);
@@ -168,7 +168,7 @@ export default function ReceiptLogClient() {
     setReceiptItems([]);
     const [itemsRes, refundsRes, paymentRecordsRes] = await Promise.all([
       supabase.from("receipt_items").select("*").eq("receipt_id", receipt.id),
-      supabase.from("refunds").select("*").eq("receipt_id", receipt.id).order("created_at", { ascending: false }),
+      supabase.from("refunds").select("*").is("accounting_void_request_id", null).eq("receipt_id", receipt.id).order("created_at", { ascending: false }),
       supabase.from("payment_records").select("id").eq("receipt_id", receipt.id).order("created_at", { ascending: false }),
     ]);
     const items = itemsRes.data || [];
@@ -652,6 +652,7 @@ export default function ReceiptLogClient() {
                             {Number(receipt.discount_amount) > 0 && (
                               <span className="text-xs font-bold text-red-500">PROMO</span>
                             )}
+                            {receipt.status==="VOIDED"&&<span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-bold text-slate-700">VOIDED ? history only</span>}
                             {isFullyRefunded && (
                               <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-bold text-red-600">REFUNDED</span>
                             )}

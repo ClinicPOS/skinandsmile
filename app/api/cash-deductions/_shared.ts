@@ -184,22 +184,22 @@ export async function computeRegisterSessionCashCollected(
       .lte("created_at", rangeEnd),
     supabase
       .from("balance_payments")
-      .select("amount")
+      .select("amount").neq("status", "cancelled")
       .eq("register_session_id", context.id)
       .ilike("payment_method", "Cash%"),
     supabase
       .from("patient_credits")
-      .select("amount")
+      .select("amount").neq("status", "cancelled")
       .eq("register_session_id", context.id)
       .gt("amount", 0)
       .ilike("payment_method", "Cash%"),
     supabase
       .from("treatment_plan_payment_records")
-      .select("id, legacy_treatment_plan_payment_id")
+      .select("id, legacy_treatment_plan_payment_id").neq("status", "cancelled")
       .eq("register_session_id", context.id),
     supabase
       .from("treatment_plan_payments")
-      .select("id, amount, payment_method, source_payment_record_id")
+      .select("id, amount, payment_method, source_payment_record_id").neq("status", "cancelled")
       .eq("register_session_id", context.id),
   ]);
 
@@ -260,8 +260,8 @@ export async function computeRegisterSessionCashCollected(
 
   const balanceCash = roundCurrency(balancePayments.reduce((sum, row) => sum + Number(row.amount || 0), 0));
   const depositCash = roundCurrency(deposits.reduce((sum, row) => sum + Number(row.amount || 0), 0));
-  const refunds=await supabase.from('payment_allocation_refunds').select('refund_id,total_returned_amount,payment_allocations!inner(method_group)').eq('clinic_id',context.clinicId).eq('processed_by',context.receptionistId).eq('status','completed').gte('created_at',context.openedAt).lte('created_at',rangeEnd);
-  const legacyRefunds=await supabase.from('refunds').select('id,total_amount,payment_method,receipts!inner(clinic_id)').eq('receipts.clinic_id',context.clinicId).eq('refunded_by',context.receptionistId).gte('created_at',context.openedAt).lte('created_at',rangeEnd);
+  const refunds=await supabase.from('payment_allocation_refunds').select('refund_id,total_returned_amount,payment_allocations!inner(method_group)').is("accounting_void_request_id", null).eq('clinic_id',context.clinicId).eq('processed_by',context.receptionistId).eq('status','completed').gte('created_at',context.openedAt).lte('created_at',rangeEnd);
+  const legacyRefunds=await supabase.from('refunds').select('id,total_amount,payment_method,receipts!inner(clinic_id)').is("accounting_void_request_id", null).eq('receipts.clinic_id',context.clinicId).eq('refunded_by',context.receptionistId).gte('created_at',context.openedAt).lte('created_at',rangeEnd);
   if(refunds.error||legacyRefunds.error)throw Error('Cash refund records could not be verified.');
   const structuredRefundIds=new Set((refunds.data||[]).map(row=>row.refund_id));
   const cashRefunds=(refunds.data||[]).reduce((sum,row)=>{const allocation=row.payment_allocations as unknown as {method_group:string};return sum+(allocation.method_group==='cash'?Number(row.total_returned_amount||0):0);},0);
