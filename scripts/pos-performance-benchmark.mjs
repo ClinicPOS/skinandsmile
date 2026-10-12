@@ -30,7 +30,7 @@ const scope={exports:{},patients:[savedPatient],buildPatientDetailsPayload:()=>(
 function compiledSave(baseline){const code=baseline?save.getText(tree).replace(/const sanitizedPayload = patientDetailChanges\([\s\S]*?\n    \);/,'const sanitizedPayload = buildPatientDetailsPayload();'):save.getText(tree);vm.runInNewContext(ts.transpileModule(code+'\nexports.run=savePatientDetails;',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,scope);return scope.exports.run;}
 requests=0;const beforeSave=await measure(()=>compiledSave(true)('TEST'),5);const beforeRequests=requests;requests=0;const afterSave=await measure(()=>compiledSave(false)('TEST'),5);const afterRequests=requests;assert.equal(afterRequests,0);
 const db=await createVoidTestDatabase(),clinic=uuid(),patient=uuid(),rec=uuid();
-await db.exec(fs.readFileSync('supabase/migrations/20261012175015_pos_history_pagination.sql','utf8'));
+await db.exec(fs.readFileSync('supabase/migrations/20261012194215_pos_history_pagination.sql','utf8'));
 let database;
 try{
  await db.query('insert into clinics(id,name) values($1,$2)',[clinic,'TEST']);await db.query('insert into patients(id,name) values($1,$2)',[patient,'TEST']);await db.query('insert into receptionist(id,name,pin,clinic_id) values($1,$2,$3,$4)',[rec,'TEST','unused',clinic]);

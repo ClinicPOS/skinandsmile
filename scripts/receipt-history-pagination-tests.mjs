@@ -10,7 +10,7 @@ async function insert(table, row) {
   await db.query(`insert into public.${table}(${keys.join(',')}) values(${keys.map((_, i) => `$${i + 1}`).join(',')})`, Object.values(row));
 }
 try {
-  await db.exec(fs.readFileSync('supabase/migrations/20261012175015_pos_history_pagination.sql', 'utf8'));
+  await db.exec(fs.readFileSync('supabase/migrations/20261012194215_pos_history_pagination.sql', 'utf8'));
   await insert('clinics', {id: clinic, name: 'TEST'}); await insert('clinics', {id: other, name: 'OTHER TEST'});
   await insert('patients', {id: patient, name: 'TEST'});
   await insert('receptionist', {id: staff, clinic_id: clinic, name: 'TEST', pin: 'unused'});

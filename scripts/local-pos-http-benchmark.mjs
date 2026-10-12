@@ -9,7 +9,7 @@ import {promisify} from 'node:util';
 import {randomUUID as uuid} from 'node:crypto';
 import {createVoidTestDatabase} from './void-test-database.mjs';
 const db=await createVoidTestDatabase(),clinic=uuid(),patient=uuid(),rec=uuid(),target=uuid(),token=uuid();
-await db.exec(fs.readFileSync('supabase/migrations/20261012175015_pos_history_pagination.sql','utf8'));
+await db.exec(fs.readFileSync('supabase/migrations/20261012194215_pos_history_pagination.sql','utf8'));
 let appProcess,backend;
 const counts=[];
 const rpcArgs={pos_receipt_history_page:['p_clinic_id','p_offset','p_limit'],prepare_pos_void:['p_target_id'],transition_receipt_refund:['p_id','p_receipt_id','p_action','p_proposal','p_actor','p_reason','p_reference']};
