@@ -99,7 +99,7 @@ async function downloadDailyIncomeReport() {
     const eodResponse = await fetch("/api/workspace/eod?clinicId="+activeClinic.id+"&day="+reportDay,{cache:"no-store"});
     const eodCheck = await eodResponse.json();
     if(!eodResponse.ok){alert(eodCheck.error||"Could not check EOD approvals. Try again.");return;}
-    const pendingCorrections: Array<{id:string;receipt_id:string;kind:string;status:string;requested_reason:string;created_at:string}> = eodCheck.pending||[];
+    const pendingCorrections: Array<{id:string;receipt_id:string;plan_payment_id?:string;kind:string;status:string;requested_reason:string;created_at:string}> = eodCheck.pending||[];
     const correctionChanges: Array<{receipt_id:string;kind:string;requested_reason:string;approver:string;completed_at:string;replacement_receipt_id:string}> = eodCheck.changes||[];
     if(pendingCorrections.length)alert("There are "+pendingCorrections.length+" unresolved correction/refund requests. This export will be marked DRAFT. Ask the manager to resolve them before sending final EOD.");
 
@@ -141,16 +141,16 @@ supabase
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
       .order("created_at", { ascending: true }),
-supabase.from('payment_allocation_refunds').select('*').eq('clinic_id',activeClinic.id).eq('status','completed').gte('created_at',startUtcIso).lte('created_at',endUtcIso),
+supabase.from('payment_allocation_refunds').select('*').is("accounting_void_request_id", null).eq('clinic_id',activeClinic.id).eq('status','completed').gte('created_at',startUtcIso).lte('created_at',endUtcIso),
 supabase
       .from("balance_payments")
-      .select("amount, payment_method")
+      .select("amount, payment_method").neq("status", "cancelled")
       .eq("clinic_id",activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso),
 supabase
       .from("patient_credits")
-      .select("amount, payment_method")
+      .select("amount, payment_method").neq("status", "cancelled")
       .eq("clinic_id",activeClinic.id)
       .gt("amount", 0)
       .gte("created_at", startUtcIso)
@@ -200,7 +200,7 @@ supabase
       if (paymentRecordIds.length > 0) {
         const [allocRes, refundRes] = await Promise.all([
           supabase.from("payment_allocations").select("*").in("payment_id", paymentRecordIds),
-          supabase.from("payment_allocation_refunds").select("*").in("payment_id", paymentRecordIds),
+          supabase.from("payment_allocation_refunds").select("*").is("accounting_void_request_id", null).in("payment_id", paymentRecordIds),
         ]);
         if (allocRes.error) {
           console.warn("Failed loading payment allocations for report", allocRes.error);
@@ -395,7 +395,7 @@ supabase
     {
       const { data: refundsData, error: refundsError } = await supabase
         .from("refunds")
-        .select("id, receipt_id, total_amount, created_at")
+        .select("id, receipt_id, total_amount, created_at").is("accounting_void_request_id", null)
         .eq("clinic_id",activeClinic.id)
         .gte("created_at", startUtcIso)
         .lte("created_at", endUtcIso);
@@ -551,7 +551,7 @@ supabase
       .lte("created_at", endUtcIso),
       supabase
       .from("treatment_plan_payment_records")
-      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid)")
+      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid)").neq("status", "cancelled")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -650,7 +650,7 @@ supabase
           .lte("created_at", endUtcIso),
         supabase
           .from("treatment_plan_payments")
-          .select("id, treatment_plan_id, amount, source_payment_record_id, notes, created_at")
+          .select("id, treatment_plan_id, amount, source_payment_record_id, notes, created_at").neq("status", "cancelled")
           .in("treatment_plan_id", planIds)
           .lte("created_at", endUtcIso),
         supabase
@@ -1779,7 +1779,7 @@ supabase
 
     const fileDate = formatDubaiFileDate(now);
     const fileName = `EOD RECONCILIATION ${activeClinic.name.toUpperCase()} ${fileDate.day} ${fileDate.month} ${fileDate.year}.xlsx`;
-    const pendingSheet=XLSX.utils.aoa_to_sheet([["EOD Approval Status",pendingCorrections.length?"DRAFT — unresolved requests":"No unresolved requests"],["Request","Receipt","Type","Status","Reason","Requested At"],...pendingCorrections.map(q=>[q.id,q.receipt_id,q.kind,q.status,q.requested_reason,q.created_at])]);
+    const pendingSheet=XLSX.utils.aoa_to_sheet([["EOD Approval Status",pendingCorrections.length?"DRAFT — unresolved requests":"No unresolved requests"],["Request","Receipt","Type","Status","Reason","Requested At"],...pendingCorrections.map(q=>[q.id,q.receipt_id||`Plan payment ${q.plan_payment_id}`,q.kind,q.status,q.requested_reason,q.created_at])]);
     XLSX.utils.book_append_sheet(workbook,pendingSheet,"Pending Approvals");
     XLSX.writeFile(workbook, (pendingCorrections.length?"DRAFT - ":"")+fileName);
   }

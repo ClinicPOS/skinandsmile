@@ -811,9 +811,9 @@ function BackendPageContent() {
         return { data: result.logs || [] };
       }),
       supabase.from("outstanding_balances").select("*").order("original_date", { ascending: false }),
-      supabase.from("balance_payments").select("*").order("created_at", { ascending: false }),
+      supabase.from("balance_payments").select("*").neq("status", "cancelled").order("created_at", { ascending: false }),
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_payments").select("*").order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payments").select("*").neq("status", "cancelled").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_visits").select("*").order("visit_number", { ascending: true }),
       supabase.from("treatment_plan_payment_records").select("*").order("created_at", { ascending: false }),
     ]);
@@ -970,7 +970,7 @@ function BackendPageContent() {
     catch (error) { alert(error instanceof Error ? error.message : "Patient export could not be loaded."); return; }
     const { data: receipts } = await supabase
       .from("receipts")
-      .select("id, receipt_number, created_at, patient_id, receptionist_id, payment_method, subtotal, discount_amount, total");
+      .select("id, receipt_number, created_at, patient_id, receptionist_id, payment_method, subtotal, discount_amount, total").neq("status","VOIDED");
 
     const allReceipts = receipts || [];
     const filteredReceipts = !selectedClinicId

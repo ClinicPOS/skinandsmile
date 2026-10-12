@@ -22,5 +22,6 @@ export async function POST(request:Request){
  }catch(e){return Response.json({error:e instanceof Error?e.message:'Invalid payment.'},{status:400});}
  const {data,error}=await db.rpc('record_protected_plan_payment',{p_request_id:body.requestId,p_args:args});
  if(error)return Response.json({error:error.code==='23505'?'This request was already used for different payment details.':'The plan or register changed, or this payment exceeds the remaining balance. No additional payment was recorded.'},{status:409});
+ if(data?.status==='cancelled')return Response.json({error:'This payment was voided. No new payment was recorded. Review the history before starting another payment.'},{status:409});
  return Response.json({payment:data},{headers:{'Cache-Control':'no-store'}});
 }

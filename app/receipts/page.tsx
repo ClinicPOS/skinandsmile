@@ -949,8 +949,8 @@ export default function ReceiptsPage() {
       supabase.from("services").select("*"),
       supabase.from("clinics").select("*"),
       supabase.from("outstanding_balances").select("*"),
-      supabase.from("balance_payments").select("*"),
-      supabase.from("patient_credits").select("*"),
+      supabase.from("balance_payments").select("*").neq("status", "cancelled"),
+      supabase.from("patient_credits").select("*").neq("status", "cancelled"),
     ]);
 
     if (doctorResult.status === "fulfilled") {
@@ -989,7 +989,7 @@ export default function ReceiptsPage() {
   }
 
   async function refetchBalancePayments() {
-    const { data, error } = await supabase.from("balance_payments").select("*");
+    const { data, error } = await supabase.from("balance_payments").select("*").neq("status", "cancelled");
     if (!error) {
       setBalancePayments((data || []) as BalancePayment[]);
     }
@@ -1205,7 +1205,7 @@ export default function ReceiptsPage() {
         const planIds = plans.map((p: any) => p.id);
         const [visR, payR, payRecordsR] = await Promise.all([
           supabase.from("treatment_plan_visits").select("*").in("treatment_plan_id", planIds),
-          supabase.from("treatment_plan_payments").select("*").in("treatment_plan_id", planIds),
+          supabase.from("treatment_plan_payments").select("*").neq("status", "cancelled").in("treatment_plan_id", planIds),
           supabase.from("treatment_plan_payment_records").select("*").in("treatment_plan_id", planIds),
         ]);
         setPatientActivePlanVisits((visR.data || []) as any[]);

@@ -6,7 +6,7 @@ import type {PaymentAllocation} from './types';
 export async function prepareRefundProposal(receiptId:string,itemIds:string[],amounts:Record<string,string>){
  const db=createProtectedDataClient();
  const initial=await db.rpc('receipt_refund_fingerprint',{p_receipt_id:receiptId});if(initial.error)throw Error('Could not verify receipt.');
- const results=await Promise.all([db.from('receipt_items').select('*').eq('receipt_id',receiptId),db.from('refunds').select('id').eq('receipt_id',receiptId),db.from('payment_records').select('id').eq('receipt_id',receiptId)]);
+ const results=await Promise.all([db.from('receipt_items').select('*').eq('receipt_id',receiptId),db.from('refunds').select('id').is("accounting_void_request_id", null).eq('receipt_id',receiptId),db.from('payment_records').select('id').eq('receipt_id',receiptId)]);
  for(const result of results)if(result.error)throw Error('Could not load original refund records.');
  const [items,refunds,payments]=results.map(r=>r.data||[]);
  if(classifyReceiptSnapshotStatus(items)!=='snapshot')throw Error('This older receipt needs a reviewed historical refund calculation. Automatic refund is blocked.');

@@ -8,7 +8,8 @@ const row={id:'fixture-request',receiptNumber:123,patientName:'TEST Patient',req
 let values=[],cursor=0,calls=[];
 const react={useEffect(){},useState(initial){const i=cursor++;if(!(i in values))values[i]=Array.isArray(initial)?[row]:typeof initial==='boolean'&&initial===true?false:initial;return [values[i],value=>{values[i]=typeof value==='function'?value(values[i]):value;}];}};
 const source=ts.transpileModule(fs.readFileSync('components/refund-approval-queue.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText;
-const exports={};vm.runInNewContext(source,{exports,require:name=>name==='react'?react:require(name),fetch:async(url,init)=>{calls.push({url,body:JSON.parse(init.body)});return {ok:true,json:async()=>({request:{status:'APPROVED'}})};},queueMicrotask,console,Date});
+const fakeFetch=async(url,init)=>{calls.push({url,body:JSON.parse(init.body)});return {ok:true,json:async()=>({request:{status:'APPROVED'}})};};
+const exports={};vm.runInNewContext(source,{exports,require:name=>name==='react'?react:name==='../lib/request-json'?{requestJson:async(url,init)=>{const response=await fakeFetch(url,init);return response.json();}}:require(name),fetch:async(url,init)=>{calls.push({url,body:JSON.parse(init.body)});return {ok:true,json:async()=>({request:{status:'APPROVED'}})};},queueMicrotask,console,Date});
 function render(){cursor=0;return exports.RefundApprovalQueue({clinicId:'fixture-clinic',review:true});}
 function find(node,predicate){if(!node||typeof node!=='object')return [];if(Array.isArray(node))return node.flatMap(child=>find(child,predicate));return [...(predicate(node)?[node]:[]),...find(node.props?.children,predicate)];}
 for(const label of ['Approve','Reject']){

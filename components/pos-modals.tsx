@@ -648,7 +648,7 @@ export function SearchPatientModal({
           const [legacyPaymentsResult, structuredPaymentsResult] = await Promise.all([
             supabase
               .from("treatment_plan_payments")
-              .select("*")
+              .select("*").neq("status", "cancelled")
               .eq("treatment_plan_id", planData.id)
               .order("created_at", { ascending: false }),
             supabase
@@ -835,7 +835,7 @@ export function SearchPatientModal({
           .order("visit_number", { ascending: false }),
         supabase
           .from("treatment_plan_payments")
-          .select("*")
+          .select("*").neq("status", "cancelled")
           .in("treatment_plan_id", planIds)
           .order("created_at", { ascending: false }),
         supabase
@@ -1102,7 +1102,7 @@ export function SearchPatientModal({
       const [refreshedPaymentsResult, refreshedRecordsResult] = await Promise.all([
         supabase
           .from("treatment_plan_payments")
-          .select("*")
+          .select("*").neq("status", "cancelled")
           .eq("treatment_plan_id", plan.id)
           .order("created_at", { ascending: false }),
         supabase
@@ -2579,7 +2579,7 @@ export function ReceiptHistoryModal({
       supabase.from("receptionist").select("id, name"),
       supabase.from("treatment_plans").select("*").in("created_by", receptionistIds).order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payment_records").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_payments").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payments").select("*").neq("status", "cancelled").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payment_allocations").select("*").order("created_at", { ascending: false }),
     ]);
 
@@ -2617,7 +2617,7 @@ export function ReceiptHistoryModal({
     setLoadingItemsFor(receiptId);
     const [itemsRes, refundsRes, paymentRecordsRes] = await Promise.all([
       supabase.from("receipt_items").select("*").eq("receipt_id", receiptId),
-      supabase.from("refunds").select("*").eq("receipt_id", receiptId).order("created_at", { ascending: false }),
+      supabase.from("refunds").select("*").is("accounting_void_request_id", null).eq("receipt_id", receiptId).order("created_at", { ascending: false }),
       supabase.from("payment_records").select("id").eq("receipt_id", receiptId).order("created_at", { ascending: false }),
     ]);
     const loadedItems = itemsRes.data || [];
@@ -3288,7 +3288,7 @@ export function ReceiptHistoryModal({
                             </button>
 
                             {isExpanded && (
-                              <div className="border-t border-slate-100 bg-slate-50 px-4 pb-4">{items&&receipt.status!=="VOIDED"&&<ReceiptVoidButton receiptId={receipt.id}/>}
+                              <div className="border-t border-slate-100 bg-slate-50 px-4 pb-4">{items&&receipt.status!=="VOIDED"&&<ReceiptVoidButton key={receipt.id} receiptId={receipt.id}/>}
 
                                 {isLoading ? (
                                   <p className="py-4 text-center text-xs text-slate-400">Loading items…</p>

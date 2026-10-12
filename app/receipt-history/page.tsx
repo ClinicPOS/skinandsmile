@@ -1,5 +1,6 @@
 "use client";
 
+import { ReceiptVoidButton } from "../../components/receipt-void-button";
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
@@ -162,7 +163,7 @@ export default function ReceiptHistoryPage() {
       supabase.from("treatment_plans").select("*").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_visits").select("id, treatment_plan_id, visit_number, created_at").order("visit_number", { ascending: true }),
       supabase.from("treatment_plan_payment_records").select("*").order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_payments").select("*").order("created_at", { ascending: false }),
+      supabase.from("treatment_plan_payments").select("*").neq("status", "cancelled").order("created_at", { ascending: false }),
       supabase.from("treatment_plan_payment_allocations").select("*").order("created_at", { ascending: false }),
     ]);
 
@@ -216,6 +217,7 @@ export default function ReceiptHistoryPage() {
         total_vat_amount: Number(record.total_vat_amount || 0),
         total_customer_charged_amount: Number(record.total_customer_charged_amount || 0),
         payment_method_summary: record.payment_method_summary || null,
+        status: record.status === "cancelled" ? "VOIDED" : "COMPLETED",
         treatment_plan_payment_allocations: treatmentPlanAllocationRows.filter((allocation) => allocation.payment_id === record.id),
       };
     });
@@ -727,6 +729,7 @@ export default function ReceiptHistoryPage() {
                       Receipt {formatReceiptNo(selectedReceipt)} {selectedReceipt.status === "VOIDED" && <span className="ml-2 text-rose-700">VOIDED — retained for history</span>}
                     </h2>
                     <p className="mt-1 text-sm text-slate-500">Premium dental clinic format</p>
+                    {selectedReceipt.status!=="VOIDED"&&<ReceiptVoidButton key={selectedReceipt.id} receiptId={selectedReceipt.id}/> }
                   </div>
 
                   <button
