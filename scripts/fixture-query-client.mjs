@@ -3,7 +3,9 @@
 export async function fixtureQueryClient(db) {
  const data={};
  const names=(await db.query("select tablename from pg_tables where schemaname='public'")).rows;
- for(const {tablename} of names)data[tablename]=(await db.query(`select * from public.${tablename}`)).rows;
+ // REST returns timestamps as JSON strings, whereas PostgreSQL adapters may
+ // return Date objects. Match the production transport for date comparisons.
+ for(const {tablename} of names)data[tablename]=JSON.parse(JSON.stringify((await db.query(`select * from public.${tablename}`)).rows));
  const get=(row,field)=>field.split('.').reduce((value,key)=>value?.[key],row);
  const compare=(value,other)=>/created_at|updated_at/.test(other.field)?Date.parse(value)-Date.parse(other.value):value>other.value?1:value<other.value?-1:0;
  return {from(table){
@@ -14,6 +16,7 @@ export async function fixtureQueryClient(db) {
   },then(resolve,reject){
    const linked=(data[table]||[]).map(row=>({...row,
     ...(table==='treatment_plan_payment_records'?{treatment_plans:data.treatment_plans.find(p=>p.id===row.treatment_plan_id)}:{}),
+    ...(table==='treatment_plan_visits'?{treatment_plans:data.treatment_plans.find(p=>p.id===row.treatment_plan_id)}:{}),
     ...(table==='refunds'?{receipts:data.receipts.find(r=>r.id===row.receipt_id)}:{}),
     ...(table==='payment_allocation_refunds'?{payment_allocations:data.payment_allocations.find(a=>a.id===row.payment_allocation_id)}:{})
    }));

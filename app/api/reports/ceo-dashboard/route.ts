@@ -107,6 +107,7 @@ type TreatmentPlanRow = {
   created_at?: string | null;
   status?: "Active" | "Completed" | "Cancelled";
   cancelled_at?: string | null;
+  duplicate_of_plan_id?: string | null;
 };
 
 type TreatmentPlanPaymentRow = {
@@ -769,7 +770,7 @@ export async function POST(request: Request) {
       .range(from, to)),
     fetchAllPages<TreatmentPlanRow>((from, to) => supabase
       .from("treatment_plans")
-      .select("id, clinic_id, total_amount, is_legacy, historical_amount_paid, created_at, status, cancelled_at")
+      .select("id, clinic_id, total_amount, is_legacy, historical_amount_paid, created_at, status, cancelled_at, duplicate_of_plan_id")
       .in("clinic_id", clinicIds)
       .lt("created_at", outstandingWindowEnd)
       .order("id", { ascending: true })
@@ -850,6 +851,7 @@ export async function POST(request: Request) {
           historical_amount_paid: asNumber(row.historical_amount_paid),
           status: row.status,
           cancelled_at: row.cancelled_at,
+          duplicate_of_plan_id: row.duplicate_of_plan_id,
         },
         {
           structuredPayments: planPaymentRecordsByPlanId.get(row.id) || [],
@@ -871,7 +873,7 @@ export async function POST(request: Request) {
   if(includeHistoricalData){
     try{
       const pendingVisits=await fetchAllPages<{id:string;doctor_id:string|null;created_at:string}>((from,to)=>{
-        let query=supabase.from('treatment_plan_visits').select('id,doctor_id,created_at,treatment_plans!inner(clinic_id)').gte('created_at',currentRange.startUtcIso).lt('created_at',currentRange.endUtcIso);
+        let query=supabase.from('treatment_plan_visits').select('id,doctor_id,created_at,treatment_plans!inner(clinic_id,status)').neq('treatment_plans.status','Cancelled').gte('created_at',currentRange.startUtcIso).lt('created_at',currentRange.endUtcIso);
         if(clinicId)query=query.eq('treatment_plans.clinic_id',clinicId);
         return query.order('created_at').order('id').range(from,to);
       });

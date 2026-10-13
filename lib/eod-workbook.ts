@@ -527,6 +527,7 @@ supabase
     const relevantTreatmentPlanIds = new Set<string>();
     let treatmentPlanTabbyFeeTotal = 0;
     let treatmentPlanTamaraFeeTotal = 0;
+    let voidedPlanPayments: TreatmentPlanPaymentRecord[] = [];
     let treatmentPlanPaymentRecordsForDay: Array<(TreatmentPlanPaymentRecord & { treatment_plans?: any; patients?: any })> = [];
     let treatmentPlanPaymentAllocationsForDay: TreatmentPlanPaymentAllocation[] = [];
     const treatmentPlanAllocationsByPaymentId = new Map<string, TreatmentPlanPaymentAllocation[]>();
@@ -538,7 +539,7 @@ supabase
     ] = await Promise.all([
       supabase
       .from("treatment_plans")
-      .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, cancelled_at")
+      .select("id, patient_id, clinic_patient_file_id, title, total_amount, planned_visits, status, notes, is_legacy, historical_amount_paid, created_at, completed_at, cancelled_at, duplicate_of_plan_id")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -551,7 +552,7 @@ supabase
       .lte("created_at", endUtcIso),
       supabase
       .from("treatment_plan_payment_records")
-      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid)").neq("status", "cancelled")
+      .select("id, treatment_plan_id, patient_id, clinic_id, receptionist_id, register_session_id, total_invoice_amount_settled, total_vat_amount, total_payment_fee_amount, total_customer_charged_amount, payment_method_summary, is_split, status, created_by, legacy_treatment_plan_payment_id, created_at, updated_at, treatment_plans(created_at, clinic_patient_file_id, title, total_amount, planned_visits, status, is_legacy, historical_amount_paid)")
       .eq("clinic_id", activeClinic.id)
       .gte("created_at", startUtcIso)
       .lte("created_at", endUtcIso)
@@ -591,7 +592,9 @@ supabase
       alert("Required report data could not be loaded. EOD was not exported. Please retry.");
       return;
     } else {
-      treatmentPlanPaymentRecordsForDay = (treatmentPlanPaymentRecordsData || []) as Array<(TreatmentPlanPaymentRecord & { treatment_plans?: any; patients?: any })>;
+      voidedPlanPayments = (treatmentPlanPaymentRecordsData || []).filter(payment=>payment.status==="cancelled") as TreatmentPlanPaymentRecord[];
+      for (const payment of voidedPlanPayments) relevantTreatmentPlanIds.add(payment.treatment_plan_id);
+      treatmentPlanPaymentRecordsForDay = (treatmentPlanPaymentRecordsData || []).filter(payment=>payment.status!=="cancelled") as Array<(TreatmentPlanPaymentRecord & { treatment_plans?: any; patients?: any })>;
       treatmentPlanCollectionsTotal = treatmentPlanPaymentRecordsForDay.reduce((sum, payment) => sum + Number(payment.total_customer_charged_amount || 0), 0);
       treatmentPlanPaymentRecordsForDay.forEach((payment) => {
         const planId = String(payment.treatment_plan_id || "");
@@ -730,7 +733,7 @@ supabase
           totalAmount,
           paidToDate,
           rollup.remainingBalance,
-          `${completedVisits} / ${Number(plan.planned_visits || 1)}`,
+          plan.status==="Cancelled"?`${completedVisits} saved visits — archived`:`${completedVisits} / ${Number(plan.planned_visits || 1)}`,
           plan.notes || "",
         ]);
       });
@@ -1777,6 +1780,10 @@ supabase
       XLSX.utils.book_append_sheet(workbook, dailySummarySheet, "Daily Payment Summary");
     }
 
+    if(voidedPlanPayments.length){
+      const rows=[["Payment reference","Patient","Treatment plan","Original method","Original amount (excluded)","Status","Recorded at","Voided at"],...voidedPlanPayments.map(payment=>["TPP-"+payment.id.slice(0,8).toUpperCase(),planPatientDetails.get(payment.patient_id)?.name||"",treatmentPlansById.get(payment.treatment_plan_id)?.title||"",payment.payment_method_summary,Number(payment.total_customer_charged_amount),"VOIDED — excluded from totals",payment.created_at,payment.updated_at])];
+      const sheet=XLSX.utils.aoa_to_sheet(rows);for(const [key,value] of Object.entries(sheet)){if(!key.startsWith("!"))value.s={fill:{fgColor:{rgb:"E5E7EB"}},font:XLSX.utils.decode_cell(key).r===0?{bold:true,color:{rgb:"374151"}}:{strike:true,color:{rgb:"6B7280"}}};}sheet["!cols"]=rows[0].map(()=>({wch:30}));XLSX.utils.book_append_sheet(workbook,sheet,"Voided Plan Payments");
+    }
     const fileDate = formatDubaiFileDate(now);
     const fileName = `EOD RECONCILIATION ${activeClinic.name.toUpperCase()} ${fileDate.day} ${fileDate.month} ${fileDate.year}.xlsx`;
     const pendingSheet=XLSX.utils.aoa_to_sheet([["EOD Approval Status",pendingCorrections.length?"DRAFT — unresolved requests":"No unresolved requests"],["Request","Receipt","Type","Status","Reason","Requested At"],...pendingCorrections.map(q=>[q.id,q.receipt_id||`Plan payment ${q.plan_payment_id}`,q.kind,q.status,q.requested_reason,q.created_at])]);

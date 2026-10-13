@@ -36,6 +36,7 @@ export async function POST(request:Request){
  const body=await request.json().catch(()=>null);const db=createProtectedDataClient();
  if(!body||!['request','approve','reject','execute','cancel'].includes(body.action))return Response.json({error:'Invalid refund action.'},{status:400});
  const correction=body.kind==='CORRECTION';
+ if(body.keepPlanId!==undefined&&(body.action!=='request'||body.kind!=='VOID'||!isUuid(body.keepPlanId)))return Response.json({error:'Select the correct treatment plan to retain.'},{status:400});
  let clinicId:string;let receiptId:string;let row;
  if(body.action==='request'){
   if(session.userRole!=='receptionist')return Response.json({error:'Use Receptionist / POS login to request a correction or refund. Managers approve requests from their workspace.'},{status:403});
@@ -49,7 +50,7 @@ export async function POST(request:Request){
   const result=await db.from('receipt_refund_requests').select('*').eq('id',body.id).maybeSingle();if(result.error)return Response.json({error:'Could not load request.'},{status:503});if(!result.data)return Response.json({error:'Request not found.'},{status:404});row=result.data;clinicId=row.clinic_id;receiptId=row.receipt_id||row.plan_payment_id;
  }
  const scope=ensureClinicScopeAccess(session,clinicId);if(scope)return scope;
- const originalInput=body.action==='request'?JSON.stringify(body.kind==='VOID'?{kind:'VOID'}:correction?{kind:'CORRECTION',correction:body.correction}:{items:[...body.itemIds].sort(),allocations:Object.entries(body.allocationAmounts).sort(([a],[b])=>a.localeCompare(b))}):null;
+ const originalInput=body.action==='request'?JSON.stringify(body.kind==='VOID'?{kind:'VOID',...(body.keepPlanId?{keepPlanId:body.keepPlanId}:{})}:correction?{kind:'CORRECTION',correction:body.correction}:{items:[...body.itemIds].sort(),allocations:Object.entries(body.allocationAmounts).sort(([a],[b])=>a.localeCompare(b))}):null;
  if(body.action==='request'){
   const previous=await db.from('receipt_refund_requests').select('*').eq('id',body.operationId).maybeSingle();if(previous.error)return Response.json({error:'Could not verify request retry.'},{status:503});
   if(previous.data){if((previous.data.receipt_id||previous.data.plan_payment_id)!==receiptId||previous.data.requested_by!==session.receptionistId||previous.data.requested_reason!==body.reason.trim()||previous.data.proposal.originalInput!==originalInput)return Response.json({error:'Request ID already used. Reopen the receipt to start again.'},{status:409});return Response.json({request:previous.data});}
@@ -61,8 +62,9 @@ export async function POST(request:Request){
  if(body.action==='reject'&&(typeof body.reason!=='string'||body.reason.trim().length<3||body.reason.length>1000))return Response.json({error:'Enter a rejection reason.'},{status:400});
  try{
   if(body.action==='approve'&&row?.kind==='VOID'&&body.confirmMistakenEntry!==true)return Response.json({error:'Confirm this is a mistaken payment entry, with actual money accounted for separately.'},{status:400});
-  const proposal=body.action==='request'?{...await (body.kind==='VOID'?prepareReceiptVoid(receiptId):correction?prepareReceiptCorrection(receiptId,session.receptionistId!,body.correction):prepareRefundProposal(receiptId,body.itemIds,body.allocationAmounts)),originalInput}:null;
-  const {data,error}=await db.rpc('transition_receipt_refund',{p_id:body.action==='request'?body.operationId:body.id,p_receipt_id:receiptId,p_action:body.action,p_proposal:proposal,p_actor:{...await auditActor(session),...((body.kind==='VOID'||row?.kind==='VOID')?{void_workflow_version:2}:{})},p_reason:body.reason?.trim()||'',p_reference:body.reference?.trim()||''});
+  if(body.action==='approve'&&row?.proposal?.duplicatePlan&&body.confirmDuplicatePlan!==true)return Response.json({error:'Confirm the retained plan is correct and the cancelled plan/visit is a duplicate.'},{status:400});
+  const proposal=body.action==='request'?{...await (body.kind==='VOID'?prepareReceiptVoid(receiptId,body.keepPlanId):correction?prepareReceiptCorrection(receiptId,session.receptionistId!,body.correction):prepareRefundProposal(receiptId,body.itemIds,body.allocationAmounts)),originalInput}:null;
+  const {data,error}=await db.rpc('transition_receipt_refund',{p_id:body.action==='request'?body.operationId:body.id,p_receipt_id:receiptId,p_action:body.action,p_proposal:proposal,p_actor:{...await auditActor(session),...((body.kind==='VOID'||row?.kind==='VOID')?{void_workflow_version:2,duplicate_plan_workflow_version:1,confirm_duplicate_plan:body.confirmDuplicatePlan===true}:{})},p_reason:body.reason?.trim()||'',p_reference:body.reference?.trim()||''});
   if(error)return Response.json({error:error.message==='Invalid service clinic'?'A replacement service is inactive or does not belong to this clinic. Cancel this request and create a fresh correction using active services from your clinic.':error.message},{status:409});return Response.json({request:data});
  }catch(e){return Response.json({error:e instanceof Error?e.message:'Refund calculation failed.'},{status:400});}
 }

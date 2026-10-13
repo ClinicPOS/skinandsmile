@@ -1,5 +1,6 @@
 "use client";
 
+import {subscribeFinancialChanges} from "../../lib/financial-change-events";
 import { ReceiptVoidButton } from "../../components/receipt-void-button";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppFrame } from "../../components/app-frame";
@@ -127,6 +128,8 @@ export default function ReceiptHistoryPage() {
   const [selectedHistoryClinicId, setSelectedHistoryClinicId] = useState("");
   const historyClinicId = allowedClinicId || selectedHistoryClinicId;
   const [historyPage, setHistoryPage] = useState(0);
+  const [financialRevision,setFinancialRevision]=useState(0);
+  useEffect(()=>subscribeFinancialChanges(()=>setFinancialRevision(v=>v+1)),[]);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const historyGeneration = useRef(0);
@@ -172,7 +175,7 @@ export default function ReceiptHistoryPage() {
       alert(error instanceof Error ? error.message : "Receipt history could not be loaded.");
     }).finally(() => { if (generation === historyGeneration.current) setHistoryLoading(false); });
     return () => { historyGeneration.current++; };
-  }, [isLoaded, historyClinicId, historyPage]);
+  }, [isLoaded, historyClinicId, historyPage, financialRevision]);
 
   async function loadHistory(generation: number) {
     if (!historyClinicId) throw new Error("Select a clinic to view receipt history.");
@@ -486,6 +489,7 @@ export default function ReceiptHistoryPage() {
       const visitsCompleted = treatmentPlanVisits.filter((visit) => visit.treatment_plan_id === plan?.id).length;
       const completedVisits = visitsCompleted;
       return generateTreatmentPlanPaymentInvoiceHtml({
+        voided:paymentRecord?.status==="cancelled",
         clinic: clinic as any,
         receiptNumber: selectedReceipt.title,
         issuedAt,
@@ -644,6 +648,7 @@ export default function ReceiptHistoryPage() {
         customerChargedAmount: Number(allocation.customer_charged_amount || 0),
       }));
       printTreatmentPlanPaymentReceipt({
+        voided:paymentRecord?.status==="cancelled",
         clinic: clinic as any,
         patientName: patient?.name || "-",
         patientFileNo: patientClinicFile?.file_no || (patient?.patient_number ? String(patient.patient_number) : undefined),
@@ -774,7 +779,7 @@ export default function ReceiptHistoryPage() {
                       Receipt {formatReceiptNo(selectedReceipt)} {selectedReceipt.status === "VOIDED" && <span className="ml-2 text-rose-700">VOIDED — retained for history</span>}
                     </h2>
                     <p className="mt-1 text-sm text-slate-500">Premium dental clinic format</p>
-                    {selectedReceipt.status!=="VOIDED"&&<ReceiptVoidButton key={selectedReceipt.id} receiptId={selectedReceipt.id}/> }
+                    {selectedReceipt.status!=="VOIDED"&&<ReceiptVoidButton key={selectedReceipt.id} receiptId={selectedReceipt.id} planPayment={selectedReceipt.kind==="treatment-plan"} planChoices={selectedReceipt.kind==="treatment-plan"?treatmentPlanPaymentRecords.filter(record=>record.id!==selectedReceipt.id&&record.patient_id===selectedReceipt.patient_id&&record.status!=="cancelled"&&record.treatment_plan_id!==treatmentPlanPaymentRecords.find(original=>original.id===selectedReceipt.id)?.treatment_plan_id).map(record=>({id:record.treatment_plan_id,label:`TPP-${record.id.slice(0,8).toUpperCase()} · ${record.payment_method_summary}`})):[]}/> }
                   </div>
 
                   <button

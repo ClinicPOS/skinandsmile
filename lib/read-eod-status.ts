@@ -13,6 +13,12 @@ if(!['owner','receptionist'].includes(session.userRole)&&!(session.userRole==='c
 const start=new Date(`${day}T00:00:00+04:00`),end=new Date(start.getTime()+86400000),db=client;
 const [pending,changes]=await Promise.all([db.from('receipt_refund_requests').select('id,receipt_id,plan_payment_id,kind,status,requested_reason,created_at').eq('clinic_id',clinicId).in('status',['PENDING','APPROVED']).lt('created_at',end.toISOString()).order('created_at'),db.from('receipt_refund_requests').select('receipt_id,plan_payment_id,reviewed_by,reviewed_at,completed_at,kind,requested_reason,replacement_receipt_id').eq('clinic_id',clinicId).eq('status','COMPLETED').gte('completed_at',start.toISOString()).lt('completed_at',end.toISOString())]);
 if(pending.error||changes.error)return Response.json({error:'Could not check EOD approvals. Export blocked.'},{status:503});
+// A later request to void an older mistaken plan payment also makes that
+// original business day's regenerated report a draft until approval.
+const futureVoids=await db.from('receipt_refund_requests').select('id,receipt_id,plan_payment_id,kind,status,requested_reason,created_at').eq('clinic_id',clinicId).eq('kind','VOID').in('status',['PENDING','APPROVED']).gte('created_at',end.toISOString());
+if(futureVoids.error)return Response.json({error:'Could not check later plan-payment corrections. Export blocked.'},{status:503});
+const futureIds=(futureVoids.data||[]).map(row=>row.plan_payment_id).filter(Boolean);
+if(futureIds.length){const targets=await db.from('treatment_plan_payment_records').select('id').eq('clinic_id',clinicId).in('id',futureIds).gte('created_at',start.toISOString()).lt('created_at',end.toISOString());if(targets.error)return Response.json({error:'Could not check correction dates. Export blocked.'},{status:503});const ids=new Set((targets.data||[]).map(row=>row.id));pending.data?.push(...(futureVoids.data||[]).filter(row=>ids.has(row.plan_payment_id)));}
 const ids=(changes.data||[]).map(r=>r.reviewed_by).filter(Boolean);
 const names=ids.length?await db.from('pos_accounts').select('id,name').in('id',ids):{data:[],error:null};
 if(names.error)return Response.json({error:'Could not check approvers.'},{status:503});

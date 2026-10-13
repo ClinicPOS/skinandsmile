@@ -14,6 +14,7 @@ type TreatmentPlanReceiptAllocation = {
 };
 
 export type TreatmentPlanPaymentReceiptContext = {
+  voided?: boolean;
   clinic: Clinic | null;
   patientName: string;
   patientFileNo?: string;
@@ -136,6 +137,7 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
 <body>
   ${buildThermalLogoHtml(logoPath, "Clinic logo")}
 
+  ${ctx.voided ? `<div class="double" style="font-size:16px;font-weight:bold">VOIDED — NOT A VALID PAYMENT</div><p>Original entry retained for audit. Excluded from collections.</p>` : ""}
   <div class="double">PAYMENT RECEIPT / إيصال الدفع</div>
 
   <div class="clinic-name">${escapeHtml(clinicName)}</div>

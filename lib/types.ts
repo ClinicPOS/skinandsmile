@@ -210,6 +210,7 @@ export type TreatmentPlan = {
   planned_visits: number;
   status: "Active" | "Completed" | "Cancelled";
   cancelled_at?: string | null;
+  duplicate_of_plan_id?: string | null;
   notes: string | null;
   created_by: string | null;
   created_at: string;

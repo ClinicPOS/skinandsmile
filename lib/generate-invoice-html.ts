@@ -3,7 +3,7 @@ import { getA4InvoiceLogoPath, getA4InvoiceLogoSettings, getA4InvoiceTheme } fro
 import type { Clinic, Patient } from "./types";
 import { truncateCurrency } from "./money";
 
-export type InvoiceStatus = "PAID" | "PARTIALLY PAID" | "UNPAID" | "REFUNDED";
+export type InvoiceStatus = "PAID" | "PARTIALLY PAID" | "UNPAID" | "REFUNDED" | "VOIDED";
 
 export interface InvoiceAllocationRow {
   methodLabel: string;
@@ -101,6 +101,7 @@ export interface GenerateInvoiceHtmlOptions {
 }
 
 export interface TreatmentPlanInvoiceContext {
+  voided?: boolean;
   clinic: GenerateInvoiceHtmlOptions["clinic"];
   receiptNumber: string;
   issuedAt: Date;
@@ -147,6 +148,7 @@ function statusBadgeStyle(status: InvoiceStatus) {
     "PARTIALLY PAID": { bg: "#fff4cc", color: "#9A6A20" },
     "UNPAID":         { bg: "#fde8e8", color: "#c0392b" },
     "REFUNDED":       { bg: "#eaf0fb", color: "#2c5f9e" },
+    "VOIDED": {bg:"#e5e7eb",color:"#374151"},
   };
   return map[status] ?? map["UNPAID"];
 }
@@ -159,6 +161,7 @@ export function generateTreatmentPlanPaymentInvoiceHtml(ctx: TreatmentPlanInvoic
   const allocationTotal = (ctx.paymentAllocations ?? []).reduce((sum, allocation) => sum + Number(allocation.customerChargedAmount || 0), 0);
   const grandTotal = allocationTotal > 0.0049 ? allocationTotal : settlementAmount + paymentFeeAmount;
   const notes = [
+    ctx.voided ? "VOIDED — original recorded amounts below are excluded from collections. Not a valid payment." : null,
     ctx.notes,
     `Treatment plan: ${ctx.planTitle}`,
     ctx.remainingAfterToday != null ? `Remaining balance after today: AED ${Number(ctx.remainingAfterToday).toFixed(2)}` : null,
@@ -167,7 +170,7 @@ export function generateTreatmentPlanPaymentInvoiceHtml(ctx: TreatmentPlanInvoic
   return generateInvoiceHtml({
     clinic: ctx.clinic,
     receiptNumber: ctx.receiptNumber,
-    invoiceStatus: "PAID",
+    invoiceStatus: ctx.voided ? "VOIDED" : "PAID",
     issuedAt: ctx.issuedAt,
     cashierName: ctx.cashierName,
     patient: ctx.patient,

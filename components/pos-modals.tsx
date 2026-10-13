@@ -1,4 +1,5 @@
 "use client";
+import {subscribeFinancialChanges} from '../lib/financial-change-events';
 import {createPosEntry,completePosEntry} from "../lib/pos-entry-client";
 import {saveTreatmentPlanPayment} from "../lib/treatment-plan-payment-client";
 
@@ -725,6 +726,22 @@ export function SearchPatientModal({
     setVisitNotes("");
     setPaymentPlanId(null);
   }
+
+  useEffect(() => {
+    if (!isOpen || !selectedPatient || !clinicId) return;
+    let cancelled=false;
+    return (() => {
+      const stop=subscribeFinancialChanges(() => { void (async () => {
+        const result=await supabase.from("treatment_plans").select("*").eq("patient_id",selectedPatient.id).eq("clinic_id",clinicId);
+        if(result.error)throw Error("Updated treatment-plan balances could not be loaded. Reopen the patient profile to retry.");
+        const ids=(result.data||[]).map(plan=>plan.id);
+        const [legacy,structured]=await Promise.all([ids.length?supabase.from("treatment_plan_payments").select("*").neq("status","cancelled").in("treatment_plan_id",ids):Promise.resolve({data:[],error:null}),ids.length?supabase.from("treatment_plan_payment_records").select("*").in("treatment_plan_id",ids):Promise.resolve({data:[],error:null})]);
+        if(legacy.error||structured.error)throw Error("Updated payment balances could not be loaded. Reopen the patient profile to retry.");
+        if(!cancelled){setTreatmentPlans(result.data||[]);setTreatmentPlanPayments(legacy.data||[]);setTreatmentPlanPaymentRecords(structured.data||[]);}
+      })().catch(error=>{if(!cancelled)alert(error.message);}); });
+      return ()=>{cancelled=true;stop();};
+    })();
+  },[isOpen,selectedPatient?.id,clinicId]);
 
   async function openProfile(patient: FullPatient) {
     const generation = ++profileLoadGeneration.current;
@@ -2505,6 +2522,8 @@ export function ReceiptHistoryModal({
     }
   }, [isOpen]);
 
+  useEffect(() => { if (!isOpen) return; return subscribeFinancialChanges(() => {void loadHistory().catch(() => alert("Updated history could not be loaded. Reopen history to retry."));}); }, [isOpen, clinicId]);
+
   async function fetchAllRows(table: string, select: string): Promise<any[]> {
     const BATCH = 1000;
     let all: any[] = [];
@@ -3171,7 +3190,7 @@ export function ReceiptHistoryModal({
                             <div key={record.id} className="rounded-2xl border border-cyan-100 bg-white p-4 shadow-sm">
                               <div className="flex items-start justify-between gap-3">
                                 <div>
-                                  <p className="text-sm font-semibold text-slate-900">{formatTreatmentPlanPaymentNo(record)}</p>
+                                  <p className="text-sm font-semibold text-slate-900">{formatTreatmentPlanPaymentNo(record)}{record.status==="cancelled"&&<span className="ml-2 rounded bg-slate-200 px-2 py-1 text-xs">VOIDED — excluded from totals</span>}</p>
                                   <p className="mt-1 text-sm text-slate-600">{patient?.name || "Unknown patient"}</p>
                                   <p className="mt-1 text-xs text-slate-500">{plan?.title || "Treatment plan payment"}</p>
                                 </div>
@@ -3221,6 +3240,7 @@ export function ReceiptHistoryModal({
                                 </button>
 
                               </div>
+                              {record.status!=="cancelled"&&<ReceiptVoidButton key={record.id} receiptId={record.id} planPayment planChoices={treatmentPlanPaymentEntries.filter(entry=>entry.plan?.id!==plan?.id&&entry.record.patient_id===record.patient_id&&entry.record.status!=="cancelled"&&entry.plan?.status==="Active"&&entry.plan?.title===plan?.title&&Number(entry.plan?.total_amount)===Number(plan?.total_amount)).map(entry=>({id:entry.plan!.id,label:`${formatTreatmentPlanPaymentNo(entry.record)} · ${entry.record.payment_method_summary} · ${entry.plan!.title}`}))}/>}
                             </div>
                           );
                         })}

@@ -1,5 +1,6 @@
 "use client";
 import { patientDetailChanges } from "../../lib/patient-detail-changes";
+import {subscribeFinancialChanges} from "../../lib/financial-change-events";
 import {savePosPreference} from "../../lib/pos-preference-client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -1209,6 +1210,11 @@ export default function ReceiptsPage() {
     setPatientActivePlanPaymentRecords([]);
     setPatientActivePlanVisits([]);
   }
+
+  useEffect(()=>subscribeFinancialChanges(()=>{
+    if(patientId&&activeClinic?.id)void loadPatientActivePlans(patientId,activeClinic.id);
+    if(registerSessionId&&activeClinic?.id)void loadCashDeductions();
+  }),[patientId,activeClinic?.id,registerSessionId]);
 
   async function loadPatientActivePlans(pid: string, cid: string) {
     if (!pid || !cid) return;
