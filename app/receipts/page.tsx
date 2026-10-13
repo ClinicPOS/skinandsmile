@@ -468,6 +468,7 @@ export default function ReceiptsPage() {
   } | null>(null);
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
   const [isDownloadingEod, setIsDownloadingEod] = useState(false);
+  const [eodDate, setEodDate] = useState(() => getDubaiBusinessDate());
   const [isPosUnlocked, setIsPosUnlocked] = useState(false);
   const [loginReceptionistId, setLoginReceptionistId] = useState("");
   const [pinInput, setPinInput] = useState("");
@@ -1852,12 +1853,16 @@ export default function ReceiptsPage() {
 
   async function downloadDailyIncomeReport() {
     if (!activeClinic?.id || isDownloadingEod) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(eodDate)) {
+      alert('Choose the EOD date first.');
+      return;
+    }
     setIsDownloadingEod(true);
     const started = performance.now();
     try {
       const response = await fetch('/api/workspace/eod-export', {
         method: 'POST', headers: {'Content-Type':'application/json'}, cache:'no-store',
-        body: JSON.stringify({clinicId:activeClinic.id})
+        body: JSON.stringify({clinicId:activeClinic.id, day:eodDate})
       });
       const report = await response.json();
       if (!response.ok || !report.workbook) throw new Error(report.error || 'EOD could not be prepared. Please retry.');
@@ -2956,6 +2961,16 @@ export default function ReceiptsPage() {
             >
               {isLoadingPatientBackupSummary ? "Preparing Backup..." : "Download Patient Backup"}
             </button>
+            <label className="block text-xs font-semibold text-slate-700">
+              EOD date
+              <input
+                type="date"
+                value={eodDate}
+                onChange={(event) => setEodDate(event.target.value)}
+                disabled={isDownloadingEod}
+                className="mt-1 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+              />
+            </label>
             <button
               onClick={downloadDailyIncomeReport}
               disabled={isDownloadingEod}

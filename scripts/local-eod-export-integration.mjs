@@ -48,7 +48,7 @@ const alerts=[];
 const reportDay=process.env.LOCAL_EOD_REPORT_DAY||'2026-10-07';assert.match(reportDay,/^\d{4}-\d{2}-\d{2}$/);
 const reportStart=new Date(`${reportDay}T00:00:00+04:00`).toISOString(),reportEnd=new Date(Date.parse(reportStart)+86400000-1).toISOString();
 class ReportDate extends Date {constructor(...args){super(...(args.length?args:[`${reportDay}T08:00:00Z`]));}static now(){return Date.parse(`${reportDay}T08:00:00Z`);}}
- const scope={exports:{},supabase:client,activeClinic:{id:clinic,name:'TEST ONLY CLINIC A'},isDownloadingEod:false,setIsDownloadingEod:()=>{},performance,Error,XLSX:{...XLSX,writeFile:wb=>{workbook=wb;}},fetch:localFetch,alert:message=>alerts.push(message),console,Date:ReportDate,Intl,Response,URL,URLSearchParams,process:{env:{}},crypto:webcrypto};
+ const scope={exports:{},supabase:client,activeClinic:{id:clinic,name:'TEST ONLY CLINIC A'},eodDate:process.env.LOCAL_EOD_REPORT_DAY||'2026-10-07',isDownloadingEod:false,setIsDownloadingEod:()=>{},performance,Error,XLSX:{...XLSX,writeFile:wb=>{workbook=wb;}},fetch:localFetch,alert:message=>alerts.push(message),console,Date:ReportDate,Intl,Response,URL,URLSearchParams,process:{env:{}},crypto:webcrypto};
 scope.roundCurrency=loadModule(path.resolve('lib/money.ts')).roundCurrency;
 const names=new Set(['computeTreatmentPlanRollup','extractLegacyCashAmount','getBusinessDayKeyForReporting','getPaymentBreakdownForReporting','getDubaiBusinessDate','getInstallmentFeeProvider','paymentVariantLabel','reportClinicFileNumber','summarizeStoredAllocationCollectionsForReporting','summarizeStoredAllocationRowsForReporting','truncateCurrency','parsePaymentMethodBreakdown','loadClinicHistoryPatients']);
 for(const statement of source.statements){
