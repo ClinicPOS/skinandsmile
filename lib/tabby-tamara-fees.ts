@@ -1,3 +1,5 @@
+import { fromMinorUnits, percentageOfMinorUnits, toMinorUnits } from './money';
+
 export const INSTALLMENT_FEE_RATE = 0.075;
 
 export type InstallmentFeeProvider = "Tabby" | "Tamara";
@@ -16,5 +18,5 @@ export function getInstallmentFeeProvider(method: string | null | undefined): In
 export function calculateInstallmentFee(amount: number): number {
   const baseAmount = Number(amount) || 0;
   if (baseAmount <= 0) return 0;
-  return roundMoney(baseAmount * INSTALLMENT_FEE_RATE);
+  return fromMinorUnits(percentageOfMinorUnits(toMinorUnits(baseAmount), 750));
 }

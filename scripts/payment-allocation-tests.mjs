@@ -42,6 +42,20 @@ const {
   validatePaymentAllocations,
   paymentSummaryLabel,
 } = require(allocationJs);
+
+// Match Postgres numeric rounding using an independent integer oracle.
+for (const variant of ['tamara', 'tabby_standard', 'tabby_card']) {
+  for (let fils = 1; fils <= 100000; fils++) {
+    const amount = fils / 100;
+    const [row] = buildPaymentAllocations([{id:'rounding',methodVariant:variant,invoiceAllocationAmountInput:amount.toFixed(2),providerReferenceNumber:'ROUNDING-TEST'}],amount,amount,0);
+    const expected = Number((BigInt(fils) * 75n + 500n) / 1000n);
+    assert.equal(Math.round(row.feeAmount * 100), expected, `${variant}: ${fils} fils`);
+    assert.equal(Math.round(row.customerChargedAmount * 100), fils + expected);
+  }
+  const [row] = buildPaymentAllocations([{id:'reported',methodVariant:variant,invoiceAllocationAmountInput:'469.00',providerReferenceNumber:'ROUNDING-TEST'}],469,469,0);
+  assert.equal(row.feeAmount,35.18);
+  assert.equal(row.customerChargedAmount,504.18);
+}
 const {
   getPaymentBreakdownForReporting,
   summarizeStoredAllocationRowsForReporting,

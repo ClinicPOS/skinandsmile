@@ -1,4 +1,4 @@
-import { fromMinorUnits, roundCurrency, sumMinorUnits, toMinorUnits } from "./money";
+import { fromMinorUnits, percentageOfMinorUnits, roundCurrency, sumMinorUnits, toMinorUnits } from "./money";
 
 export const PROVIDER_FEE_RATE = 0.075;
 
@@ -157,7 +157,7 @@ export function buildPaymentAllocations(
     const vatMinor = vatMinorByRow[index] || 0;
     const treatmentNetMinor = Math.max(0, invoiceMinor - vatMinor);
     const feeRate = methodGroup === "tabby" || methodGroup === "tamara" ? PROVIDER_FEE_RATE : 0;
-    const feeMinor = feeRate > 0 ? toMinorUnits(fromMinorUnits(invoiceMinor) * feeRate) : 0;
+    const feeMinor = feeRate > 0 ? percentageOfMinorUnits(invoiceMinor, 750) : 0;
     const customerChargedMinor = invoiceMinor + feeMinor;
 
     const providerReference = referenceRequiredForVariant(entry.methodVariant)

@@ -1,5 +1,10 @@
 export const AED_MINOR_UNITS = 100;
 
+// Integer fils and basis points keep half-fils exact before rounding.
+export function percentageOfMinorUnits(amountMinor: number, basisPoints: number): number {
+  return Math.floor((amountMinor * basisPoints + 5000) / 10000);
+}
+
 export function toMinorUnits(value: number): number {
   const normalized = Number(value) || 0;
   return Math.round(normalized * AED_MINOR_UNITS);
