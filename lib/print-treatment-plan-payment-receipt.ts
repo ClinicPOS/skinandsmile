@@ -193,7 +193,7 @@ export function buildTreatmentPlanPaymentReceiptHtml(ctx: TreatmentPlanPaymentRe
 </html>`;
 }
 
-export function printTreatmentPlanPaymentReceipt(ctx: TreatmentPlanPaymentReceiptContext): void {
+export function printTreatmentPlanPaymentReceipt(ctx: TreatmentPlanPaymentReceiptContext): Promise<void> {
   const html = buildTreatmentPlanPaymentReceiptHtml(ctx);
-  printHtmlWhenImagesReady(html, "Please allow popups to print the treatment plan receipt.");
+  return printHtmlWhenImagesReady(html, "Please allow popups to print the treatment plan receipt.");
 }

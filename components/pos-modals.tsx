@@ -1,4 +1,7 @@
 "use client";
+import { AsyncActionButton } from "./async-action-button";
+import { requestJson } from "../lib/request-json";
+import { getDubaiBusinessDate } from "../lib/cash-deductions";
 import {subscribeFinancialChanges} from '../lib/financial-change-events';
 import {createPosEntry,completePosEntry} from "../lib/pos-entry-client";
 import {saveTreatmentPlanPayment} from "../lib/treatment-plan-payment-client";
@@ -295,11 +298,7 @@ export function SearchPatientModal({
   onClose,
   onSelect,
   initialProfilePatientId = null,
-  patients,
   clinicId,
-  outstandingBalances = [],
-  balancePayments = [],
-  patientCredits = [],
   clinicsList = [],
   clinic = null,
   receptionistId = null,
@@ -311,13 +310,9 @@ export function SearchPatientModal({
 }: {
   isOpen: boolean;
   onClose: () => void;
-  onSelect: (patient: FullPatient) => void;
+  onSelect: (patient: FullPatient, financials: { balances: OutstandingBalance[]; balancePayments: BalancePayment[]; patientCredits: PatientCredit[] }) => void;
   initialProfilePatientId?: string | null;
-  patients: FullPatient[];
   clinicId?: string | null;
-  outstandingBalances?: OutstandingBalance[];
-  balancePayments?: BalancePayment[];
-  patientCredits?: PatientCredit[];
   clinicsList?: ClinicSummary[];
   clinic?: ClinicRecord | null;
   receptionistId?: string | null;
@@ -329,8 +324,18 @@ export function SearchPatientModal({
 }) {
   const [view, setView] = useState<"search" | "profile">("search");
   const [query, setQuery] = useState("");
-  const [patientDisplayLimit, setPatientDisplayLimit] = useState(100);
+  const [patients, setPatients] = useState<FullPatient[]>([]);
+  const [searchError, setSearchError] = useState("");
+  const [financeSummaryError, setFinanceSummaryError] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
+  const [isLoadingMorePatients, setIsLoadingMorePatients] = useState(false);
+  const [hasMorePatients, setHasMorePatients] = useState(false);
+  const [outstandingByPatient, setOutstandingByPatient] = useState<Record<string, { remaining: number; count: number }>>({});
   const [selectedPatient, setSelectedPatient] = useState<FullPatient | null>(null);
+  const [profileBalances, setProfileBalances] = useState<OutstandingBalance[]>([]);
+  const [profileBalancePayments, setProfileBalancePayments] = useState<BalancePayment[]>([]);
+  const [profilePatientCredits, setProfilePatientCredits] = useState<PatientCredit[]>([]);
+  const [patientFinancialsLoaded, setPatientFinancialsLoaded] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [notes, setNotes] = useState<PatientNote[]>([]);
   const [profileReceipts, setProfileReceipts] = useState<Receipt[]>([]);
@@ -384,6 +389,8 @@ export function SearchPatientModal({
   const [savingTreatmentVisit, setSavingTreatmentVisit] = useState(false);
   const visitRequest = useRef<{ fingerprint: string; id: string } | null>(null);
   const profileLoadGeneration = useRef(0);
+  const patientSearchGeneration = useRef(0);
+  const skipInitialProfileSearch = useRef(false);
   const [paymentPlanId, setPaymentPlanId] = useState<string | null>(null);
   const [planPaymentAmount, setPlanPaymentAmount] = useState("");
   const [planPaymentMode, setPlanPaymentMode] = useState<PlanPaymentMode>("Cash");
@@ -392,7 +399,10 @@ export function SearchPatientModal({
   const [savingTreatmentPayment, setSavingTreatmentPayment] = useState(false);
 
   useEffect(() => {
-    if (!isOpen) profileLoadGeneration.current++;
+    if (!isOpen) {
+      profileLoadGeneration.current++;
+      skipInitialProfileSearch.current = false;
+    }
     if (isOpen) {
       setQuery("");
       setExpandedNoteIds(new Set());
@@ -403,62 +413,119 @@ export function SearchPatientModal({
       resetTreatmentPlanForms();
 
       if (initialProfilePatientId) {
-        const patient = patients.find((row) => row.id === initialProfilePatientId);
-        if (patient) {
-          void openProfile(patient);
-          return;
-        }
+        skipInitialProfileSearch.current = true;
+        void openProfile(patients.find((row) => row.id === initialProfilePatientId) || { id: initialProfilePatientId, name: "", phone: null });
+        return;
       }
 
+      skipInitialProfileSearch.current = false;
       setView("search");
       setSelectedPatient(null);
     }
-  }, [isOpen, initialProfilePatientId, patients]);
+  }, [isOpen, initialProfilePatientId]);
 
-  const filteredPatients = useMemo(() => {
-    const search = query.trim().toLowerCase();
-    if (!search) return patients;
-    return patients.filter(
-      (p) =>
-        p.name.toLowerCase().includes(search) ||
-        (p.phone || "").toLowerCase().includes(search) ||
-        (p.email || "").toLowerCase().includes(search) ||
-        (p.emirates_id || "").toLowerCase().includes(search) ||
-        (p.passport_number || "").toLowerCase().includes(search) ||
-        String(p.clinic_file_no ?? p.patient_number ?? "").includes(search)
-    );
-  }, [patients, query]);
+  useEffect(() => {
+    if (!isOpen) {
+      patientSearchGeneration.current++;
+      setPatients([]);
+      setOutstandingByPatient({});
+      setHasMorePatients(false);
+      setIsSearching(false);
+      setSelectedPatient(null);
+      setProfileBalances([]);
+      setProfileBalancePayments([]);
+      setProfilePatientCredits([]);
+      setPatientFinancialsLoaded(false);
+      return;
+    }
+    if (skipInitialProfileSearch.current) return;
+    if (!clinicId) { setSearchError("Open the register for a clinic before searching patients."); return; }
+    setIsLoadingMorePatients(false);
+    setPatients([]);
+    setHasMorePatients(false);
+    setOutstandingByPatient({});
+    setIsSearching(true);
+    const generation = ++patientSearchGeneration.current;
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      let searchCompleted = false;
+      setSearchError("");
+      setFinanceSummaryError("");
+      setOutstandingByPatient({});
+      try {
+        const params = new URLSearchParams({ clinicId, q: query });
+        const response = await fetch(`/api/patients/search?${params}`, { cache: "no-store", signal: controller.signal });
+        const body = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(body?.error || "Patient search is unavailable. Please try again.");
+        if (controller.signal.aborted || generation !== patientSearchGeneration.current) return;
+        const results = (body?.patients || []) as FullPatient[];
+        setPatients(results);
+        setHasMorePatients(Boolean(body?.hasMore));
+        searchCompleted = true;
+        setIsSearching(false);
+        if (results.length) {
+          const financeParams = new URLSearchParams({ clinicId, patientIds: results.map(patient => patient.id).join(",") });
+          const financeResponse = await fetch(`/api/patients/financials?${financeParams}`, { cache: "no-store", signal: controller.signal });
+          const financeBody = await financeResponse.json().catch(() => null);
+          if (!financeResponse.ok) throw new Error(financeBody?.error || "Patient balances could not be loaded completely.");
+          if (!controller.signal.aborted && generation === patientSearchGeneration.current) setOutstandingByPatient(financeBody?.outstandingByPatient || {});
+        }
+      } catch (error) {
+        if (!controller.signal.aborted && generation === patientSearchGeneration.current) {
+          if (searchCompleted) setFinanceSummaryError(error instanceof Error ? error.message : "Patient balances could not be loaded completely.");
+          else setSearchError(error instanceof Error ? error.message : "Patient search is unavailable. Please try again.");
+          setIsSearching(false);
+        }
+      }
+    }, query.trim() ? 250 : 0);
+    return () => { clearTimeout(timer); controller.abort(); if (generation === patientSearchGeneration.current) patientSearchGeneration.current++; };
+  }, [isOpen, initialProfilePatientId, clinicId, query, view]);
+
+  const filteredPatients = patients;
+
+  async function loadMorePatients() {
+    if (!clinicId || !hasMorePatients || isLoadingMorePatients) return;
+    const generation = patientSearchGeneration.current;
+    setIsLoadingMorePatients(true);
+    try {
+      const params = new URLSearchParams({ clinicId, q: query, offset: String(patients.length) });
+      const response = await fetch(`/api/patients/search?${params}`, { cache: "no-store" });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.error || "More patients could not be loaded.");
+      if (generation !== patientSearchGeneration.current) return;
+      const results = (body?.patients || []) as FullPatient[];
+      setPatients(previous => [...previous, ...results.filter(row => !previous.some(existing => existing.id === row.id))]);
+      setHasMorePatients(Boolean(body?.hasMore));
+      if (results.length) {
+        const financeParams = new URLSearchParams({ clinicId, patientIds: results.map(patient => patient.id).join(",") });
+        const financeResponse = await fetch(`/api/patients/financials?${financeParams}`, { cache: "no-store" });
+        const financeBody = await financeResponse.json().catch(() => null);
+        if (!financeResponse.ok) throw new Error(financeBody?.error || "Patient balances could not be loaded completely.");
+        if (generation === patientSearchGeneration.current) setOutstandingByPatient(previous => ({ ...previous, ...(financeBody?.outstandingByPatient || {}) }));
+      }
+    } catch (error) {
+      if (generation === patientSearchGeneration.current) setFinanceSummaryError(error instanceof Error ? error.message : "More patient records could not be loaded.");
+    } finally {
+      if (generation === patientSearchGeneration.current) setIsLoadingMorePatients(false);
+    }
+  }
 
   const paymentsByBalanceId = useMemo(() => {
     const map = new Map<string, BalancePayment[]>();
-    for (const p of balancePayments) {
+    for (const p of profileBalancePayments) {
       const arr = map.get(p.outstanding_balance_id) || [];
       arr.push(p);
       map.set(p.outstanding_balance_id, arr);
     }
     return map;
-  }, [balancePayments]);
-
-  const outstandingByPatient = useMemo(() => {
-    const map = new Map<string, { remaining: number; count: number }>();
-    for (const b of outstandingBalances) {
-      const roll = rollupBalance(b, paymentsByBalanceId.get(b.id) || []);
-      if (roll.remaining <= 0.0049) continue;
-      const prev = map.get(b.patient_id) || { remaining: 0, count: 0 };
-      map.set(b.patient_id, {
-        remaining: prev.remaining + roll.remaining,
-        count: prev.count + 1,
-      });
-    }
-    return map;
-  }, [outstandingBalances, paymentsByBalanceId]);
+  }, [profileBalancePayments]);
 
   const selectedPatientBalances = useMemo(() => {
     if (!selectedPatient) return [];
-    return outstandingBalances
+    return profileBalances
       .filter((b) => b.patient_id === selectedPatient.id)
       .sort((a, b) => (a.original_date < b.original_date ? 1 : -1));
-  }, [outstandingBalances, selectedPatient]);
+  }, [profileBalances, selectedPatient]);
 
   const treatmentPlanPaymentsByPlanId = useMemo(() => {
     const map = new Map<string, TreatmentPlanPayment[]>();
@@ -746,6 +813,10 @@ export function SearchPatientModal({
   async function openProfile(patient: FullPatient) {
     const generation = ++profileLoadGeneration.current;
     setSelectedPatient(patient);
+    setPatientFinancialsLoaded(false);
+    setProfileBalances([]);
+    setProfileBalancePayments([]);
+    setProfilePatientCredits([]);
     setView("profile");
     setIsLoadingProfile(true);
     setNotes([]);
@@ -767,6 +838,24 @@ export function SearchPatientModal({
     resetTreatmentPlanForms();
 
     try {
+      if (!clinicId) throw new Error("Open the register for a clinic before loading patient records.");
+      const patientDetailsPromise = (async () => {
+        const params = new URLSearchParams({ clinicId, patientIds: patient.id });
+        const response = await fetch(`/api/patients/clinic-records?${params}`, { cache: "no-store" });
+        const body = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(body?.error || "Patient details could not be loaded.");
+        const details = (body?.patients || []).find((row: FullPatient) => row.id === patient.id);
+        if (!details) throw new Error("Patient details could not be loaded for this clinic.");
+        const file = (body?.files || []).find((row: { patient_id: string }) => row.patient_id === patient.id);
+        return { ...details, clinic_patient_file_id: file?.id || null, clinic_file_no: file?.file_no || null, clinic_file_mrn: file?.mrn || null } as FullPatient;
+      })();
+      const financialsPromise = (async () => {
+        const params = new URLSearchParams({ clinicId, patientId: patient.id });
+        const response = await fetch(`/api/patients/financials?${params}`, { cache: "no-store" });
+        const body = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(body?.error || "Patient financial records could not be loaded completely.");
+        return body as { balances: OutstandingBalance[]; balancePayments: BalancePayment[]; patientCredits: PatientCredit[] };
+      })();
       const notesQuery = loadPatientNotes(patient.id);
 
       let plansQuery = supabase
@@ -776,7 +865,7 @@ export function SearchPatientModal({
         .order("created_at", { ascending: false });
       if (clinicId) plansQuery = plansQuery.eq("clinic_id", clinicId);
 
-      const [notesResult, doctorsResult, receptionistsResult, clinicsResult, receiptsResult, servicesResult, plansResult, historicalVisitsResult] = await Promise.all([
+      const [notesResult, doctorsResult, receptionistsResult, clinicsResult, receiptsResult, servicesResult, plansResult, hydratedPatient, financials] = await Promise.all([
         notesQuery,
         supabase.from("doctors").select("id, name, clinic_id, is_active"),
         supabase.from("receptionist").select("id, name, clinic_id"),
@@ -784,15 +873,15 @@ export function SearchPatientModal({
         supabase.from("receipts").select("*").eq("patient_id", patient.id).order("created_at", { ascending: false }),
         supabase.from("services").select("id, name, price, clinic_id"),
         plansQuery,
-        patient.clinic_patient_file_id
-          ? supabase
-              .from("patient_treatment_visits")
-              .select("id, visit_date, treatment_description, fee_aed, original_dentist_name, visit_sequence")
-              .eq("patient_file_id", patient.clinic_patient_file_id)
-              .order("visit_date", { ascending: false })
-          : Promise.resolve({ data: [] as HistoricalVisit[] }),
+        patientDetailsPromise,
+        financialsPromise,
       ]);
       if (generation !== profileLoadGeneration.current) return;
+      setSelectedPatient(hydratedPatient);
+      setProfileBalances(financials.balances || []);
+      setProfileBalancePayments(financials.balancePayments || []);
+      setProfilePatientCredits(financials.patientCredits || []);
+      setPatientFinancialsLoaded(true);
 
       let scopedProfileReceipts = (receiptsResult.data as Receipt[]) || [];
       if (clinicId) {
@@ -821,7 +910,7 @@ export function SearchPatientModal({
         lastVisitQuery = lastVisitQuery.in("receptionist_id", clinicReceptionistIds);
       }
       // Receipt details and plan details depend on the first batch, but not on each other.
-      const [itemsResult, visitsResult, paymentsResult, paymentRecordsResult, lastVisitResult] = await Promise.all([
+      const [itemsResult, visitsResult, paymentsResult, paymentRecordsResult, lastVisitResult, historicalVisitsResult] = await Promise.all([
         profileReceiptIds.length
           ? supabase.from("receipt_items").select("receipt_id, service_id, quantity, price, total").in("receipt_id", profileReceiptIds)
           : Promise.resolve({ data: [] }),
@@ -835,6 +924,12 @@ export function SearchPatientModal({
           ? supabase.from("treatment_plan_payment_records").select("*").in("treatment_plan_id", planIds).order("created_at", { ascending: false })
           : Promise.resolve({ data: [] }),
         clinicId && !clinicReceptionistIds.length ? Promise.resolve({ data: [] }) : lastVisitQuery,
+        hydratedPatient.clinic_patient_file_id
+          ? supabase.from("patient_treatment_visits")
+              .select("id, visit_date, treatment_description, fee_aed, original_dentist_name, visit_sequence")
+              .eq("patient_file_id", hydratedPatient.clinic_patient_file_id)
+              .order("visit_date", { ascending: false })
+          : Promise.resolve({ data: [] as HistoricalVisit[] }),
       ]);
       if (generation !== profileLoadGeneration.current) return;
 
@@ -1001,7 +1096,7 @@ export function SearchPatientModal({
   function printSavedTreatmentPlanA4() {
     if (!savedTreatmentPlanActionContext) return;
     const html = buildTreatmentPlanSummaryHtml(savedTreatmentPlanActionContext);
-    printHtmlWhenImagesReady(html, "Please allow popups to print the treatment plan.");
+    return printHtmlWhenImagesReady(html, "Please allow popups to print the treatment plan.");
   }
 
   async function saveTreatmentVisit(plan: TreatmentPlan) {
@@ -1244,7 +1339,7 @@ export function SearchPatientModal({
         <div className="flex items-center justify-between border-b border-teal-100 bg-white px-6 py-4">
           {view === "profile" ? (
             <button
-              onClick={() => setView("search")}
+              onClick={() => { skipInitialProfileSearch.current = false; setView("search"); }}
               className="flex items-center gap-1.5 text-sm font-semibold text-teal-600 transition hover:text-teal-800"
             >
               ← Back to Search
@@ -1264,22 +1359,23 @@ export function SearchPatientModal({
               <input
                 type="text"
                 value={query}
-                onChange={(e) => {setQuery(e.target.value);setPatientDisplayLimit(100);}}
+                onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search by name, phone, email, Emirates ID, passport…"
                 className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
                 autoFocus
               />
               <div className="space-y-2">
-                {filteredPatients.length === 0 && (
-                  <p className="py-6 text-center text-sm text-slate-400">No patients found</p>
-                )}
-                {filteredPatients.slice(0,patientDisplayLimit).map((patient) => {
-                  const owed = outstandingByPatient.get(patient.id);
+                {isSearching && filteredPatients.length === 0 && <p className="py-6 text-center text-sm text-slate-400">Searching patients…</p>}
+                {!isSearching && searchError && <p className="py-6 text-center text-sm text-rose-600">{searchError}</p>}
+                {!isSearching && !searchError && filteredPatients.length === 0 && <p className="py-6 text-center text-sm text-slate-400">No patients found</p>}
+                {financeSummaryError && <p className="text-xs text-rose-600">{financeSummaryError}</p>}
+                {filteredPatients.map((patient) => {
+                  const owed = outstandingByPatient[patient.id];
                   return (
-                    <button
+                    <AsyncActionButton
                       key={patient.id}
                       onClick={() => openProfile(patient)}
-                      className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-teal-200 hover:bg-teal-50"
+                      className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-teal-200 hover:bg-teal-50" busyLabel="Loading..."
                     >
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-sm font-semibold text-slate-900">{patient.name}</p>
@@ -1297,10 +1393,10 @@ export function SearchPatientModal({
                         </div>
                       </div>
                       <p className="mt-0.5 text-xs text-slate-500">{patient.phone || "No phone"}</p>
-                    </button>
+                    </AsyncActionButton>
                   );
                 })}
-                {filteredPatients.length>patientDisplayLimit&&<button type="button" className="rounded border px-4 py-2" onClick={()=>setPatientDisplayLimit(value=>value+100)}>Show more patients ({filteredPatients.length-patientDisplayLimit} remaining)</button>}
+                {hasMorePatients && <button type="button" className="rounded border px-4 py-2 disabled:opacity-50" onClick={() => void loadMorePatients()} disabled={isLoadingMorePatients}>{isLoadingMorePatients ? "Loading more patients…" : "Show more patients"}</button>}
               </div>
 
             </div>
@@ -1499,13 +1595,13 @@ export function SearchPatientModal({
                       className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                     />
                     <div className="flex gap-2">
-                      <button
+                      <AsyncActionButton
                         onClick={saveTreatmentPlan}
                         disabled={savingTreatmentPlan}
-                        className="rounded-xl bg-cyan-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50"
+                        className="rounded-xl bg-cyan-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50" busyLabel="Saving..."
                       >
                         {savingTreatmentPlan ? "Saving…" : "Save Plan"}
-                      </button>
+                      </AsyncActionButton>
                       <button
                         onClick={() => {
                           setShowNewTreatmentPlan(false);
@@ -1643,13 +1739,13 @@ export function SearchPatientModal({
                       className="w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-amber-300"
                     />
                     <div className="flex gap-2">
-                      <button
+                      <AsyncActionButton
                         onClick={saveLegacyTreatment}
                         disabled={savingLegacy}
-                        className="rounded-xl bg-amber-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:opacity-50"
+                        className="rounded-xl bg-amber-600 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:opacity-50" busyLabel="Saving..."
                       >
                         {savingLegacy ? "Saving…" : "Save Legacy Plan"}
-                      </button>
+                      </AsyncActionButton>
                       <button
                         onClick={resetLegacyForm}
                         className="rounded-xl border border-slate-200 px-4 py-1.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
@@ -1763,13 +1859,13 @@ export function SearchPatientModal({
                                 className="w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-cyan-300 focus:ring-4 focus:ring-cyan-100"
                               />
                               <div className="flex gap-2">
-                                <button
+                                <AsyncActionButton
                                   onClick={() => saveTreatmentVisit(plan)}
                                   disabled={savingTreatmentVisit || !visitDoctorId}
-                                  className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50"
+                                  className="rounded-xl bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500 disabled:opacity-50" busyLabel="Saving..."
                                 >
                                   {savingTreatmentVisit ? "Saving…" : "Save Visit"}
-                                </button>
+                                </AsyncActionButton>
                                 <button
                                   onClick={() => setVisitPlanId(null)}
                                   className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
@@ -2012,13 +2108,13 @@ export function SearchPatientModal({
                                 </div>
                               )}
                               <div className="flex gap-2">
-                                <button
+                                <AsyncActionButton
                                   onClick={() => saveTreatmentPayment(plan)}
                                   disabled={savingTreatmentPayment}
-                                  className="rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                                  className="rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50" busyLabel="Saving..."
                                 >
                                   {savingTreatmentPayment ? "Saving…" : "Collect & Print Receipt"}
-                                </button>
+                                </AsyncActionButton>
                                 <button
                                   onClick={() => { setPaymentPlanId(null); setPlanPaymentValidationErrors([]); }}
                                   className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
@@ -2173,13 +2269,13 @@ export function SearchPatientModal({
                       className="w-full resize-none rounded-xl border border-teal-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-100"
                     />
                     <div className="flex gap-2">
-                      <button
+                      <AsyncActionButton
                         onClick={saveNewNote}
                         disabled={isSavingNote || !newNoteText.trim()}
-                        className="rounded-xl bg-teal-500 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-teal-400 disabled:opacity-50"
+                        className="rounded-xl bg-teal-500 px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-teal-400 disabled:opacity-50" busyLabel="Saving..."
                       >
                         {isSavingNote ? "Saving…" : "Save Note"}
-                      </button>
+                      </AsyncActionButton>
                       <button
                         onClick={() => { setShowAddNote(false); setNewNoteText(""); }}
                         className="rounded-xl border border-slate-200 px-4 py-1.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
@@ -2227,12 +2323,12 @@ export function SearchPatientModal({
                                 >
                                   Edit
                                 </button>
-                                <button
+                                <AsyncActionButton
                                   onClick={() => deleteNote(note.id)}
-                                  className="rounded-full border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-500 transition hover:bg-red-50 hover:text-red-600"
+                                  className="rounded-full border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-500 transition hover:bg-red-50 hover:text-red-600" busyLabel="Working..."
                                 >
                                   Delete
-                                </button>
+                                </AsyncActionButton>
                               </div>
                             )}
                           </div>
@@ -2245,13 +2341,13 @@ export function SearchPatientModal({
                                 className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-teal-400 focus:ring-4 focus:ring-teal-100"
                               />
                               <div className="flex gap-2">
-                                <button
+                                <AsyncActionButton
                                   onClick={saveEditNote}
                                   disabled={isSavingNote || !editingNoteText.trim()}
-                                  className="rounded-xl bg-teal-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-teal-400 disabled:opacity-50"
+                                  className="rounded-xl bg-teal-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-teal-400 disabled:opacity-50" busyLabel="Saving..."
                                 >
                                   {isSavingNote ? "Saving…" : "Save"}
-                                </button>
+                                </AsyncActionButton>
                                 <button
                                   onClick={cancelEditNote}
                                   className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
@@ -2395,8 +2491,9 @@ export function SearchPatientModal({
         {view === "profile" && selectedPatient && (
           <div className="flex gap-3 border-t border-slate-100 bg-white px-6 py-4">
             <button
-              onClick={() => { onSelect(selectedPatient); onClose(); }}
-              className="flex-1 rounded-2xl bg-teal-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-teal-400"
+              onClick={() => { if (!patientFinancialsLoaded) return; onSelect(selectedPatient, { balances: profileBalances, balancePayments: profileBalancePayments, patientCredits: profilePatientCredits }); onClose(); }}
+              disabled={!patientFinancialsLoaded || isLoadingProfile}
+              className="flex-1 rounded-2xl bg-teal-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Select Patient
             </button>
@@ -2421,18 +2518,18 @@ export function SearchPatientModal({
             </p>
 
             <div className="mt-5 grid gap-3">
-              <button
+              <AsyncActionButton
                 onClick={() => printHtmlWhenImagesReady(buildTreatmentPlanSummaryHtml(savedTreatmentPlanActionContext), "Please allow popups to print the treatment plan.")}
-                className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+                className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800" busyLabel="Generating..."
               >
                 Print Summary
-              </button>
-              <button
+              </AsyncActionButton>
+              <AsyncActionButton
                 onClick={() => printHtmlWhenImagesReady(buildTreatmentPlanSummaryHtml(savedTreatmentPlanActionContext), "Please allow popups to print the treatment plan.")}
-                className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+                className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-700 transition hover:bg-amber-100" busyLabel="Generating..."
               >
                 🖨 Print A4 Invoice
-              </button>
+              </AsyncActionButton>
               <button
                 onClick={() => setSavedTreatmentPlanActionContext(null)}
                 className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
@@ -2465,11 +2562,13 @@ export function ReceiptHistoryModal({
   onClose,
   clinicId,
   clinic,
+  historyKind = "receipt",
 }: {
   isOpen: boolean;
   onClose: () => void;
   clinicId: string | null | undefined;
   clinic: ClinicRecord | null;
+  historyKind?: "receipt" | "plan";
 }) {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -2486,6 +2585,7 @@ export function ReceiptHistoryModal({
   const [paymentAllocationsMap, setPaymentAllocationsMap] = useState<Record<string, PaymentAllocation[]>>({});
   const [expandedReceiptId, setExpandedReceiptId] = useState<string | null>(null);
   const [loadingItemsFor, setLoadingItemsFor] = useState<string | null>(null);
+  const [receiptDetailError, setReceiptDetailError] = useState<Record<string, string>>({});
 
   const [view, setView] = useState<"list" | "refund">("list");
   const refundRequestOperation = useRef(crypto.randomUUID());
@@ -2501,103 +2601,75 @@ export function ReceiptHistoryModal({
   const [downloadingTreatmentPlanInvoiceId, setDownloadingTreatmentPlanInvoiceId] = useState<string | null>(null);
   const [downloadingRegularReceiptId, setDownloadingRegularReceiptId] = useState<string | null>(null);
 
+  const [historyDate, setHistoryDate] = useState(getDubaiBusinessDate());
+  const [historyPage, setHistoryPage] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(isOpen && !!clinicId);
+  const [historyError, setHistoryError] = useState("");
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [planPaymentRollupRecords, setPlanPaymentRollupRecords] = useState<TreatmentPlanPaymentRecord[]>([]);
+  const historyGeneration = useRef(0);
+
   useEffect(() => {
-    if (isOpen) {
-      setView("list");
-      setExpandedReceiptId(null);
-      setReceiptItemsMap({});
-      setRefundsMap({});
-      setPriorRefundItemsMap({});
-      setPaymentRecordIdsMap({});
-      setPaymentAllocationsMap({});
-      void loadHistory().catch(() => {
-        setPatients([]);
-        setReceipts([]);
-        setTreatmentPlans([]);
-        setTreatmentPlanPayments([]);
-        setLegacyTreatmentPlanPayments([]);
-        setTreatmentPlanAllocations([]);
-        alert("Unable to load clinic history. Please try again.");
-      });
-    }
-  }, [isOpen]);
+    if (!isOpen) return;
+    const generation = ++historyGeneration.current;
+    setHistoryLoading(true); setHistoryError("");
+    setReceipts([]); setTreatmentPlanPayments([]); setReceiptItemsMap({}); setRefundsMap({});
+    setPriorRefundItemsMap({}); setPaymentRecordIdsMap({}); setPaymentAllocationsMap({});
+    void loadHistory(generation).catch(error => {
+      if (generation === historyGeneration.current) setHistoryError(error instanceof Error ? error.message : "History could not be loaded. Please retry.");
+    }).finally(() => {if (generation === historyGeneration.current) setHistoryLoading(false);});
+    return () => {historyGeneration.current++;};
+  }, [isOpen, clinicId, historyKind, historyDate, historyPage, historyRevision]);
 
-  useEffect(() => { if (!isOpen) return; return subscribeFinancialChanges(() => {void loadHistory().catch(() => alert("Updated history could not be loaded. Reopen history to retry."));}); }, [isOpen, clinicId]);
+  useEffect(() => {
+    if (!isOpen) return;
+    return subscribeFinancialChanges(() => setHistoryRevision(value => value + 1));
+  }, [isOpen, clinicId]);
 
-  async function fetchAllRows(table: string, select: string): Promise<any[]> {
-    const BATCH = 1000;
-    let all: any[] = [];
-    let from = 0;
-    while (true) {
-      const { data, error } = await supabase
-        .from(table)
-        .select(select)
-        .range(from, from + BATCH - 1);
-      if (error || !data || data.length === 0) break;
-      all = all.concat(data);
-      if (data.length < BATCH) break;
-      from += BATCH;
+  async function fetchAllRows(table: string, select: string, field: string, ids: string[]): Promise<any[]> {
+    const all: any[] = [];
+    for (let from = 0; ; from += 500) {
+      let query = supabase.from(table).select(select).in(field, ids).order("id").range(from, from + 499);
+      if (table === "treatment_plan_payments") query = query.neq("status", "cancelled");
+      const {data, error} = await query;
+      if (error) throw new Error("Receipt details could not be loaded. Please retry.");
+      all.push(...(data || []));
+      if ((data || []).length < 500) return all;
     }
-    return all;
   }
 
-  async function loadHistory() {
-    if (!clinicId) {
-      setReceipts([]);
-      setPatients([]);
-      setTreatmentPlanPayments([]);
-      setLegacyTreatmentPlanPayments([]);
-      setTreatmentPlanAllocations([]);
-      setTreatmentPlans([]);
-      return;
-    }
-
-    const { data: clinicReceptionists } = await supabase
-      .from("receptionist")
-      .select("id")
-      .eq("clinic_id", clinicId);
-
-    const receptionistIds = (clinicReceptionists || []).map((r: { id: string }) => r.id);
-
-    if (receptionistIds.length === 0) {
-      setReceipts([]);
-      setPatients([]);
-      setTreatmentPlanPayments([]);
-      setLegacyTreatmentPlanPayments([]);
-      setTreatmentPlanAllocations([]);
-      setTreatmentPlans([]);
-      return;
-    }
-
-    const [receiptResult, patientResult, servicesResult, doctorsResult, receptionistsResult, treatmentPlanResult, treatmentPlanPaymentResult, legacyTreatmentPlanPaymentsResult, treatmentPlanAllocationResult] = await Promise.all([
-      supabase.from("receipts").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
-      loadClinicHistoryPatients(clinicId),
-      supabase.from("services").select("id, name"),
-      supabase.from("doctors").select("id, name, clinic_id, is_active"),
-      supabase.from("receptionist").select("id, name"),
-      supabase.from("treatment_plans").select("*").in("created_by", receptionistIds).order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_payment_records").select("*").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_payments").select("*").neq("status", "cancelled").in("receptionist_id", receptionistIds).order("created_at", { ascending: false }),
-      supabase.from("treatment_plan_payment_allocations").select("*").order("created_at", { ascending: false }),
+  async function loadHistory(generation = historyGeneration.current) {
+    if (!clinicId) return;
+    const started = performance.now();
+    const page = await requestJson(`/api/receipts/history?${new URLSearchParams({
+      clinicId, kind: historyKind, offset: String(historyPage * 50), ...(historyDate ? {date: historyDate} : {}),
+    })}`, {cache: 'no-store'});
+    if (generation !== historyGeneration.current) return;
+    const planIds = [...new Set<string>(page.planPayments.map((row: TreatmentPlanPaymentRecord) => row.treatment_plan_id))];
+    const paymentIds = page.planPayments.map((row: TreatmentPlanPaymentRecord) => row.id);
+    const [servicesResult, doctorsResult, receptionistsResult, plans, planPayments, legacyPayments, allocations] = await Promise.all([
+      Promise.resolve({data: [], error: null}),
+      Promise.resolve({data: [], error: null}),
+      paymentIds.length ? supabase.from("receptionist").select("id,name").in("id", [...new Set(page.planPayments.map((row: TreatmentPlanPaymentRecord) => row.receptionist_id))]) : Promise.resolve({data: [], error: null}),
+      planIds.length ? fetchAllRows("treatment_plans", "*", "id", planIds) : [],
+      planIds.length ? fetchAllRows("treatment_plan_payment_records", "*", "treatment_plan_id", planIds) : [],
+      planIds.length ? fetchAllRows("treatment_plan_payments", "*", "treatment_plan_id", planIds) : [],
+      paymentIds.length ? fetchAllRows("treatment_plan_payment_allocations", "*", "payment_id", paymentIds) : [],
     ]);
-
-    const loadedReceipts = (receiptResult.data as Receipt[]) || [];
-    const loadedPatients = ((patientResult as Patient[]) || []).map((p) => ({ ...p }));
-    setReceipts(loadedReceipts);
-    setPatients(loadedPatients);
-    setServices((servicesResult.data as LookupItem[]) || []);
-    setDoctors((doctorsResult.data as LookupItem[]) || []);
-    setAllReceptionists((receptionistsResult.data as LookupItem[]) || []);
-    setTreatmentPlans((treatmentPlanResult.data as TreatmentPlan[]) || []);
-    setTreatmentPlanPayments((treatmentPlanPaymentResult.data as TreatmentPlanPaymentRecord[]) || []);
-    setLegacyTreatmentPlanPayments((legacyTreatmentPlanPaymentsResult.data as TreatmentPlanPayment[]) || []);
-    setTreatmentPlanAllocations((treatmentPlanAllocationResult.data as TreatmentPlanPaymentAllocation[]) || []);
+    if (generation !== historyGeneration.current) return;
+    if (servicesResult.error || doctorsResult.error || receptionistsResult.error) throw new Error("Receipt names could not be loaded. Please retry.");
+    setReceipts(page.receipts); setPatients(page.patients);
+    setServices(servicesResult.data || []); setDoctors(doctorsResult.data || []); setAllReceptionists(receptionistsResult.data || []);
+    setTreatmentPlans(plans); setTreatmentPlanPayments(page.planPayments); setPlanPaymentRollupRecords(planPayments);
+    setLegacyTreatmentPlanPayments(legacyPayments); setTreatmentPlanAllocations(allocations); setHasMoreHistory(page.hasMore);
+    performance.measure('pos-receipt-history-load', {start: started, end: performance.now()});
   }
 
   function remainingAfterPayment(plan: TreatmentPlan | null, paymentDate: string | null | undefined) {
     if (!plan) return 0;
     return computeTreatmentPlanRollup(plan, {
-      structuredPayments: treatmentPlanPayments.filter((entry) => entry.treatment_plan_id === plan.id),
+      structuredPayments: planPaymentRollupRecords.filter((entry) => entry.treatment_plan_id === plan.id),
       legacyPayments: legacyTreatmentPlanPayments.filter((entry) => entry.treatment_plan_id === plan.id),
       asOf: paymentDate || undefined,
     }).remainingBalance;
@@ -2612,37 +2684,47 @@ export function ReceiptHistoryModal({
         allocations: paymentAllocationsMap[receiptId] || [],
       };
     }
+    const generation = historyGeneration.current;
     setLoadingItemsFor(receiptId);
-    const [itemsRes, refundsRes, paymentRecordsRes] = await Promise.all([
-      supabase.from("receipt_items").select("*").eq("receipt_id", receiptId),
-      supabase.from("refunds").select("*").is("accounting_void_request_id", null).eq("receipt_id", receiptId).order("created_at", { ascending: false }),
-      supabase.from("payment_records").select("id").eq("receipt_id", receiptId).order("created_at", { ascending: false }),
-    ]);
-    const loadedItems = itemsRes.data || [];
-    const loadedRefunds = refundsRes.data || [];
-    setReceiptItemsMap((prev) => ({ ...prev, [receiptId]: loadedItems }));
-    setRefundsMap((prev) => ({ ...prev, [receiptId]: loadedRefunds }));
-    const paymentRecordIds = (paymentRecordsRes.data || []).map((row: { id: string }) => row.id).filter(Boolean);
-    setPaymentRecordIdsMap((prev) => ({ ...prev, [receiptId]: paymentRecordIds }));
-    let loadedAllocations: PaymentAllocation[] = [];
-    if (paymentRecordIds.length > 0) {
-      const { data: allocationRows } = await supabase
-        .from("payment_allocations")
-        .select("*")
-        .in("payment_id", paymentRecordIds)
-        .order("created_at", { ascending: true });
-      loadedAllocations = (allocationRows || []) as PaymentAllocation[];
-      setPaymentAllocationsMap((prev) => ({ ...prev, [receiptId]: loadedAllocations }));
-    } else {
-      setPaymentAllocationsMap((prev) => ({ ...prev, [receiptId]: [] }));
-    }
-    setLoadingItemsFor(null);
-    return {
-      items: loadedItems,
-      refunds: loadedRefunds,
-      paymentRecordIds,
-      allocations: loadedAllocations,
-    };
+    try {
+      const [itemsRes, refundsRes, paymentRecordsRes] = await Promise.all([
+        supabase.from("receipt_items").select("*").eq("receipt_id", receiptId),
+        supabase.from("refunds").select("*").is("accounting_void_request_id", null).eq("receipt_id", receiptId).order("created_at", { ascending: false }),
+        supabase.from("payment_records").select("id").eq("receipt_id", receiptId).order("created_at", { ascending: false }),
+      ]);
+      const loadedItems = itemsRes.data || [];
+      if (itemsRes.error || refundsRes.error || paymentRecordsRes.error) throw new Error("Receipt details could not be loaded. Please retry.");
+      const loadedRefunds = refundsRes.data || [];
+
+      const paymentRecordIds = (paymentRecordsRes.data || []).map((row: { id: string }) => row.id).filter(Boolean);
+
+      const receipt = receipts.find(row => row.id === receiptId);
+      const serviceIds = [...new Set<string>(loadedItems.map((row: {service_id: string}) => row.service_id).filter(Boolean))];
+      const empty = {data: [], error: null};
+      const [allocationResult, serviceResult, doctorResult, staffResult] = await Promise.all([
+        paymentRecordIds.length ? supabase.from("payment_allocations").select("*").in("payment_id", paymentRecordIds).order("created_at", {ascending: true}) : empty,
+        serviceIds.length ? supabase.from("services").select("id,name,price,standard_price").in("id", serviceIds) : empty,
+        receipt?.doctor_id ? supabase.from("doctors").select("id,name").eq("id", receipt.doctor_id) : empty,
+        receipt?.receptionist_id ? supabase.from("receptionist").select("id,name").eq("id", receipt.receptionist_id) : empty,
+      ]);
+      if (generation !== historyGeneration.current) throw new Error("History changed. Please reopen the receipt.");
+      if (allocationResult.error || serviceResult.error || doctorResult.error || staffResult.error) throw new Error("Receipt payment or print details could not be loaded. Please retry.");
+      const loadedAllocations = (allocationResult.data || []) as PaymentAllocation[];
+      const mergeLookups = (previous: LookupItem[], rows: LookupItem[]) => [...previous.filter(row => !rows.some(next => next.id === row.id)), ...rows];
+      setServices(previous => mergeLookups(previous, serviceResult.data || []));
+      setDoctors(previous => mergeLookups(previous, doctorResult.data || []));
+      setAllReceptionists(previous => mergeLookups(previous, staffResult.data || []));
+      setReceiptItemsMap(previous => ({...previous, [receiptId]: loadedItems}));
+      setRefundsMap(previous => ({...previous, [receiptId]: loadedRefunds}));
+      setPaymentRecordIdsMap(previous => ({...previous, [receiptId]: paymentRecordIds}));
+      setPaymentAllocationsMap(previous => ({...previous, [receiptId]: loadedAllocations}));
+      return {
+        items: loadedItems,
+        refunds: loadedRefunds,
+        paymentRecordIds,
+        allocations: loadedAllocations,
+      };
+    } finally { if (generation === historyGeneration.current) setLoadingItemsFor(null); }
   }
 
   const treatmentPlanPaymentEntries = useMemo(() => {
@@ -2657,12 +2739,14 @@ export function ReceiptHistoryModal({
     });
   }, [treatmentPlanAllocations, treatmentPlanPayments, treatmentPlans]);
 
-  function toggleExpand(receiptId: string) {
+  async function toggleExpand(receiptId: string) {
     if (expandedReceiptId === receiptId) {
       setExpandedReceiptId(null);
     } else {
       setExpandedReceiptId(receiptId);
-      loadReceiptItems(receiptId);
+      setReceiptDetailError(previous => ({...previous, [receiptId]: ""}));
+      try { await loadReceiptItems(receiptId); }
+      catch (error) {setReceiptDetailError(previous => ({...previous, [receiptId]: error instanceof Error ? error.message : "Receipt could not be loaded."}));}
     }
   }
 
@@ -2844,7 +2928,7 @@ export function ReceiptHistoryModal({
       terminalAuthorizationCode: allocation.terminal_authorization_code,
     }));
 
-    printTreatmentPlanPaymentReceipt({
+    return printTreatmentPlanPaymentReceipt({
       clinic,
       patientName: patient?.name || "-",
       patientFileNo: patient?.clinic_file_no || (patient?.patient_number != null ? String(patient.patient_number) : undefined),
@@ -2905,7 +2989,7 @@ export function ReceiptHistoryModal({
       completedVisits,
       notes: plan?.notes || null,
     });
-    printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
+    return printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
   }
 
   async function downloadTreatmentPlanPaymentInvoice(record: TreatmentPlanPaymentRecord, plan: TreatmentPlan | null, allocations: TreatmentPlanPaymentAllocation[]) {
@@ -2941,7 +3025,7 @@ export function ReceiptHistoryModal({
       completedVisits,
       notes: plan?.notes || null,
     });
-    printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
+    return printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
   }
 
   // Refunds can't exceed money actually collected: partial-payment receipts
@@ -3058,7 +3142,7 @@ export function ReceiptHistoryModal({
     };
 
     const html = buildThermalReceiptHtml(options);
-    printHtmlWhenImagesReady(html, "Please allow popups to print.");
+    return printHtmlWhenImagesReady(html, "Please allow popups to print.");
   }
 
   async function downloadRegularReceiptInvoice(receipt: Receipt) {
@@ -3125,7 +3209,7 @@ export function ReceiptHistoryModal({
       outstandingBalance,
       notes: receipt.notes || null,
     });
-    printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
+    return printHtmlWhenImagesReady(html, "Please allow popups to print the invoice.");
   }
 
   function formatReceiptNo(receipt: Receipt) {
@@ -3155,7 +3239,7 @@ export function ReceiptHistoryModal({
               <h2 className="text-base font-semibold text-slate-900">Request Refund</h2>
             </>
           ) : (
-            <h2 className="text-lg font-semibold text-slate-900">Receipt History</h2>
+            <h2 className="text-lg font-semibold text-slate-900">{historyKind === "plan" ? "Treatment Plan Receipts" : "Receipt History"}</h2>
           )}
           <button onClick={onClose} className="text-2xl text-slate-400 hover:text-slate-600">×</button>
         </div>
@@ -3166,9 +3250,21 @@ export function ReceiptHistoryModal({
           {/* ── LIST VIEW ── */}
           {view === "list" && (
             <div className="space-y-4">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="text-sm font-semibold">Date<input type="date" aria-label="Receipt history date" value={historyDate} disabled={historyLoading} onChange={event => {setHistoryDate(event.target.value); setHistoryPage(0);}} className="ml-2 rounded border p-2" /></label>
+                <button disabled={historyLoading} onClick={() => {setHistoryDate(getDubaiBusinessDate()); setHistoryPage(0);}} className="rounded border px-3 py-2 text-sm">Today</button>
+                <button disabled={historyLoading} onClick={() => {setHistoryDate(""); setHistoryPage(0);}} className="rounded border px-3 py-2 text-sm">All dates</button>
+              </div>
+              {historyLoading && <p role="status" aria-live="polite" className="text-sm text-teal-700">Loading {historyKind === "plan" ? "treatment plan receipts" : "receipts"}...</p>}
+              {historyError && <div role="alert" className="text-sm text-red-700">{historyError}<button onClick={() => setHistoryRevision(value => value + 1)} className="ml-2 underline">Retry</button></div>}
+              <div className="flex items-center gap-3 text-sm">
+                <button disabled={historyLoading || historyPage === 0} onClick={() => setHistoryPage(value => value - 1)} className="rounded border px-3 py-2">Previous</button>
+                <span>Page {historyPage + 1}</span>
+                <button disabled={historyLoading || !hasMoreHistory || !!historyError} onClick={() => setHistoryPage(value => value + 1)} className="rounded border px-3 py-2">Next</button>
+              </div>
               {!clinicId ? (
                 <p className="text-center text-sm text-slate-500">Open the register to view receipt history.</p>
-              ) : receipts.length === 0 && treatmentPlanPaymentEntries.length === 0 ? (
+              ) : historyLoading || historyError ? null : receipts.length === 0 && treatmentPlanPaymentEntries.length === 0 ? (
                 <p className="text-center text-sm text-slate-500">No receipts found</p>
               ) : (
                 <>
@@ -3226,18 +3322,18 @@ export function ReceiptHistoryModal({
                                 </div>
                               )}
                               <div className="mt-3 flex gap-2">
-                                <button
+                                <AsyncActionButton
                                   onClick={() => printTreatmentPlanPaymentRecord(record, plan, allocations)}
-                                  className="flex-1 rounded-xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600"
+                                  className="flex-1 rounded-xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600" busyLabel="Generating..."
                                 >
                                   Print Receipt
-                                </button>
-                                <button
+                                </AsyncActionButton>
+                                <AsyncActionButton
                                   onClick={() => printTreatmentPlanPaymentInvoice(record, plan, allocations)}
-                                  className="flex-1 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 transition hover:bg-amber-100"
+                                  className="flex-1 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 transition hover:bg-amber-100" busyLabel="Generating..."
                                 >
                                   Print A4 Invoice
-                                </button>
+                                </AsyncActionButton>
 
                               </div>
                               {record.status!=="cancelled"&&<ReceiptVoidButton key={record.id} receiptId={record.id} planPayment planChoices={treatmentPlanPaymentEntries.filter(entry=>entry.plan?.id!==plan?.id&&entry.record.patient_id===record.patient_id&&entry.record.status!=="cancelled"&&entry.plan?.status==="Active"&&entry.plan?.title===plan?.title&&Number(entry.plan?.total_amount)===Number(plan?.total_amount)).map(entry=>({id:entry.plan!.id,label:`${formatTreatmentPlanPaymentNo(entry.record)} · ${entry.record.payment_method_summary} · ${entry.plan!.title}`}))}/>}
@@ -3260,7 +3356,7 @@ export function ReceiptHistoryModal({
 
                         return (
                           <div key={receipt.id} className={`overflow-hidden rounded-2xl border bg-white transition ${isExpanded ? "border-teal-200 shadow-sm" : "border-slate-200"}`}>
-                            <button onClick={() => toggleExpand(receipt.id)} className="w-full p-4 text-left hover:bg-slate-50">
+                            <AsyncActionButton busyLabel="Loading receipt..." onClick={() => toggleExpand(receipt.id)} className="w-full p-4 text-left hover:bg-slate-50">
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-2">
                                   <span className="text-sm font-semibold text-slate-900">{formatReceiptNo(receipt)}</span>
@@ -3284,10 +3380,11 @@ export function ReceiptHistoryModal({
                                 <span>·</span>
                                 <span>{(receipt.payment_method || "–").toUpperCase()}</span>
                               </div>
-                            </button>
+                            </AsyncActionButton>
 
                             {isExpanded && (
-                              <div className="border-t border-slate-100 bg-slate-50 px-4 pb-4">{items&&receipt.status!=="VOIDED"&&<ReceiptVoidButton key={receipt.id} receiptId={receipt.id}/>}
+                              <div className="border-t border-slate-100 bg-slate-50 px-4 pb-4">
+                                {receiptDetailError[receipt.id] && <p role="alert" className="py-3 text-sm text-red-700">{receiptDetailError[receipt.id]}</p>}{items&&receipt.status!=="VOIDED"&&<ReceiptVoidButton key={receipt.id} receiptId={receipt.id}/>}
 
                                 {isLoading ? (
                                   <p className="py-4 text-center text-xs text-slate-400">Loading items…</p>
@@ -3316,29 +3413,29 @@ export function ReceiptHistoryModal({
                                     )}
 
                                     <div className="flex gap-2 pt-1">
-                                      <button
+                                      <AsyncActionButton
                                         onClick={() => reprintReceipt(receipt)}
-                                        className="flex-1 rounded-xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600"
+                                        className="flex-1 rounded-xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600" busyLabel="Generating..."
                                       >
                                         Reprint
-                                      </button>
-                                      <button
-                                        onClick={() => {
+                                      </AsyncActionButton>
+                                      <AsyncActionButton busyLabel="Generating..."
+                                        onClick={async () => {
                                           setDownloadingRegularReceiptId(receipt.id);
-                                          downloadRegularReceiptInvoice(receipt)
-                                            .finally(() => setDownloadingRegularReceiptId(null));
+                                          try {await downloadRegularReceiptInvoice(receipt);}
+                                          finally {setDownloadingRegularReceiptId(null);}
                                         }}
                                         disabled={downloadingRegularReceiptId === receipt.id}
                                         className="flex-1 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 transition hover:bg-amber-100 disabled:opacity-60"
                                       >
                                         {downloadingRegularReceiptId === receipt.id ? "Generating…" : "Print A4 Invoice"}
-                                      </button>
-                                      <button
+                                      </AsyncActionButton>
+                                      <AsyncActionButton
                                         disabled={receipt.status==="VOIDED"} onClick={() => startRefund(receipt)}
-                                        className="flex-1 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-400"
+                                        className="flex-1 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-amber-400" busyLabel="Working..."
                                       >
                                         Refund
-                                      </button>
+                                      </AsyncActionButton>
                                     </div>
                                   </>
                                 ) : null}
@@ -3507,7 +3604,7 @@ export function ReceiptHistoryModal({
               </div>
 
               <div className="flex gap-3">
-                <button
+                <AsyncActionButton
                   onClick={processRefund}
                   disabled={
                     isProcessingRefund
@@ -3517,10 +3614,10 @@ export function ReceiptHistoryModal({
                     || refundMode === "admin_review"
                     || (refundMode === "modern" && selectedRefundAllocationIds.length === 0)
                   }
-                  className="flex-1 rounded-2xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-amber-400 disabled:opacity-50"
+                  className="flex-1 rounded-2xl bg-amber-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-amber-400 disabled:opacity-50" busyLabel="Saving..."
                 >
                   {isProcessingRefund ? "Processing…" : "Request Refund"}
-                </button>
+                </AsyncActionButton>
                 <button
                   onClick={() => setView("list")}
                   className="rounded-2xl border border-slate-200 px-6 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"

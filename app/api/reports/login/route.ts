@@ -2,6 +2,7 @@ import { recordLoginAttempt } from "../../../../lib/login-log";
 import { sessionStorageFetch } from "../../../../lib/session-storage";
 import { NextRequest, NextResponse } from "next/server";
 import { APP_AUTH_COOKIE_NAME } from "../../../../lib/session-auth";
+import { consumeLoginAttempt, clearLoginAttempts, loginAttemptKey } from "../../../../lib/login-attempt-limits";
 
 const MAX_ATTEMPTS = 3;
 const LOCKOUT_DURATIONS = [5 * 60, 10 * 60];
@@ -61,6 +62,13 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   const username = String(body?.username || "").trim();
   const password = String(body?.password || "");
+  const attemptKey = loginAttemptKey("reports-password", req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local");
+  try {
+    const attempt = await consumeLoginAttempt(attemptKey, MAX_ATTEMPTS);
+    if (!attempt.allowed) return NextResponse.json({ error: "locked", remaining: attempt.remaining }, { status: 429 });
+  } catch {
+    return NextResponse.json({ error: "Login verification is unavailable. Try again." }, { status: 503 });
+  }
   const raw = req.cookies.get(REPORTS_LOGIN_STATE_COOKIE)?.value;
   const state = parseState(raw);
   const now = Date.now();
@@ -126,6 +134,13 @@ export async function POST(req: NextRequest) {
   });
   if (!sessionResponse.ok) {
     return NextResponse.json({ error: "Failed to start reports session." }, { status: 500 });
+  }
+
+  try {
+    await clearLoginAttempts(attemptKey);
+  } catch {
+    await sessionStorageFetch(`?token=eq.${encodeURIComponent(token)}`, { method: "DELETE" });
+    return NextResponse.json({ error: "Login could not be confirmed. Try again." }, { status: 503 });
   }
 
   const response = NextResponse.json({ ok: true });

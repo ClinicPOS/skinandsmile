@@ -1,4 +1,6 @@
 "use client";
+import { AsyncActionButton } from "../../components/async-action-button";
+import { loadVerifiedRegister, type VerifiedRegisterState } from "../../lib/verified-register-client";
 import { patientDetailChanges } from "../../lib/patient-detail-changes";
 import {subscribeFinancialChanges} from "../../lib/financial-change-events";
 import {savePosPreference} from "../../lib/pos-preference-client";
@@ -39,7 +41,7 @@ import { extractLegacyCashAmount, getCashDeductionTypeLabel, getDubaiBusinessDat
 import { computeTreatmentPlanRollup } from "../../lib/treatment-plan-rollup";
 import { getBusinessDayKeyForReporting, getPaymentBreakdownForReporting, summarizeStoredAllocationCollectionsForReporting, summarizeStoredAllocationRowsForReporting } from "../../lib/receipts-reporting";
 import { mapRegularReceiptRenderLine } from "../../lib/regular-receipt-rendering";
-import { loadClinicPatientRecords, loadClinicHistoryPatients } from "../../lib/patient-read-client";
+import { loadClinicPatientRecords } from "../../lib/patient-read-client";
 import { reportClinicFileNumber } from "../../lib/clinic-file-numbers";
 import { buildReceiptInsertPayload, MISSING_RECEIPT_CLINIC_MESSAGE } from "../../lib/receipt-insert";
 
@@ -396,11 +398,12 @@ function createAllocationDraftRow(
 }
 
 export default function ReceiptsPage() {
-  const { accessSession, isLoaded, isManager, allowedClinicId } = useClinicAccess();
+  const { accessSession, isLoaded, isManager, allowedClinicId, syncVerifiedClinic } = useClinicAccess();
   const [patients, setPatients] = useState<any[]>([]);
-  const [clinicPatientFiles, setClinicPatientFiles] = useState<any[]>([]);
   const [registrationPatients, setRegistrationPatients] = useState<any[]>([]);
   const [registrationClinicPatientFiles, setRegistrationClinicPatientFiles] = useState<any[]>([]);
+  const [registrationRecordsReady, setRegistrationRecordsReady] = useState(false);
+  const [registrationRecordsClinicId, setRegistrationRecordsClinicId] = useState("");
   const [doctors, setDoctors] = useState<any[]>([]);
   const [receptionists, setReceptionists] = useState<any[]>([]);
   const [services, setServices] = useState<Service[]>([]);
@@ -460,16 +463,15 @@ export default function ReceiptsPage() {
   const [, setShowPrintModal] = useState(false);
   const [isSavingReceipt, setIsSavingReceipt] = useState(false);
   const checkoutRequest = useRef<{ id: string; clinicId: string } | null>(null);
-  const patientLoadGeneration = useRef(0);
-  const pendingPatientLoad = useRef<{
-    clinicId: string;
-    session: typeof accessSession;
-    promise: ReturnType<typeof loadClinicPatientRecords>;
-  } | null>(null);
+  const dataLoadGeneration = useRef(0);
   const [isDownloadingInvoice, setIsDownloadingInvoice] = useState(false);
   const [isDownloadingEod, setIsDownloadingEod] = useState(false);
   const [eodDate, setEodDate] = useState(() => getDubaiBusinessDate());
   const [isPosUnlocked, setIsPosUnlocked] = useState(false);
+  const [isVerifyingRegister, setIsVerifyingRegister] = useState(true);
+  const [registerVerificationError, setRegisterVerificationError] = useState("");
+  const [verifiedReceptionistName, setVerifiedReceptionistName] = useState("");
+  const registerVerificationGeneration = useRef(0);
   const [loginReceptionistId, setLoginReceptionistId] = useState("");
   const [pinInput, setPinInput] = useState("");
   const [openingCashInput, setOpeningCashInput] = useState("");
@@ -529,6 +531,7 @@ export default function ReceiptsPage() {
   const [searchPatientModalInitialProfileId, setSearchPatientModalInitialProfileId] = useState<string | null>(null);
   const [showRegisterPatientModal, setShowRegisterPatientModal] = useState(false);
   const [showReceiptHistoryModal, setShowReceiptHistoryModal] = useState(false);
+  const [receiptHistoryKind, setReceiptHistoryKind] = useState<"receipt" | "plan">("receipt");
   const [outstandingBalances, setOutstandingBalances] = useState<OutstandingBalance[]>([]);
   const [balancePayments, setBalancePayments] = useState<BalancePayment[]>([]);
   const [patientCredits, setPatientCredits] = useState<PatientCredit[]>([]);
@@ -681,48 +684,51 @@ export default function ReceiptsPage() {
     setShowCashDeductionModal(true);
   }
 
+  function applyVerifiedRegister(verified: VerifiedRegisterState) {
+    syncVerifiedClinic(verified.clinic.id, verified.clinic.name);
+    setVerifiedReceptionistName(verified.identity?.receptionistName || "");
+    setLoginReceptionistId(verified.identity?.receptionistId || "");
+    if (!verified.register || !verified.identity) {
+      try {localStorage.removeItem(POS_REGISTER_SESSION_KEY);} catch { /* browser cache is optional */ }
+      setIsPosUnlocked(false); setReceptionistId(""); setRegisterSessionId("");
+      setOpeningCash(null); setRegisterOpenedAt(""); setActiveClinic(null);
+      return;
+    }
+    const canonical = {
+      receptionistId: verified.identity.receptionistId, clinicId: verified.clinic.id,
+      registerSessionId: verified.register.id, openingCash: Number(verified.register.opening_cash), openedAt: verified.register.opened_at,
+    };
+    // Browser cache is refreshed only from the verified server result.
+    try {localStorage.setItem(POS_REGISTER_SESSION_KEY, JSON.stringify(canonical));} catch { /* browser cache is optional */ }
+    setReceptionistId(canonical.receptionistId); setRegisterSessionId(canonical.registerSessionId);
+    setOpeningCash(canonical.openingCash); setRegisterOpenedAt(canonical.openedAt);
+    setActiveClinic(verified.clinic); setIsPosUnlocked(true);
+  }
+
+  async function verifySavedRegister(signal?: AbortSignal) {
+    const generation = ++registerVerificationGeneration.current;
+    setIsVerifyingRegister(true); setRegisterVerificationError("");
+    try {
+      const verified = await loadVerifiedRegister(signal);
+      if (signal?.aborted || generation !== registerVerificationGeneration.current) return;
+      applyVerifiedRegister(verified);
+    } catch (error) {
+      if (signal?.aborted || generation !== registerVerificationGeneration.current) return;
+      setIsPosUnlocked(false);
+      // Do not erase a recoverable register hint or an unfinished cart on a failed check.
+      setRegisterVerificationError(error instanceof Error ? error.message : "Register verification failed. Please retry.");
+    } finally {
+      if (!signal?.aborted && generation === registerVerificationGeneration.current) setIsVerifyingRegister(false);
+    }
+  }
+
   useEffect(() => {
     if (!isLoaded) return;
-    let startupClinicId: string | null = allowedClinicId || null;
-    const savedSession = localStorage.getItem(POS_REGISTER_SESSION_KEY);
-    if (savedSession) {
-      try {
-        const parsed = JSON.parse(savedSession);
-        if (!clinicAccessAllowsClinic(accessSession, parsed?.clinicId || null)) {
-          localStorage.removeItem(POS_REGISTER_SESSION_KEY);
-        } else {
-          startupClinicId = String(parsed?.clinicId || "").trim() || startupClinicId;
-          if (parsed?.receptionistId) {
-            setIsPosUnlocked(true);
-            setReceptionistId(parsed.receptionistId);
-            setLoginReceptionistId(parsed.receptionistId);
-            setOpeningCash(Number(parsed.openingCash || 0));
-            setRegisterOpenedAt(parsed.openedAt || "");
-            setRegisterSessionId(parsed.registerSessionId || "");
-          }
-        }
-      } catch {
-        localStorage.removeItem(POS_REGISTER_SESSION_KEY);
-      }
-    }
-
-    void loadData(startupClinicId);
+    const controller = new AbortController();
+    void loadData();
+    void verifySavedRegister(controller.signal);
+    return () => {controller.abort(); registerVerificationGeneration.current++;};
   }, [accessSession, isLoaded]);
-
-  useEffect(() => {
-    if (!receptionistId || clinics.length === 0) return;
-    const savedSession = localStorage.getItem(POS_REGISTER_SESSION_KEY);
-    if (!savedSession) return;
-    try {
-      const parsed = JSON.parse(savedSession);
-      if (!parsed?.clinicId) return;
-      if (!clinicAccessAllowsClinic(accessSession, parsed.clinicId || null)) return;
-      const clinic = clinics.find((c) => c.id === parsed.clinicId);
-      if (clinic) setActiveClinic(clinic);
-    } catch {
-      // ignore
-    }
-  }, [receptionistId, clinics, accessSession]);
 
   useEffect(() => {
     if (!isPosUnlocked || !registerSessionId || !activeClinic?.id) {
@@ -731,10 +737,6 @@ export default function ReceiptsPage() {
     }
     void loadCashDeductions();
   }, [isPosUnlocked, registerSessionId, activeClinic?.id]);
-
-  useEffect(() => {
-    void loadClinicScopedPatientData(activeClinic?.id || allowedClinicId || null);
-  }, [activeClinic?.id, allowedClinicId]);
 
   useEffect(() => {
     if (!activeClinic?.id) {
@@ -764,14 +766,20 @@ export default function ReceiptsPage() {
   useEffect(() => {
     if (!showRegisterPatientModal || !activeClinic?.id) return;
     let cancelled = false;
+    setRegistrationRecordsReady(false);
     setRegistrationPatients([]);
     setRegistrationClinicPatientFiles([]);
-    void loadClinicPatientRecords(activeClinic.id).then(records => {
+    void loadClinicPatientRecords(activeClinic.id, undefined, true).then(records => {
       if (cancelled) return;
       setRegistrationPatients(records.patients);
       setRegistrationClinicPatientFiles(records.files);
+      setRegistrationRecordsClinicId(activeClinic.id);
+      setRegistrationRecordsReady(true);
     }).catch(error => {
-      if (!cancelled) alert(error instanceof Error ? error.message : "Registration lookup could not be loaded.");
+      if (!cancelled) {
+        setShowRegisterPatientModal(false);
+        alert(error instanceof Error ? error.message : "Registration lookup could not be loaded.");
+      }
     });
     return () => { cancelled = true; };
   }, [showRegisterPatientModal, activeClinic?.id]);
@@ -902,80 +910,20 @@ export default function ReceiptsPage() {
     setFrequentlyUsedServiceIds(ranked);
   }
 
-  // Loads all rows from a table by paginating through 1 000-row batches, working
-  // around PostgREST's default max-rows cap.
-  async function fetchAllRows(table: string, select: string): Promise<any[]> {
-    const BATCH = 1000;
-    let all: any[] = [];
-    let from = 0;
-    while (true) {
-      const { data, error } = await supabase
-        .from(table)
-        .select(select)
-        .range(from, from + BATCH - 1);
-      if (error) {
-        console.error(`fetchAllRows error on table "${table}" at range ${from}–${from + BATCH - 1}:`, error.message);
-        break;
-      }
-      if (!data || data.length === 0) break;
-      all = all.concat(data);
-      if (data.length < BATCH) break;
-      from += BATCH;
-    }
-    return all;
-  }
-
-  async function loadClinicScopedPatientData(clinicId: string | null | undefined) {
-    const generation = ++patientLoadGeneration.current;
-    if (!clinicId) {
-      setClinicPatientFiles([]);
-      setPatients([]);
-      return;
-    }
-
-    try {
-      // Share only an overlapping load in this page and session, never cached patient data.
-      let pending = pendingPatientLoad.current;
-      if (!pending || pending.clinicId !== clinicId || pending.session !== accessSession) {
-        pending = { clinicId, session: accessSession, promise: loadClinicPatientRecords(clinicId) };
-        pendingPatientLoad.current = pending;
-      }
-      let records;
-      try {
-        records = await pending.promise;
-      } finally {
-        if (pendingPatientLoad.current === pending) pendingPatientLoad.current = null;
-      }
-      if (generation !== patientLoadGeneration.current) return;
-      setClinicPatientFiles(records.files);
-      setPatients(records.patients);
-    } catch (error) {
-      if (generation !== patientLoadGeneration.current) return;
-      setClinicPatientFiles([]);
-      setPatients([]);
-      alert(error instanceof Error ? error.message : "Clinic patient records could not be loaded.");
-    }
-  }
-
-  async function loadData(initialClinicId?: string | null) {
-    const patientLoad = loadClinicScopedPatientData(initialClinicId || allowedClinicId || null);
+  async function loadData() {
+    const generation = ++dataLoadGeneration.current;
     const [
       doctorResult,
       receptionistResult,
       serviceResult,
       clinicResult,
-      balancesResult,
-      balancePaymentsResult,
-      patientCreditsResult,
     ] = await Promise.allSettled([
       supabase.from("doctors").select("*"),
       supabase.from("receptionist").select("id,name,clinic_id,shift"),
       supabase.from("services").select("*"),
       supabase.from("clinics").select("*"),
-      supabase.from("outstanding_balances").select("*"),
-      supabase.from("balance_payments").select("*").neq("status", "cancelled"),
-      supabase.from("patient_credits").select("*").neq("status", "cancelled"),
     ]);
+    if (generation !== dataLoadGeneration.current) return;
 
     if (doctorResult.status === "fulfilled") {
       setDoctors((doctorResult.value.data || []) as any[]);
@@ -996,27 +944,16 @@ export default function ReceiptsPage() {
       setClinics(filterClinicsForAccess((clinicResult.value.data || []) as Clinic[], accessSession));
     }
 
-    if (balancesResult.status === "fulfilled" && !balancesResult.value.error) {
-      setOutstandingBalances((balancesResult.value.data || []) as OutstandingBalance[]);
-    }
-
-    if (balancePaymentsResult.status === "fulfilled" && !balancePaymentsResult.value.error) {
-      setBalancePayments((balancePaymentsResult.value.data || []) as BalancePayment[]);
-    }
-
-    // Tolerates databases that haven't run supabase-patient-credits-migration.sql yet.
-    if (patientCreditsResult.status === "fulfilled" && !patientCreditsResult.value.error) {
-      setPatientCredits((patientCreditsResult.value.data || []) as PatientCredit[]);
-    }
-
-    await patientLoad;
   }
 
-  async function refetchBalancePayments() {
-    const { data, error } = await supabase.from("balance_payments").select("*").neq("status", "cancelled");
-    if (!error) {
-      setBalancePayments((data || []) as BalancePayment[]);
-    }
+  async function refetchPatientFinancials(patientId: string) {
+    if (!activeClinic?.id || !patientId) return;
+    const response = await fetch(`/api/patients/financials?${new URLSearchParams({ clinicId: activeClinic.id, patientId })}`, { cache: "no-store" });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(data?.error || "Patient financial records could not be reloaded.");
+    setOutstandingBalances(data.balances || []);
+    setBalancePayments(data.balancePayments || []);
+    setPatientCredits(data.patientCredits || []);
   }
 
   // Returns "Free" for zero-price services, otherwise an AED amount string.
@@ -1346,36 +1283,6 @@ export default function ReceiptsPage() {
     return doctors.filter((d) => d.clinic_id === activeClinic.id && d.is_active !== false);
   }, [doctors, activeClinic]);
 
-  const clinicScopedPatients = useMemo(() => {
-    if (!activeClinic?.id) return [];
-    const patientById = new Map<string, any>();
-    for (const p of patients) patientById.set(String(p.id), p);
-
-    return clinicPatientFiles
-      .filter((file) => file.clinic_id === activeClinic.id)
-      .map((file) => {
-        const p = patientById.get(String(file.patient_id));
-        // If the patients row is missing (data gap from import or deleted record),
-        // still surface the file so receptionists can find it by file number or MRN.
-        const base = p ?? {
-          id: String(file.patient_id || file.id),
-          name: `(File #${file.file_no} — record missing)`,
-          phone: null,
-          email: null,
-          emirates_id: null,
-          passport_number: null,
-          patient_number: null,
-          notes: null,
-        };
-        return {
-          ...base,
-          clinic_patient_file_id: file.id,
-          clinic_file_no: file.file_no,
-          clinic_file_mrn: file.mrn,
-        };
-      });
-  }, [activeClinic, patients, clinicPatientFiles]);
-
   const filteredServices = useMemo(() => {
     const queryTokens = normalizeServiceText(serviceSearch).split(" ").filter(Boolean);
     const usageSet = new Set<string>(
@@ -1477,6 +1384,7 @@ export default function ReceiptsPage() {
   );
 
   function selectPatient(patient: any) {
+    setPatients((previous) => [...previous.filter((row) => row.id !== patient.id), patient]);
     setPatientId(patient.id);
     setPatientName(patient.name);
     setPatientPhoneInput(patient.phone || "");
@@ -1603,6 +1511,17 @@ export default function ReceiptsPage() {
     const identityResponse = await fetch('/api/auth/receptionist', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({receptionistId:loginReceptionistId,pin:pinInput})}).catch(()=>null);
     if (!identityResponse?.ok) { const result = identityResponse ? await identityResponse.json().catch(()=>null) : null; alert(result?.error || 'Could not confirm receptionist login. Try again.'); return; }
 
+    try {
+      const verified = await loadVerifiedRegister();
+      if (verified.identity?.receptionistId !== loginReceptionistId || verified.clinic.id !== clinicForReceptionist.id) {
+        alert("Your receptionist login changed. Please verify it again before opening POS."); return;
+      }
+      if (verified.register) {applyVerifiedRegister(verified); setPinInput(""); return;}
+      setVerifiedReceptionistName(verified.identity.receptionistName);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Register verification failed. Please retry."); return;
+    }
+
     const parsedOpeningCash = Number(openingCashInput);
     if (!Number.isFinite(parsedOpeningCash) || parsedOpeningCash < 0) {
       alert("Please enter a valid opening cash amount.");
@@ -1611,9 +1530,10 @@ export default function ReceiptsPage() {
 
     const openedAt = new Date().toISOString();
 
-    const registerResponse = await fetch('/api/register', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'open',amount:parsedOpeningCash})}).catch(()=>null);
+    const registerResponse = await fetch('/api/register', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'open',amount:parsedOpeningCash,expectedReceptionistId:loginReceptionistId,expectedClinicId:clinicForReceptionist.id})}).catch(()=>null);
     const registerResult = registerResponse ? await registerResponse.json().catch(()=>null) : null;
     if(!registerResponse?.ok || !registerResult?.register?.id){alert(registerResult?.error || 'Register was not opened. Try again.');return;}
+    if(registerResult.register.receptionist_id!==loginReceptionistId){alert('The register response does not match your receptionist login. Please retry verification before continuing.');return;}
     const createdRegisterSessionId = String(registerResult.register.id);
     const savedOpeningCash = Number(registerResult.register.opening_cash || 0);
     const savedOpenedAt = String(registerResult.register.opened_at);
@@ -1626,7 +1546,7 @@ export default function ReceiptsPage() {
       registerSessionId: createdRegisterSessionId,
     };
 
-    localStorage.setItem(POS_REGISTER_SESSION_KEY, JSON.stringify(session));
+    try {localStorage.setItem(POS_REGISTER_SESSION_KEY, JSON.stringify(session));} catch { /* server register is already confirmed */ }
 
     setReceptionistId(loginReceptionistId);
     setOpeningCash(savedOpeningCash);
@@ -1652,7 +1572,7 @@ export default function ReceiptsPage() {
     let variance = parsedClosingCash - latestExpectedCash;
 
     if(!registerSessionId){alert('No saved register was found. Please sign in again.');return;}
-    const closeResponse=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'close',registerSessionId,amount:parsedClosingCash})}).catch(()=>null);
+    const closeResponse=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'close',registerSessionId,amount:parsedClosingCash,expectedReceptionistId:receptionistId,expectedClinicId:activeClinic?.id})}).catch(()=>null);
     const closeResult=closeResponse?await closeResponse.json().catch(()=>null):null;
     if(!closeResponse?.ok){alert(closeResult?.error||'Register was not closed. Try again.');return;}
     latestExpectedCash = Number(closeResult.expectedCash);
@@ -2855,7 +2775,7 @@ export default function ReceiptsPage() {
     const receiptHtml = buildThermalReceiptHtml("Receipt", savedReceipt);
 
     try {
-      printHtmlWhenImagesReady(receiptHtml);
+      return printHtmlWhenImagesReady(receiptHtml);
     } catch (error) {
       alert("Error opening print dialog. Please check browser settings.");
     }
@@ -2880,6 +2800,9 @@ export default function ReceiptsPage() {
           </p>
 
           <div className="mt-5 grid gap-4">
+            {isVerifyingRegister && <p role="status" className="text-sm text-teal-700">Checking your receptionist login and register...</p>}
+            {registerVerificationError && <div role="alert" className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">{registerVerificationError}<AsyncActionButton disabled={isVerifyingRegister} onClick={() => verifySavedRegister()} busyLabel="Checking..." className="ml-2 font-semibold underline">Retry verification</AsyncActionButton></div>}
+            {!isVerifyingRegister && !registerVerificationError && <p className="text-sm text-slate-600">{verifiedReceptionistName ? `Signed in as ${verifiedReceptionistName}. Enter the PIN to open a register. To change receptionist, use Switch Clinic (sign out).` : "Choose your receptionist name and enter the PIN. An existing open register will be resumed after verification."}</p>}
             {receptionists.length === 0 ? (
               <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
                 No receptionists are available yet. Add one in the Receptionists page before opening the register.
@@ -2928,12 +2851,13 @@ export default function ReceiptsPage() {
               />
             </div>
 
-            <button
+            <AsyncActionButton
               onClick={openRegister}
-              className="inline-flex items-center justify-center rounded-2xl bg-teal-700 px-5 py-3 text-sm font-semibold text-white transition hover:bg-teal-600"
+              disabled={isVerifyingRegister || !!registerVerificationError}
+              className="inline-flex items-center justify-center rounded-2xl bg-teal-700 px-5 py-3 text-sm font-semibold text-white transition hover:bg-teal-600" busyLabel="Loading..."
             >
               Open POS Register
-            </button>
+            </AsyncActionButton>
           </div>
         </div>
       ) : (
@@ -2943,7 +2867,7 @@ export default function ReceiptsPage() {
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-teal-700">Register Open</p>
             <p className="mt-2 text-sm font-semibold text-slate-800">{activeClinic?.name || ""}</p>
             <p className="mt-1 text-xs text-slate-700">
-              Receptionist: {receptionists.find((person) => person.id === receptionistId)?.name || "-"}
+              Receptionist: {verifiedReceptionistName || receptionists.find((person) => person.id === receptionistId)?.name || "-"}
             </p>
             <p className="mt-1 text-xs text-slate-700">Opening Cash: AED {Number(openingCash || 0).toFixed(2)}</p>
             <p className="mt-1 text-[11px] text-slate-500">
@@ -2954,13 +2878,13 @@ export default function ReceiptsPage() {
           <div className="my-4 border-t border-slate-200" />
 
           <div className="space-y-2">
-            <button
+            <AsyncActionButton
               onClick={openPatientBackupModal}
               disabled={isLoadingPatientBackupSummary || isDownloadingPatientBackup}
-              className="inline-flex w-full items-center justify-center rounded-2xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm font-semibold text-cyan-800 transition hover:bg-cyan-100 disabled:opacity-50"
+              className="inline-flex w-full items-center justify-center rounded-2xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm font-semibold text-cyan-800 transition hover:bg-cyan-100 disabled:opacity-50" busyLabel="Loading..."
             >
               {isLoadingPatientBackupSummary ? "Preparing Backup..." : "Download Patient Backup"}
-            </button>
+            </AsyncActionButton>
             <label className="block text-xs font-semibold text-slate-700">
               EOD date
               <input
@@ -2971,19 +2895,21 @@ export default function ReceiptsPage() {
                 className="mt-1 block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
               />
             </label>
-            <button
+            <AsyncActionButton
               onClick={downloadDailyIncomeReport}
               disabled={isDownloadingEod}
-              className="inline-flex w-full items-center justify-center rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100"
+              className="inline-flex w-full items-center justify-center rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100" busyLabel="Generating..."
             >
               {isDownloadingEod ? 'Preparing EOD…' : 'Print Report'}
-            </button>
+            </AsyncActionButton>
             <button
-              onClick={() => setShowReceiptHistoryModal(true)}
+              disabled={showReceiptHistoryModal}
+              onClick={() => {setReceiptHistoryKind("receipt"); setShowReceiptHistoryModal(true);}}
               className="inline-flex w-full items-center justify-center rounded-2xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-semibold text-sky-800 transition hover:bg-sky-100"
             >
               Receipt History
             </button>
+            <button disabled={showReceiptHistoryModal} onClick={() => {setReceiptHistoryKind("plan"); setShowReceiptHistoryModal(true);}} className="inline-flex w-full items-center justify-center rounded-2xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm font-semibold text-cyan-800 disabled:opacity-50">Treatment Plan Receipts</button>
             {deductionFeatureEnabled && (
               <button
                 onClick={() => openCashDeductionEntry()}
@@ -2995,12 +2921,12 @@ export default function ReceiptsPage() {
           </div>
 
           <div className="mt-4 pt-1 lg:mt-auto">
-            <button
+            <AsyncActionButton
               onClick={openCloseRegisterModal}
-              className="inline-flex w-full items-center justify-center rounded-2xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+              className="inline-flex w-full items-center justify-center rounded-2xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800" busyLabel="Loading..."
             >
               Close Register
-            </button>
+            </AsyncActionButton>
           </div>
         </aside>
 
@@ -3014,7 +2940,7 @@ export default function ReceiptsPage() {
                 Search Patient
               </button>
               <button
-                onClick={() => setShowRegisterPatientModal(true)}
+                onClick={() => { setRegistrationRecordsReady(false); setShowRegisterPatientModal(true); }}
                 className="rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
               >
                 + Register Patient
@@ -3231,16 +3157,16 @@ export default function ReceiptsPage() {
                                       {variant && <p className="mt-0.5 text-xs text-slate-500">{variant}</p>}
                                     </div>
                                     <div className="flex items-center gap-1">
-                                      <button
+                                      <AsyncActionButton
                                         type="button"
                                         onClick={() => toggleFavorite(serviceId)}
                                         className={`rounded-full px-2 py-1 text-xs font-semibold ${
                                           isFavorite ? "bg-amber-100 text-amber-700" : "bg-white text-slate-500"
                                         }`}
-                                        title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                                        title={isFavorite ? "Remove from favorites" : "Add to favorites"} busyLabel="Working..."
                                       >
                                         ★
-                                      </button>
+                                      </AsyncActionButton>
                                       {isVariable ? (
                                         <span className="rounded-xl bg-violet-100 px-2.5 py-1 text-xs font-semibold text-violet-700">
                                           {service.min_price != null && service.max_price != null
@@ -3317,16 +3243,16 @@ export default function ReceiptsPage() {
                             {variant && <p className="mt-0.5 text-xs text-slate-500">{variant}</p>}
                           </div>
                           <div className="flex items-center gap-1">
-                            <button
+                            <AsyncActionButton
                               type="button"
                               onClick={() => toggleFavorite(serviceId)}
                               className={`rounded-full px-2 py-1 text-xs font-semibold ${
                                 isFavorite ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-500"
                               }`}
-                              title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                              title={isFavorite ? "Remove from favorites" : "Add to favorites"} busyLabel="Working..."
                             >
                               ★
-                            </button>
+                            </AsyncActionButton>
                             {isVariable ? (
                               <span className="rounded-xl bg-violet-100 px-2.5 py-1 text-xs font-semibold text-violet-700">
                                 {service.min_price != null && service.max_price != null
@@ -3699,13 +3625,13 @@ export default function ReceiptsPage() {
             </div>
 
             <div className="mt-6 grid gap-3 sm:grid-cols-1">
-              <button
+              <AsyncActionButton
                 onClick={proceedToPayment}
                 disabled={isProceeding || hasUnconfiguredVatServices}
-                className="inline-flex items-center justify-center rounded-3xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-400 disabled:opacity-50"
+                className="inline-flex items-center justify-center rounded-3xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-400 disabled:opacity-50" busyLabel="Working..."
               >
                 {isProceeding ? "Processing..." : "Proceed to Payment"}
-              </button>
+              </AsyncActionButton>
             </div>
 
             {showPaymentModal && (
@@ -3978,7 +3904,7 @@ export default function ReceiptsPage() {
                         </div>
                       </div>
                     )}
-                    <button
+                    <AsyncActionButton
                       onClick={continueFromPaymentModal}
                       disabled={
                         isSavingReceipt
@@ -3986,10 +3912,10 @@ export default function ReceiptsPage() {
                         || livePaymentValidation.length > 0
                         || getCashTenderValidationErrors().length > 0
                       }
-                      className="w-full rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400 disabled:opacity-50"
+                      className="w-full rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400 disabled:opacity-50" busyLabel="Working..."
                     >
                       {isSavingReceipt ? "Completing Payment..." : "Complete Payment"}
-                    </button>
+                    </AsyncActionButton>
                     <button
                       onClick={() => {
                         setShowPaymentModal(false);
@@ -4068,12 +3994,12 @@ export default function ReceiptsPage() {
                   </div>
 
                   <div className="grid gap-3">
-                    <button
+                    <AsyncActionButton
                       onClick={() => printReceipt(paymentCompleteSnapshot.receipt)}
-                      className="inline-flex items-center justify-center rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400"
+                      className="inline-flex items-center justify-center rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-400" busyLabel="Generating..."
                     >
                       Print Receipt
-                    </button>
+                    </AsyncActionButton>
                     <button
                       onClick={finalizeSuccessfulTransaction}
                       className="inline-flex items-center justify-center rounded-2xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
@@ -4185,13 +4111,13 @@ export default function ReceiptsPage() {
                     >
                       Cancel
                     </button>
-                    <button
+                    <AsyncActionButton
                       onClick={saveCashDeduction}
                       disabled={isSavingCashDeduction}
-                      className="inline-flex items-center justify-center rounded-2xl bg-violet-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600 disabled:opacity-50"
+                      className="inline-flex items-center justify-center rounded-2xl bg-violet-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600 disabled:opacity-50" busyLabel="Saving..."
                     >
                       {isSavingCashDeduction ? "Saving..." : "Save"}
-                    </button>
+                    </AsyncActionButton>
                   </div>
 
                   <div className="mt-5 border-t border-slate-200 pt-4">
@@ -4264,13 +4190,13 @@ export default function ReceiptsPage() {
                     />
                   </div>
                   <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                    <button
+                    <AsyncActionButton
                       onClick={voidCashDeduction}
                       disabled={isVoidingCashDeduction}
-                      className="inline-flex items-center justify-center rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50"
+                      className="inline-flex items-center justify-center rounded-2xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50" busyLabel="Working..."
                     >
                       {isVoidingCashDeduction ? "Voiding..." : "Confirm Void"}
-                    </button>
+                    </AsyncActionButton>
                     <button
                       onClick={() => {
                         if (isVoidingCashDeduction) return;
@@ -4324,12 +4250,12 @@ export default function ReceiptsPage() {
                   </div>
 
                   <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                    <button
+                    <AsyncActionButton
                       onClick={closeRegister}
-                      className="inline-flex items-center justify-center rounded-2xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-teal-600"
+                      className="inline-flex items-center justify-center rounded-2xl bg-teal-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-teal-600" busyLabel="Closing..."
                     >
                       Confirm Close
-                    </button>
+                    </AsyncActionButton>
                     <button
                       onClick={() => {
                         setShowCloseRegisterModal(false);
@@ -4414,11 +4340,11 @@ export default function ReceiptsPage() {
                   )}
 
                   <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                    <button
+                    <AsyncActionButton
                       type="button"
                       onClick={downloadPatientBackup}
                       disabled={!patientBackupSummary || isLoadingPatientBackupSummary || isDownloadingPatientBackup}
-                      className="inline-flex items-center justify-center gap-2 rounded-2xl bg-cyan-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-600 disabled:opacity-50"
+                      className="inline-flex items-center justify-center gap-2 rounded-2xl bg-cyan-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-600 disabled:opacity-50" busyLabel="Generating..."
                     >
                       {isDownloadingPatientBackup ? (
                         <>
@@ -4444,7 +4370,7 @@ export default function ReceiptsPage() {
                           Download Excel
                         </>
                       )}
-                    </button>
+                    </AsyncActionButton>
                     <button
                       type="button"
                       onClick={() => {
@@ -4484,16 +4410,15 @@ export default function ReceiptsPage() {
           setShowSearchPatientModal(false);
           setSearchPatientModalInitialProfileId(null);
         }}
-        onSelect={(patient) => {
+        onSelect={(patient, financials) => {
           selectPatient(patient);
+          setOutstandingBalances(financials.balances);
+          setBalancePayments(financials.balancePayments);
+          setPatientCredits(financials.patientCredits);
           setShowSearchPatientModal(false);
           setSearchPatientModalInitialProfileId(null);
         }}
-        patients={clinicScopedPatients}
         clinicId={activeClinic?.id ?? null}
-        outstandingBalances={outstandingBalances}
-        balancePayments={balancePayments}
-        patientCredits={patientCredits}
         clinicsList={clinics}
         clinic={activeClinic ?? null}
         receptionistId={receptionistId || loginReceptionistId || null}
@@ -4509,7 +4434,6 @@ export default function ReceiptsPage() {
               ? { ...file, file_no: updated.clinic_file_no ?? file.file_no, mrn: Object.hasOwn(updated, "clinic_file_mrn") ? updated.clinic_file_mrn : file.mrn }
               : file
           );
-          setClinicPatientFiles(syncClinicFile);
           setRegistrationClinicPatientFiles(syncClinicFile);
           if (patientId === updated.id) selectPatient(updated);
           pushSuccessToast("Patient updated");
@@ -4522,11 +4446,11 @@ export default function ReceiptsPage() {
         }}
       />
       <PosRegisterPatientModal
-        isOpen={showRegisterPatientModal}
+        isOpen={showRegisterPatientModal && registrationRecordsReady && registrationRecordsClinicId === activeClinic?.id}
         clinicId={activeClinic?.id ?? null}
-        patients={registrationPatients.length > 0 ? registrationPatients : patients}
-        clinicPatientFiles={registrationClinicPatientFiles.length > 0 ? registrationClinicPatientFiles : clinicPatientFiles}
-        onClose={() => setShowRegisterPatientModal(false)}
+        patients={registrationPatients}
+        clinicPatientFiles={registrationClinicPatientFiles}
+        onClose={() => { setShowRegisterPatientModal(false); setRegistrationRecordsReady(false); setRegistrationRecordsClinicId(""); }}
         onPatientRegistered={({ patient, successMessage }) => {
           setPatients((prev) => {
             const exists = prev.some((row) => String(row.id) === String(patient.id));
@@ -4534,20 +4458,6 @@ export default function ReceiptsPage() {
               return prev.map((row) => (String(row.id) === String(patient.id) ? { ...row, ...patient } : row));
             }
             return [...prev, patient];
-          });
-          setClinicPatientFiles((prev) => {
-            const exists = prev.some((row) => String(row.id) === String(patient.clinic_patient_file_id));
-            if (exists) return prev;
-            return [
-              ...prev,
-              {
-                id: String(patient.clinic_patient_file_id),
-                clinic_id: String(activeClinic?.id || ""),
-                patient_id: String(patient.id),
-                file_no: String(patient.clinic_file_no || ""),
-                mrn: patient.clinic_file_mrn || patient.mrn || null,
-              },
-            ];
           });
           setRegistrationPatients((prev) => {
             const exists = prev.some((row) => String(row.id) === String(patient.id));
@@ -4591,7 +4501,7 @@ export default function ReceiptsPage() {
           }
         }}
       />
-      <ReceiptHistoryModal isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} clinicId={activeClinic?.id} clinic={activeClinic ?? null} />
+      <ReceiptHistoryModal key={`${showReceiptHistoryModal}:${receiptHistoryKind}:${activeClinic?.id || ''}`} historyKind={receiptHistoryKind} isOpen={showReceiptHistoryModal} onClose={() => setShowReceiptHistoryModal(false)} clinicId={activeClinic?.id} clinic={activeClinic ?? null} />
       <CollectBalancePaymentModal
         isOpen={collectBalanceContext !== null}
         onClose={() => setCollectBalanceContext(null)}
@@ -4618,7 +4528,7 @@ export default function ReceiptsPage() {
             totalPaidBefore,
             remainingAfter: ctx.remainingAfter,
           });
-          refetchBalancePayments();
+          void refetchPatientFinancials(ctx.patient.id).catch((error) => alert(error instanceof Error ? error.message : "Patient financial records could not be reloaded."));
         }}
       />
 

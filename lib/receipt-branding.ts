@@ -175,7 +175,7 @@ export function printHtmlWhenImagesReady(html: string, popupMessage = "Please al
   const w = window.open("", "_blank", "width=400,height=600");
   if (!w) {
     alert(popupMessage);
-    return;
+    return Promise.resolve();
   }
 
   w.document.open();
@@ -183,34 +183,40 @@ export function printHtmlWhenImagesReady(html: string, popupMessage = "Please al
   w.document.close();
   w.focus();
 
-  const printWindow = () => {
-    try { w.print(); } catch { /* ignore */ }
-  };
+  return new Promise<void>((resolve) => {
+    let printed = false;
+    const printWindow = () => {
+      if (printed) return;
+      printed = true;
+      try { w.print(); } catch { alert("Could not open the print dialog. Please try again."); }
+      finally { resolve(); }
+    };
 
-  const images = Array.from(w.document.images);
-  if (images.length === 0) {
-    setTimeout(printWindow, 100);
-    return;
-  }
-
-  let remaining = images.filter((img) => !img.complete).length;
-  if (remaining === 0) {
-    setTimeout(printWindow, 100);
-    return;
-  }
-
-  const done = () => {
-    remaining -= 1;
-    if (remaining <= 0) {
+    const images = Array.from(w.document.images);
+    if (images.length === 0) {
       setTimeout(printWindow, 100);
+      return;
     }
-  };
 
-  images.forEach((img) => {
-    if (img.complete) return;
-    img.addEventListener("load", done, { once: true });
-    img.addEventListener("error", done, { once: true });
+    let remaining = images.filter((img) => !img.complete).length;
+    if (remaining === 0) {
+      setTimeout(printWindow, 100);
+      return;
+    }
+
+    const done = () => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        setTimeout(printWindow, 100);
+      }
+    };
+
+    images.forEach((img) => {
+      if (img.complete) return;
+      img.addEventListener("load", done, { once: true });
+      img.addEventListener("error", done, { once: true });
+    });
+
+    setTimeout(printWindow, 1500);
   });
-
-  setTimeout(printWindow, 1500);
 }

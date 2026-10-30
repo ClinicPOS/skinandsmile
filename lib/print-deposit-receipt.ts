@@ -1,5 +1,6 @@
 import type { Clinic, Patient, PatientCredit } from "./types";
 import { buildReceiptQrHtml } from "./receipt-branding";
+import { escapeHtml } from "./escape-html";
 
 export type DepositReceiptContext = {
   credit: PatientCredit;
@@ -70,10 +71,10 @@ export function buildDepositReceiptHtml(ctx: DepositReceiptContext): string {
   </style>
 </head>
 <body>
-  <div class="center clinic">${clinicName}</div>
-  ${clinicAddress ? `<div class="center meta">${clinicAddress.replace(/\n/g, "<br/>")}</div>` : ""}
-  ${clinicPhone ? `<div class="center meta">Tel: ${clinicPhone}</div>` : ""}
-  ${clinicTrn ? `<div class="center meta">TRN: ${clinicTrn}</div>` : ""}
+  <div class="center clinic">${escapeHtml(clinicName)}</div>
+  ${clinicAddress ? `<div class="center meta">${escapeHtml(clinicAddress).replace(/\n/g, "<br/>")}</div>` : ""}
+  ${clinicPhone ? `<div class="center meta">Tel: ${escapeHtml(clinicPhone)}</div>` : ""}
+  ${clinicTrn ? `<div class="center meta">TRN: ${escapeHtml(clinicTrn)}</div>` : ""}
 
   <div class="center bold title">DEPOSIT RECEIPT</div>
   <div class="center meta">Advance Payment / Patient Credit</div>
@@ -81,21 +82,21 @@ export function buildDepositReceiptHtml(ctx: DepositReceiptContext): string {
   <div class="divider"></div>
 
   <div class="row"><span>Date</span><span>${dateStr} ${timeStr}</span></div>
-  <div class="row"><span>Cashier</span><span>${cashierName}</span></div>
-  <div class="row"><span>Ref</span><span>${reference}</span></div>
+  <div class="row"><span>Cashier</span><span>${escapeHtml(cashierName)}</span></div>
+  <div class="row"><span>Ref</span><span>${escapeHtml(reference)}</span></div>
 
   <div class="divider"></div>
 
-  <div class="row"><span>Patient</span><span>${patient.name}</span></div>
-  <div class="row"><span>File No.</span><span>${patientNo}</span></div>
-  ${patient.phone ? `<div class="row"><span>Phone</span><span>${patient.phone}</span></div>` : ""}
+  <div class="row"><span>Patient</span><span>${escapeHtml(patient.name)}</span></div>
+  <div class="row"><span>File No.</span><span>${escapeHtml(patientNo)}</span></div>
+  ${patient.phone ? `<div class="row"><span>Phone</span><span>${escapeHtml(patient.phone)}</span></div>` : ""}
 
   <div class="divider"></div>
 
   <div class="summary">
     <div class="row bold"><span>Deposit Received</span><span>AED ${amount}</span></div>
-    <div class="row"><span>Payment Method</span><span>${(credit.payment_method || "-").toUpperCase()}</span></div>
-    ${credit.reason ? `<div class="row"><span>Reason</span><span>${credit.reason}</span></div>` : ""}
+    <div class="row"><span>Payment Method</span><span>${escapeHtml((credit.payment_method || "-").toUpperCase())}</span></div>
+    ${credit.reason ? `<div class="row"><span>Reason</span><span>${escapeHtml(credit.reason)}</span></div>` : ""}
     ${expectedDate ? `<div class="row"><span>Expected Treatment</span><span>${expectedDate}</span></div>` : ""}
     <div class="divider"></div>
     <div class="row total"><span>Available Credit</span><span>AED ${available}</span></div>
@@ -103,11 +104,11 @@ export function buildDepositReceiptHtml(ctx: DepositReceiptContext): string {
 
   <div class="stamp">CREDIT ON ACCOUNT</div>
 
-  ${credit.notes ? `<div class="meta" style="margin-top:6px;">Note: ${credit.notes}</div>` : ""}
+  ${credit.notes ? `<div class="meta" style="margin-top:6px;">Note: ${escapeHtml(credit.notes)}</div>` : ""}
 
   <div class="footer">This deposit is held on the patient's account and can be used for future treatments.</div>
   <div class="footer">Thank you.</div>
-  ${clinicInstagram || clinicFacebook ? `<div class="footer">Follow us${clinicInstagram ? `<br/>Instagram: ${clinicInstagram}` : ""}${clinicFacebook ? `<br/>Facebook: ${clinicFacebook}` : ""}</div>` : ""}
+  ${clinicInstagram || clinicFacebook ? `<div class="footer">Follow us${clinicInstagram ? `<br/>Instagram: ${escapeHtml(clinicInstagram)}` : ""}${clinicFacebook ? `<br/>Facebook: ${escapeHtml(clinicFacebook)}` : ""}</div>` : ""}
   <div class="divider"></div>
   ${qrHtml}
 </body>

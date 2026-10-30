@@ -1,10 +1,10 @@
 // LOCALHOST ONLY. Retains labelled fake financial records to preserve audit history.
-import fs from 'node:fs';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';
+import fs from 'node:fs';import assert from 'node:assert/strict';import {randomInt,randomUUID} from 'node:crypto';
 const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8').replace(/^\uFEFF/,''));assert.equal(config.API_URL,'http://127.0.0.1:54321');
-const app='http://127.0.0.1:3001',clinic='11111111-1111-4111-8111-111111111111',other='22222222-2222-4222-8222-222222222222',rec='33333333-3333-4333-8333-333333333333';
+const app='http://127.0.0.1:3001',clinic='11111111-1111-4111-8111-111111111111',other='22222222-2222-4222-8222-222222222222';let rec,owner,manager,testReceptionistId,registerId;
 const headers={apikey:config.SERVICE_ROLE_KEY,Authorization:`Bearer ${config.SERVICE_ROLE_KEY}`,'Content-Type':'application/json'},anon={apikey:config.ANON_KEY,Authorization:`Bearer ${config.ANON_KEY}`,'Content-Type':'application/json'};
 const token=randomUUID(),foreign=randomUUID(),service=randomUUID(),tokens=[token,foreign];
-let testManagerId;
+ let testManagerId;
 async function db(path,init={}){const r=await fetch(`${config.API_URL}/rest/v1/${path}`,{...init,headers});assert.ok(r.ok,await r.clone().text());const text=await r.text();return text?JSON.parse(text):null;}
 async function api(path,auth=token,body){return fetch(`${app}${path}`,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...(auth?{Cookie:`app-auth=${auth}`}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:'manual'});}
 async function ok(response){assert.equal(response.status,200,await response.clone().text());return response.json();}
@@ -21,16 +21,23 @@ async function receipt(variant='cash'){
 function draft(r,all=false){return {action:'request',receiptId:r.id,operationId:randomUUID(),reason:'TEST patient requested return',itemIds:all?r.items:[r.items[0]],allocationAmounts:{[r.allocation]:all?'210':'105'}};}
 try{
  await db('services',{method:'POST',body:JSON.stringify({id:service,clinic_id:clinic,name:'TEST REFUND APPROVAL',price:100,vat_rate:0.05,is_active:true})});
- for(const [t,c,r] of [[token,clinic,rec],[foreign,other,'44444444-4444-4444-8444-444444444444']])await db('active_sessions',{method:'POST',body:JSON.stringify({token:t,session_mode:'clinic',user_role:'receptionist',clinic_id:c,receptionist_id:r,created_at:new Date().toISOString()})});
- await db(`active_sessions?token=eq.${token}`,{method:'PATCH',body:JSON.stringify({receptionist_id:null})});
+  for(const [t,c,r] of [[token,clinic,null],[foreign,other,'44444444-4444-4444-8444-444444444444']])await db('active_sessions',{method:'POST',body:JSON.stringify({token:t,session_mode:'clinic',user_role:'receptionist',clinic_id:c,receptionist_id:r,created_at:new Date().toISOString()})});
+  await db(`active_sessions?token=eq.${token}`,{method:'PATCH',body:JSON.stringify({receptionist_id:null})});
+  owner=await login('owner.demo@local.test','LocalOwnerTestOnly!42');
+  const email=`refund.approver.${randomUUID()}@local.test`;
+  const created=await ok(await api('/api/owner/managers',owner,{clinicId:clinic,name:'TEST Refund Approver (disabled after checks)',email,enabled:true,permissions:['correction_approval','receptionists'],startsOn:null,endsOn:null,expectedUpdatedAt:null,reason:'TEST refund approval verification'}));testManagerId=created.accountId;
+  manager=await login(email,created.temporaryPassword,clinic);
+  const pin=String(randomInt(1000,10000));
+   const staffList=await ok(await api(`/api/workspace/receptionists?clinicId=${clinic}`,manager));
+   const testStaff=staffList.records.filter(row=>row.name==='TEST Refund Workflow Receptionist');assert.ok(testStaff.length<=1);
+   if(testStaff.length){testReceptionistId=testStaff[0].id;const updated=await api('/api/workspace/receptionists',manager,{clinicId:clinic,id:testReceptionistId,name:'TEST Refund Workflow Receptionist',shift:'Test only',pin,active:true,reason:'TEST prepare refund integration receptionist'});assert.equal(updated.status,200,await updated.clone().text());}
+   else{const receptionist=await ok(await api('/api/owner/receptionists',owner,{action:'create',data:{name:'TEST Refund Workflow Receptionist',shift:'Test only',clinic_id:clinic,pin}}));testReceptionistId=receptionist.record.id;}
+   rec=testReceptionistId;
  assert.equal((await api('/api/auth/receptionist',token,{receptionistId:rec,pin:'wrong'})).status,403);
- assert.equal((await api('/api/auth/receptionist',token,{receptionistId:'44444444-4444-4444-8444-444444444444',pin:'1234'})).status,403);
- await ok(await api('/api/auth/receptionist',token,{receptionistId:rec,pin:'1234'}));
- assert.equal((await db(`active_sessions?token=eq.${token}&select=receptionist_id`))[0].receptionist_id,rec);
- const owner=await login('owner.demo@local.test','LocalOwnerTestOnly!42');
- const email=`refund.approver.${randomUUID()}@local.test`;
- const created=await ok(await api('/api/owner/managers',owner,{clinicId:clinic,name:'TEST Refund Approver (disabled after checks)',email,enabled:true,permissions:['correction_approval'],startsOn:null,endsOn:null,expectedUpdatedAt:null,reason:'TEST refund approval verification'}));testManagerId=created.accountId;
- const manager=await login(email,created.temporaryPassword,clinic);
+  assert.equal((await api('/api/auth/receptionist',token,{receptionistId:'44444444-4444-4444-8444-444444444444',pin})).status,403);
+  await ok(await api('/api/auth/receptionist',token,{receptionistId:rec,pin}));
+  assert.equal((await db(`active_sessions?token=eq.${token}&select=receptionist_id`))[0].receptionist_id,rec);
+  registerId=(await ok(await api('/api/register',token,{action:'open',amount:0}))).register.id;
  const voidReceipt=await receipt();const voidInput={action:'request',kind:'VOID',receiptId:voidReceipt.id,operationId:randomUUID(),reason:'TEST duplicate receipt entry; actual cash accounted separately',itemIds:[],allocationAmounts:{}};
  await ok(await post(voidInput));
  assert.equal((await post({action:'approve',id:voidInput.operationId},manager)).status,400);
@@ -79,4 +86,4 @@ try{
  const expired=await receipt(),expiredInput=draft(expired);await ok(await post(expiredInput));await db(`receipt_refund_requests?id=eq.${expiredInput.operationId}`,{method:'PATCH',body:JSON.stringify({created_at:'2020-01-01T00:00:00Z'})});assert.equal((await post({action:'approve',id:expiredInput.operationId},owner)).status,409);await ok(await post({action:'cancel',id:expiredInput.operationId}));
  console.log('PASS: linked correction, original amount retention, payment identity transfer exactly once, no refund side effect, excess-payment block, zero replacement balance, same-day approval and EOD metadata.');
  console.log('PASS: request/approval/return separation, clinic and role isolation, concurrent retry, full and item-partial refund, rejection/cancellation, stale receipt guard, BNPL fee retention, atomic rollback, audit identity and anonymous bypass denial.');
-}finally{for(const t of tokens)await db(`active_sessions?token=eq.${t}`,{method:'DELETE'});if(testManagerId)await db(`pos_accounts?id=eq.${testManagerId}`,{method:'PATCH',body:JSON.stringify({enabled:false})});await db(`services?id=eq.${service}`,{method:'PATCH',body:JSON.stringify({is_active:false})});}
+}finally{if(registerId){const summary=await ok(await api(`/api/cash-deductions?registerSessionId=${registerId}`));const closed=await api('/api/register',token,{action:'close',amount:summary.summary.cashCollected,registerSessionId:registerId});assert.equal(closed.status,200,await closed.clone().text());}if(testReceptionistId&&manager){const disabled=await api('/api/workspace/receptionists',manager,{clinicId:clinic,id:testReceptionistId,name:'TEST Refund Workflow Receptionist',shift:'Test only',pin:null,active:false,reason:'TEST cleanup: disable refund integration receptionist'});assert.equal(disabled.status,200,await disabled.clone().text());}for(const t of tokens)await db(`active_sessions?token=eq.${t}`,{method:'DELETE'});if(testManagerId)await db(`pos_accounts?id=eq.${testManagerId}`,{method:'PATCH',body:JSON.stringify({enabled:false})});await db(`services?id=eq.${service}`,{method:'PATCH',body:JSON.stringify({is_active:false})});}

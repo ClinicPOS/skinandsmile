@@ -21,12 +21,25 @@ function extract(source, name = 'openProfile') {
   return fn;
 }
 function harness(source, options = {}) {
-  const fn = extract(source), state = {}, requests = [], alerts = [];
+  const fn = extract(source), state = {}, requests = [], endpointRequests = [], alerts = [];
   const scope = {
     exports: {}, Error, Set, clinicId: 'clinic-a', profileLoadGeneration: {current: 0},
+    URLSearchParams,
     resetTreatmentPlanForms() {}, alert: message => alerts.push(message),
     receptionistIdsForClinic: testModuleLoader()('lib/clinic-scope.ts').receptionistIdsForClinic,
     loadPatientNotes: async id => { await delay(options.delay?.(id) ?? 25); return {data: [{id: `note-${id}`}]}; },
+    fetch: async input => {
+      const url = new URL(input, 'http://localhost');
+      const patientId = url.searchParams.get('patientIds') || url.searchParams.get('patientId') || 'a';
+      endpointRequests.push({path: url.pathname, patientId});
+      await delay(options.delay?.(patientId) ?? 25);
+      if (url.pathname.endsWith('/clinic-records')) {
+        const id = patientId;
+        return Response.json({patients: [{id, name: `Patient ${id}`, phone: null}], files: [{id: `file-${id}`, patient_id: id, file_no: '0007', mrn: null}]});
+      }
+      if (url.pathname.endsWith('/financials')) return Response.json({balances: [], balancePayments: [], patientCredits: []});
+      throw new Error(`Unexpected profile request: ${url.pathname}`);
+    },
     supabase: {from(table) {
       let fields = '*'; const filters = {};
       const query = {
@@ -58,7 +71,7 @@ function harness(source, options = {}) {
   for (const name of new Set(fn.match(/\bset[A-Z]\w+/g))) scope[name] = value => {state[name] = value;};
   const code = ts.transpileModule(fn + '\nexports.run = openProfile;', {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText;
   vm.runInNewContext(code, scope);
-  return {...scope.exports, state, requests, alerts};
+  return {...scope.exports, state, requests, endpointRequests, alerts};
 }
 function delay(ms) {return new Promise(resolve => setTimeout(resolve, ms));}
 async function measure(source) {
@@ -69,10 +82,11 @@ async function measure(source) {
     times.push(performance.now() - start);
   }
   times.sort((a, b) => a - b);
-  return {medianMs: Number(times[2].toFixed(2)), requests: h.requests.length, h};
+  return {medianMs: Number(times[2].toFixed(2)), requests: h.requests.length, endpointRequests: h.endpointRequests.length, h};
 }
 const before = await measure(baseline), after = await measure(current);
 assert.equal(before.requests - after.requests, 1, 'one duplicate receptionist read removed');
+assert.equal(after.endpointRequests, 2, 'profile details and finance are each fetched once for the selected patient');
 assert.ok(after.medianMs < before.medianMs * 0.8, 'independent requests overlap');
 for (const key of ['setProfileReceipts', 'setProfileReceiptItems', 'setTreatmentPlans', 'setTreatmentPlanVisits', 'setLastVisit', 'setHistoricalVisits']) {
   assert.equal(JSON.stringify(after.h.state[key]), JSON.stringify(before.h.state[key]), key);
@@ -91,43 +105,15 @@ const emptyClinic = harness(current, {noReceptionists: true});
 await emptyClinic.run({id: 'a'});
 assert.equal(emptyClinic.state.setLastVisit, null);
 assert.equal(emptyClinic.requests.filter(r => r.table === 'receipts').length, 1);
-// Page-local coalescing must not persist across login sessions or serve stale clinic data.
-const patientFn = extract(fs.readFileSync('app/receipts/page.tsx', 'utf8'), 'loadClinicScopedPatientData');
-const calls = [], pageState = {}, pageAlerts = [];
-const pageScope = {
-  exports: {}, Error, patientLoadGeneration: {current: 0}, pendingPatientLoad: {current: null},
-  accessSession: {id: 'session-a'},
-  setPatients: rows => {pageState.patients = rows;},
-  setClinicPatientFiles: rows => {pageState.files = rows;},
-  alert: message => pageAlerts.push(message),
-  loadClinicPatientRecords: id => new Promise((resolve, reject) => calls.push({id, resolve, reject})),
-};
-vm.runInNewContext(ts.transpileModule(patientFn + '\nexports.run = loadClinicScopedPatientData;', {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText, pageScope);
-const records = id => ({patients: [{id}], files: [{id}]});
-const a = pageScope.exports.run('clinic-a'), duplicate = pageScope.exports.run('clinic-a');
-assert.equal(calls.length, 1);
-calls[0].resolve(records('a')); await Promise.all([a, duplicate]);
-const fresh = pageScope.exports.run('clinic-a'); assert.equal(calls.length, 2);
-const other = pageScope.exports.run('clinic-b');
-calls[2].resolve(records('b')); await other;
-calls[1].resolve(records('a')); await fresh;
-assert.equal(pageState.patients[0].id, 'b');
-const oldSession = pageScope.exports.run('clinic-b');
-pageScope.accessSession = {id: 'session-b'};
-const newSession = pageScope.exports.run('clinic-b');
-assert.equal(calls.length, 5, 'new session must issue a new request');
-calls[4].resolve(records('new-session')); await newSession;
-calls[3].resolve(records('old-session')); await oldSession;
-assert.equal(pageState.patients[0].id, 'new-session');
-const failure = pageScope.exports.run('clinic-b'); calls[5].reject(new Error('Failed lookup')); await failure;
-assert.equal(pageAlerts.length, 1); assert.equal(pageScope.pendingPatientLoad.current, null);
-const cleared = pageScope.exports.run(null); await cleared;
-assert.equal(pageState.patients.length, 0);
+const posPage = fs.readFileSync('app/receipts/page.tsx', 'utf8');
+const startupLoader = posPage.match(/async function loadData\(\) \{[\s\S]*?\n  \}/)?.[0] || '';
+assert.ok(startupLoader);
+assert.doesNotMatch(startupLoader, /loadClinicPatientRecords|outstanding_balances|balance_payments|patient_credits/);
 const result = {
   environment: 'Local synthetic data; actual profile function; 25 ms per mocked query. Not deployed latency.',
-  before: {medianMs: before.medianMs, dataRequests: before.requests},
-  after: {medianMs: after.medianMs, dataRequests: after.requests},
-  checks: ['matching profile data', 'latest patient wins concurrent loads', 'loading clears on failure', 'empty clinic last-visit lookup skipped', 'overlapping clinic requests share one read', 'fresh loads are not cached', 'clinic and session changes discard stale results', 'failed clinic loads clear and allow retry'],
+  before: {medianMs: before.medianMs, databaseRequests: before.requests, endpointRequests: before.endpointRequests},
+  after: {medianMs: after.medianMs, databaseRequests: after.requests, endpointRequests: after.endpointRequests},
+  checks: ['matching profile data', 'patient detail and complete finance endpoints load in parallel with profile reads', 'latest patient wins concurrent loads', 'loading clears on failure', 'empty clinic last-visit lookup skipped', 'startup does not load patient or financial tables'],
 };
 fs.writeFileSync('docs/security/patient-profile-performance-results.json', JSON.stringify(result, null, 2) + '\n');
 console.log(JSON.stringify(result, null, 2));

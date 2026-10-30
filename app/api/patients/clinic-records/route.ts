@@ -13,6 +13,7 @@ export async function GET(request: Request) {
     return Response.json({ error: "Forbidden for this clinic." }, { status: 403 });
   }
   const idsParam = new URL(request.url).searchParams.get('patientIds');
+  const minimal = new URL(request.url).searchParams.get('minimal') === 'true';
   const ids = idsParam === null ? null : [...new Set(idsParam.split(',').filter(Boolean))];
   if (ids && (ids.length > 200 || ids.some(id => !isUuid(id)))) return Response.json({error: 'Invalid patient IDs.'}, {status: 400});
   if (ids?.length === 0) return Response.json({patients: [], files: []}, {headers: {'Cache-Control': 'no-store'}});
@@ -22,7 +23,9 @@ export async function GET(request: Request) {
     const patients = new Map();
     for (let offset = 0; ; offset += 500) {
       let query = client.from("clinic_patient_files")
-        .select("id, clinic_id, patient_id, file_no, mrn, patients(id, patient_number, name, phone, email, notes, date_of_birth, sex, nationality, emirates_id, passport_number, mrn, address)")
+        .select(minimal
+          ? "id, clinic_id, patient_id, file_no, mrn, patients(id, patient_number, name, phone, date_of_birth, mrn)"
+          : "id, clinic_id, patient_id, file_no, mrn, patients(id, patient_number, name, phone, email, notes, date_of_birth, sex, nationality, emirates_id, passport_number, mrn, address)")
         .eq("clinic_id", clinicId).order("id", { ascending: true }).range(offset, offset + 499);
       if (ids) query = query.in("patient_id", ids);
       const { data, error } = await query;

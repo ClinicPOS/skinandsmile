@@ -1,6 +1,7 @@
 import { createProtectedDataClient } from '../../../../lib/protected-data-server';
 import { readAppSession, ensureClinicScopeAccess } from '../../../../lib/api-session';
 import { isUuid } from '../../../../lib/patient-mutation-validation';
+import { historyDateRange, readModalReceiptHistory } from '../../../../lib/read-modal-receipt-history';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
@@ -20,6 +21,16 @@ export async function GET(request: Request) {
     return Response.json({ error: 'History access is not assigned.' }, { status: 403 });
   }
   const start = performance.now();
+  const kind = params.get('kind');
+  if (kind !== null) {
+    const day = params.get('date');
+    if (kind !== 'receipt' && kind !== 'plan') return Response.json({error: 'Invalid history type.'}, {status: 400});
+    try { if (day) historyDateRange(day); } catch { return Response.json({error: 'Choose a valid date.'}, {status: 400}); }
+    try {
+      const data = await readModalReceiptHistory(db, clinicId, kind, offset, day);
+      return Response.json(data, {headers: {'Cache-Control': 'no-store', 'Server-Timing': `history;dur=${(performance.now()-start).toFixed(1)}`}});
+    } catch { return Response.json({error: 'Receipt history could not be loaded. Please retry.'}, {status: 503}); }
+  }
   const { data, error } = await db.rpc('pos_receipt_history_page', { p_clinic_id: clinicId, p_offset: offset, p_limit: 50 });
   if (error) return Response.json({ error: 'Receipt history could not be loaded.' }, { status: 503 });
   return Response.json(data, { headers: { 'Cache-Control': 'no-store', 'Server-Timing': `history;dur=${(performance.now()-start).toFixed(1)}` } });

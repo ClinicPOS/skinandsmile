@@ -10,6 +10,9 @@ if (!isUuid(clinicId)) return Response.json({ error: "A valid clinic is required
 if ((session.sessionMode === "clinic" || session.userRole === "clinic_manager") ? session.clinicId !== clinicId : !!ensureManagerSession(session)) {
     return Response.json({ error: "Forbidden for this clinic." }, { status: 403 });
   }
+if (session.userRole === "clinic_manager" && !session.permissions?.includes("reports")) {
+    return Response.json({ error: "Reports access is not assigned." }, { status: 403 });
+  }
 const requestedParam = new URL(request.url).searchParams.get("patientIds");
 const patientFilter = requestedParam === null ? null : [...new Set(requestedParam.split(","))];
 if (patientFilter && (patientFilter.length > 200 || patientFilter.some(id => !isUuid(id)))) {

@@ -74,6 +74,12 @@ export function useClinicAccess() {
 
   return {
     accessSession,
+    syncVerifiedClinic: (clinicId: string, clinicName: string) => {
+      if (accessSession?.mode === 'clinic' && accessSession.clinicId === clinicId && accessSession.clinicName === clinicName) return;
+      const verified: ClinicAccessSession = {mode: 'clinic', clinicId, clinicName};
+      try {writeClinicAccessSession(verified);} catch { /* verified server state still works when browser storage is unavailable */ }
+      setAccessSession(verified);
+    },
     isLoaded,
     isManager: accessSession?.mode === "manager",
     allowedClinicId: accessSession?.mode === "clinic" ? accessSession.clinicId : null,

@@ -1,6 +1,7 @@
 import type { Clinic, Patient, OutstandingBalance, BalancePayment } from "./types";
 import { formatBalanceReference } from "./outstanding-balances";
 import { buildReceiptQrHtml } from "./receipt-branding";
+import { escapeHtml } from "./escape-html";
 
 export type PaymentReceiptContext = {
   balance: OutstandingBalance;
@@ -80,10 +81,10 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
   </style>
 </head>
 <body>
-  <div class="center clinic">${clinicName}</div>
-  ${clinicAddress ? `<div class="center meta">${clinicAddress.replace(/\n/g, "<br/>")}</div>` : ""}
-  ${clinicPhone ? `<div class="center meta">Tel: ${clinicPhone}</div>` : ""}
-  ${clinicTrn ? `<div class="center meta">TRN: ${clinicTrn}</div>` : ""}
+  <div class="center clinic">${escapeHtml(clinicName)}</div>
+  ${clinicAddress ? `<div class="center meta">${escapeHtml(clinicAddress).replace(/\n/g, "<br/>")}</div>` : ""}
+  ${clinicPhone ? `<div class="center meta">Tel: ${escapeHtml(clinicPhone)}</div>` : ""}
+  ${clinicTrn ? `<div class="center meta">TRN: ${escapeHtml(clinicTrn)}</div>` : ""}
 
   <div class="center bold title">PAYMENT RECEIPT</div>
   <div class="center meta">Outstanding Balance Collection</div>
@@ -91,14 +92,14 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
   <div class="divider"></div>
 
   <div class="row"><span>Date</span><span>${dateStr} ${timeStr}</span></div>
-  <div class="row"><span>Cashier</span><span>${cashierName}</span></div>
-  <div class="row"><span>Ref</span><span>${reference}</span></div>
+  <div class="row"><span>Cashier</span><span>${escapeHtml(cashierName)}</span></div>
+  <div class="row"><span>Ref</span><span>${escapeHtml(reference)}</span></div>
 
   <div class="divider"></div>
 
-  <div class="row"><span>Patient</span><span>${patient.name}</span></div>
-  <div class="row"><span>File No.</span><span>${patientNo}</span></div>
-  ${patient.phone ? `<div class="row"><span>Phone</span><span>${patient.phone}</span></div>` : ""}
+  <div class="row"><span>Patient</span><span>${escapeHtml(patient.name)}</span></div>
+  <div class="row"><span>File No.</span><span>${escapeHtml(patientNo)}</span></div>
+  ${patient.phone ? `<div class="row"><span>Phone</span><span>${escapeHtml(patient.phone)}</span></div>` : ""}
 
   <div class="divider"></div>
 
@@ -106,18 +107,18 @@ export function buildPaymentReceiptHtml(ctx: PaymentReceiptContext): string {
     <div class="row"><span>Original Balance</span><span>AED ${original}</span></div>
     <div class="row"><span>Previously Paid</span><span>AED ${paidBefore}</span></div>
     <div class="row bold"><span>Amount Paid Today</span><span>AED ${paidToday}</span></div>
-    <div class="row"><span>Payment Method</span><span>${payment.payment_method.toUpperCase()}</span></div>
+    <div class="row"><span>Payment Method</span><span>${escapeHtml(payment.payment_method.toUpperCase())}</span></div>
     <div class="divider"></div>
     <div class="row total"><span>Remaining Balance</span><span>AED ${remaining}</span></div>
   </div>
 
   ${Number(remainingAfter) <= 0.0049 ? `<div class="stamp">SETTLED IN FULL</div>` : ""}
 
-  ${balance.reason ? `<div class="meta" style="margin-top:6px;">Note: ${balance.reason}</div>` : ""}
-  ${payment.notes ? `<div class="meta">${payment.notes}</div>` : ""}
+  ${balance.reason ? `<div class="meta" style="margin-top:6px;">Note: ${escapeHtml(balance.reason)}</div>` : ""}
+  ${payment.notes ? `<div class="meta">${escapeHtml(payment.notes)}</div>` : ""}
 
   <div class="footer">Thank you for your payment.</div>
-  ${clinicInstagram || clinicFacebook ? `<div class="footer">Follow us${clinicInstagram ? `<br/>Instagram: ${clinicInstagram}` : ""}${clinicFacebook ? `<br/>Facebook: ${clinicFacebook}` : ""}</div>` : ""}
+  ${clinicInstagram || clinicFacebook ? `<div class="footer">Follow us${clinicInstagram ? `<br/>Instagram: ${escapeHtml(clinicInstagram)}` : ""}${clinicFacebook ? `<br/>Facebook: ${escapeHtml(clinicFacebook)}` : ""}</div>` : ""}
   <div class="divider"></div>
   ${qrHtml}
 </body>

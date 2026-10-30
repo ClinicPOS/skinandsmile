@@ -5,6 +5,7 @@ import {
   getThermalReceiptSettings,
 } from "./thermal-receipt-branding";
 import type { Clinic } from "./types";
+import { escapeHtml } from "./escape-html";
 
 export interface ThermalReceiptItem {
   name: string;
@@ -150,18 +151,18 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
       const finalLineTotal = item.finalLineTotal != null ? Number(item.finalLineTotal) : null;
       const qtyLabel = qty > 1 ? ` <span style="font-size:9px;">×${qty} Unit</span>` : "";
       const teethLabel = item.teeth || [];
-      const teethDisplay = teethLabel.length > 0 ? ` (Tooth #${teethLabel.join(", #")})` : "";
+      const teethDisplay = teethLabel.length > 0 ? ` (Tooth #${escapeHtml(teethLabel.join(", #"))})` : "";
       if (!hasSnapshotDetails) {
         const displayLineTotal = hasTruePromo && originalLineTotal != null ? originalLineTotal : discountedLineTotal;
         return hasTruePromo
           ? `
           <div class="row item-row">
-            <span class="item-name">${item.name}${qtyLabel}${teethDisplay} <span style="font-size:10px;">(Promo)</span></span>
+            <span class="item-name">${escapeHtml(item.name)}${qtyLabel}${teethDisplay} <span style="font-size:10px;">(Promo)</span></span>
             <span class="amount" style="text-align:right;">${displayLineTotal === 0 ? "Free" : `AED ${displayLineTotal.toFixed(2)}`}</span>
           </div>`
           : `
           <div class="row item-row">
-            <span class="item-name">${item.name}${qtyLabel}${teethDisplay}</span>
+            <span class="item-name">${escapeHtml(item.name)}${qtyLabel}${teethDisplay}</span>
             <span class="amount">${discountedLineTotal === 0 ? "Free" : `AED ${discountedLineTotal.toFixed(2)}`}</span>
           </div>`;
       }
@@ -197,7 +198,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
       if (detailRows.length === 0) {
         return `
           <div class="row item-row">
-            <span class="item-name">${item.name}${qtyLabel}${teethDisplay}</span>
+            <span class="item-name">${escapeHtml(item.name)}${qtyLabel}${teethDisplay}</span>
             <span class="amount">${discountedLineTotal === 0 ? "Free" : `AED ${discountedLineTotal.toFixed(2)}`}</span>
           </div>`;
       }
@@ -205,7 +206,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
       return `
         <div class="item-block">
           <div class="row item-row">
-            <span class="item-name">${item.name}${qtyLabel}${teethDisplay}</span>
+            <span class="item-name">${escapeHtml(item.name)}${qtyLabel}${teethDisplay}</span>
             <span class="amount"></span>
           </div>
           ${detailRows.join("")}
@@ -216,7 +217,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
   const allocationFeeTotal = allocations.length > 0
     ? allocations.reduce((sum, row) => sum + row.feeAmount, 0)
     : Number(paymentFeeAmount ?? 0);
-  const paidToday = total + allocationFeeTotal - outstandingBalance;
+  const paidToday = Math.max(0, total + allocationFeeTotal - outstandingBalance - creditUsed);
   const isPartial = outstandingBalance > 0.0049;
   const originalSubtotal = subtotal;
   const grandTotalBeforeFees = Math.max(0, subtotal - discountAmount);
@@ -224,14 +225,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
   const globalDiscountTotal = Number(globalDiscountAmount ?? 0);
   const showSnapshotDiscountBreakdown = manualDiscountTotal > 0.0049 || globalDiscountTotal > 0.0049;
 
-  const escapeReceiptText = (value: string) =>
-    value
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  const notesForReceipt = escapeReceiptText(notes.trim());
+  const notesForReceipt = escapeHtml(notes.trim());
 
   const paymentStatusRows = `
       ${creditUsed > 0.0049
@@ -256,7 +250,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
 
   let paymentSection = `
       <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${
-        creditUsed > 0.0049 && paidToday <= 0.0049 ? "PATIENT CREDIT" : paymentSummaryLabel
+        creditUsed > 0.0049 && paidToday <= 0.0049 ? "PATIENT CREDIT" : escapeHtml(paymentSummaryLabel)
       }</span></div>
       ${allocationFeeTotal > 0 ? `<div class="row"><span>Payment Fee / رسوم الدفع</span><span>: AED ${allocationFeeTotal.toFixed(2)}</span></div>` : ""}
       <div class="row"><span>Amount Paid / المبلغ المدفوع</span><span>: AED ${paidToday.toFixed(2)}</span></div>
@@ -264,14 +258,14 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
 
   if (allocations.length > 0) {
     paymentSection = `
-        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${paymentSummaryLabel}</span></div>
+        <div class="row"><span>Payment Method / طريقة الدفع</span><span>: ${escapeHtml(paymentSummaryLabel)}</span></div>
         ${allocations
           .map(
             (row) => `
-          <div class="row"><span>${row.methodVariant.replace(/_/g, " ").charAt(0).toUpperCase() + row.methodVariant.replace(/_/g, " ").slice(1)}</span><span>: AED ${row.customerChargedAmount.toFixed(2)}</span></div>
+          <div class="row"><span>${escapeHtml(row.methodVariant.replace(/_/g, " ").charAt(0).toUpperCase() + row.methodVariant.replace(/_/g, " ").slice(1))}</span><span>: AED ${row.customerChargedAmount.toFixed(2)}</span></div>
           <div class="row"><span>Invoice Allocated</span><span>: AED ${row.invoiceAllocationAmount.toFixed(2)}</span></div>
           ${row.feeAmount > 0 ? `<div class="row"><span>Fee (${(row.feeRate * 100).toFixed(1)}%)</span><span>: AED ${row.feeAmount.toFixed(2)}</span></div>` : ""}
-          ${row.providerReferenceNumber ? `<div class="row"><span>Provider Reference</span><span>: ${row.providerReferenceNumber}</span></div>` : ""}
+          ${row.providerReferenceNumber ? `<div class="row"><span>Provider Reference</span><span>: ${escapeHtml(row.providerReferenceNumber)}</span></div>` : ""}
         `
           )
           .join("")}
@@ -283,7 +277,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
     <html>
       <head>
         <meta charset="utf-8" />
-        <title>${title}</title>
+        <title>${escapeHtml(title)}</title>
         <style>
           ${buildThermalReceiptCss(thermalSettings)}
           .head-row { display: flex; justify-content: space-between; font-weight: 700; }
@@ -440,32 +434,32 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
         ${buildThermalLogoHtml(logoPath, "Clinic logo")}
 
         <div class="receipt-header">
-          <div class="clinic-name">${clinicDisplayName}</div>
+          <div class="clinic-name">${escapeHtml(clinicDisplayName)}</div>
           <div class="address">
             ${clinicAddress
               .split(/\\n|\n/)
-              .map((line: string) => `<div>${line}</div>`)
+              .map((line: string) => `<div>${escapeHtml(line)}</div>`)
               .join("")}
-            ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${clinicRoom}</div>` : ""}
-            ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${clinicTrn}</div>` : ""}
+            ${clinicRoom && !clinicAddress.toLowerCase().includes(clinicRoom.toLowerCase()) && !clinicAddress.includes("2nd Floor") ? `<div>${escapeHtml(clinicRoom)}</div>` : ""}
+            ${clinicTrn ? `<div style="margin-top:2px;font-weight:700;">TRN: ${escapeHtml(clinicTrn)}</div>` : ""}
           </div>
         </div>
 
         <div class="hr"></div>
 
-        <div class="double receipt-heading">${receiptHeading}</div>
-        <div class="invoice-box">Invoice No / رقم الفاتورة : ${invoiceNumber}</div>
+        <div class="double receipt-heading">${escapeHtml(receiptHeading)}</div>
+        <div class="invoice-box">Invoice No / رقم الفاتورة : ${escapeHtml(invoiceNumber)}</div>
 
-        <div class="info-row"><span class="info-label">Date / التاريخ</span><span class="info-value">${dateValue}</span></div>
-        <div class="info-row"><span class="info-label">Time / الوقت</span><span class="info-value">${timeValue}</span></div>
-        <div class="info-row"><span class="info-label">Cashier / أمين الصندوق</span><span class="info-value">${cashierName}</span></div>
-        ${hasDoctorName ? `<div class="info-row"><span class="info-label">${doctorLabel}</span><span class="info-value">${normalizedDoctorName}</span></div>` : ""}
-        <div class="info-row"><span class="info-label">Patient ID / معرف المريض</span><span class="info-value">${patientFileNumber}</span></div>
-        <div class="info-row"><span class="info-label">Mobile / جوال</span><span class="info-value">${patientPhone}</span></div>
+        <div class="info-row"><span class="info-label">Date / التاريخ</span><span class="info-value">${escapeHtml(dateValue)}</span></div>
+        <div class="info-row"><span class="info-label">Time / الوقت</span><span class="info-value">${escapeHtml(timeValue)}</span></div>
+        <div class="info-row"><span class="info-label">Cashier / أمين الصندوق</span><span class="info-value">${escapeHtml(cashierName)}</span></div>
+        ${hasDoctorName ? `<div class="info-row"><span class="info-label">${escapeHtml(doctorLabel)}</span><span class="info-value">${escapeHtml(normalizedDoctorName)}</span></div>` : ""}
+        <div class="info-row"><span class="info-label">Patient ID / معرف المريض</span><span class="info-value">${escapeHtml(patientFileNumber)}</span></div>
+        <div class="info-row"><span class="info-label">Mobile / جوال</span><span class="info-value">${escapeHtml(patientPhone)}</span></div>
 
         <div class="patient-block">
           <span class="patient-label">Patient Name / اسم المريض</span>
-          <span class="patient-name">${patientName}</span>
+          <span class="patient-name">${escapeHtml(patientName)}</span>
         </div>
 
         <div class="section-divider"></div>
@@ -487,7 +481,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
           ? `<div class="total-line"><span class="label">Global Discount</span><span>- AED ${globalDiscountTotal.toFixed(2)}</span></div>`
           : ""}
         ${!showSnapshotDiscountBreakdown && discountAmount > 0
-          ? `<div class="total-line"><span class="label">Discount / خصم${discountType === "%" ? ` (${discountInput}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>`
+          ? `<div class="total-line"><span class="label">Discount / خصم${discountType === "%" ? ` (${escapeHtml(discountInput)}%)` : ""}</span><span>- AED ${discountAmount.toFixed(2)}</span></div>`
           : ""}
         <div class="total-line"><span class="label">Amount Before VAT / المبلغ قبل الضريبة</span><span>AED ${grandTotalBeforeFees.toFixed(2)}</span></div>
         <div class="total-line"><span class="label">VAT / الضريبة</span><span>AED ${vat.toFixed(2)}</span></div>
@@ -506,14 +500,14 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
 
         <div class="hr"></div>
 
-        <div class="footer-center">${receiptVatNote}</div>
-        <div class="footer-center">${receiptThankYou}</div>
+        <div class="footer-center">${escapeHtml(receiptVatNote)}</div>
+        <div class="footer-center">${escapeHtml(receiptThankYou)}</div>
 
         <div class="hr"></div>
 
         <div class="compact-contact">
-          ${clinicPhone ? `<div>Phone: ${clinicPhone}</div>` : ""}
-          ${clinicWhatsapp ? `<div>WhatsApp: ${clinicWhatsapp}</div>` : ""}
+          ${clinicPhone ? `<div>Phone: ${escapeHtml(clinicPhone)}</div>` : ""}
+          ${clinicWhatsapp ? `<div>WhatsApp: ${escapeHtml(clinicWhatsapp)}</div>` : ""}
         </div>
 
         <div class="hr"></div>
@@ -533,7 +527,7 @@ export function buildThermalReceiptHtml(options: BuildThermalReceiptHtmlOptions)
 
         <div class="hr"></div>
 
-        <div class="final-message">${receiptFinalMessage}</div>
+        <div class="final-message">${escapeHtml(receiptFinalMessage)}</div>
 
         <div class="hr"></div>
       </body>
