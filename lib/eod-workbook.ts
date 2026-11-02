@@ -1430,6 +1430,52 @@ supabase
     XLSX.utils.book_append_sheet(workbook, summarySheet, "Daily Summary");
     XLSX.utils.book_append_sheet(workbook, detailsSheet, "Transaction Details");
 
+    const deductionHeaders = [
+      "Recorded Date & Time (Dubai)", "Type", "Description / Reason", "Paid To / Recipient",
+      "Reference Number", "Amount (AED)", "Recorded By", "Status",
+    ];
+    const deductionReceptionists = new Map(receptionistRows.map((row) => [String(row.id), String(row.name || "")]));
+    const deductionRows = activeCashDeductions.map((entry) => [
+      new Date(entry.created_at).toLocaleString("en-GB", { timeZone: "Asia/Dubai", hour12: false }),
+      entry.type === "commission" ? "Commission" : "Expense",
+      entry.description || "",
+      entry.paid_to_name || "",
+      entry.reference_number || "",
+      Number(entry.amount || 0),
+      deductionReceptionists.get(String(entry.created_by || "")) || "Unknown / unavailable",
+      entry.status,
+    ]);
+    const deductionData = [
+      deductionHeaders,
+      ...(deductionRows.length ? deductionRows : [["No active expenses or commissions for this clinic and business date.", "", "", "", "", "", "", ""]]),
+      ["", "", "", "", "", "", "", ""],
+      ["Total Expenses", "", "", "", "", totalExpenses, "", ""],
+      ["Total Commissions", "", "", "", "", totalCommissions, "", ""],
+      ["Combined Deductions", "", "", "", "", totalCashDeductions, "", ""],
+    ];
+    const deductionSheet = XLSX.utils.aoa_to_sheet(normalizeReportRows(deductionData));
+    const deductionLastDataRow = Math.max(2, deductionRows.length + 1);
+    deductionSheet["!autofilter"] = { ref: `A1:H${deductionLastDataRow}` };
+    deductionSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+    deductionSheet["!cols"] = [28, 16, 46, 28, 24, 20, 28, 14].map((wch) => ({ wch }));
+    deductionSheet["!rows"] = deductionData.map((_, index) => ({ hpt: index === 0 ? 34 : 32 }));
+    if (!deductionRows.length) deductionSheet["!merges"] = [XLSX.utils.decode_range("A2:H2")];
+    for (let row = 0; row < deductionData.length; row++) {
+      const isTotal = row >= deductionData.length - 3;
+      for (let col = 0; col < deductionHeaders.length; col++) {
+        const cell = deductionSheet[XLSX.utils.encode_cell({ r: row, c: col })];
+        if (!cell) continue;
+        cell.s = {
+          font: { name: "Calibri", sz: 11, bold: row === 0 || isTotal, color: { rgb: row === 0 ? "FFFFFF" : "134E4A" } },
+          fill: { fgColor: { rgb: row === 0 ? "0F766E" : isTotal ? "CCFBF1" : row % 2 ? "F0FDFA" : "FFFFFF" } },
+          border: thinBorder,
+          alignment: { vertical: "center", horizontal: col === 5 && row > 0 ? "right" : "left", wrapText: true },
+        };
+        if (col === 5 && row > 0) cell.z = '"AED" #,##0.00;[Red]("AED" #,##0.00);"AED" 0.00';
+      }
+    }
+    XLSX.utils.book_append_sheet(workbook, deductionSheet, "Expenses & Commissions");
+
     const planHeaders = [
       "Created Time",
       "Patient Name",

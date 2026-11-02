@@ -7,7 +7,7 @@ import {savePosPreference} from "../../lib/pos-preference-client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import * as XLSX from "xlsx-js-style";
+import { downloadEodExcel } from "../../lib/eod-excel-download";
 import { AppFrame } from "../../components/app-frame";
 import { supabase } from "../../lib/supabase";
 import { Clinic, OutstandingBalance, BalancePayment, PatientCredit, Service, PaymentAllocation, PaymentAllocationRefund, PaymentRecord, TreatmentPlanPaymentAllocation, TreatmentPlanPaymentRecord, CashDeduction, CashDeductionType } from "../../lib/types";
@@ -1788,7 +1788,7 @@ export default function ReceiptsPage() {
       if (!response.ok || !report.workbook) throw new Error(report.error || 'EOD could not be prepared. Please retry.');
       for (const warning of report.warnings || []) alert(warning);
       const workbookStarted = performance.now();
-      XLSX.writeFile(report.workbook, report.fileName);
+      downloadEodExcel(report.workbook, report.fileName);
       console.info('EOD timing (milliseconds)', {...report.timings, browserExcelMs:Math.round(performance.now()-workbookStarted), totalMs:Math.round(performance.now()-started)});
     } catch (error) {
       alert(error instanceof Error ? error.message : 'EOD could not be downloaded. Please retry.');

@@ -48,7 +48,11 @@ export async function loadClinicFileIndex(clinicId?: string | null, patientIds?:
   return body.files;
 }
 
+const BIRTHDAY_REQUESTS_ENABLED = false;
+
 export async function loadClinicBirthdays(clinicId: string, date: string, view: "list" | "count" = "list") {
+  if (!BIRTHDAY_REQUESTS_ENABLED) return view === "count" ? { count: 0 } : { patients: [] };
+
   const response = await fetch(`/api/patients/birthdays?${new URLSearchParams({ clinicId, date, view })}`, { cache: "no-store" });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || "Birthdays could not be loaded.");
