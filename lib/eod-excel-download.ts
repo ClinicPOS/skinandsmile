@@ -13,7 +13,9 @@ export function encodeEodExcel(workbook: XLSX.WorkBook): Uint8Array<ArrayBuffer>
   const xml = new TextDecoder().decode(entry.content);
   const frozenView = '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>';
   if (!xml.includes("<sheetViews>")) throw new Error("Expenses & Commissions header could not be frozen.");
-  XLSX.CFB.utils.cfb_add(zip, path.slice(1), new TextEncoder().encode(xml.replace(/<sheetViews>[\s\S]*?<\/sheetViews>/, frozenView)));
+  // Replace the found entry in place: cfb_add with a relative path can duplicate it.
+  entry.content = new TextEncoder().encode(xml.replace(/<sheetViews>[\s\S]*?<\/sheetViews>/, frozenView));
+  entry.size = entry.content.length;
   return new Uint8Array(XLSX.CFB.write(zip, { type: "buffer", fileType: "zip" }));
 }
 

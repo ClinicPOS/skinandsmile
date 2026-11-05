@@ -1466,10 +1466,10 @@ supabase
         const cell = deductionSheet[XLSX.utils.encode_cell({ r: row, c: col })];
         if (!cell) continue;
         cell.s = {
-          font: { name: "Calibri", sz: 11, bold: row === 0 || isTotal, color: { rgb: row === 0 ? "FFFFFF" : "134E4A" } },
-          fill: { fgColor: { rgb: row === 0 ? "0F766E" : isTotal ? "CCFBF1" : row % 2 ? "F0FDFA" : "FFFFFF" } },
+          font: { name: "Calibri", sz: row === 0 ? 11 : 10, bold: row === 0 || isTotal, color: { rgb: row === 0 ? "FFFFFF" : "111827" } },
+          fill: { fgColor: { rgb: row === 0 ? "1F4E78" : isTotal ? "FFF2CC" : row % 2 ? "F8FAFC" : "FFFFFF" } },
           border: thinBorder,
-          alignment: { vertical: "center", horizontal: col === 5 && row > 0 ? "right" : "left", wrapText: true },
+          alignment: { vertical: row === 0 ? "center" : "top", horizontal: row === 0 ? "center" : col === 5 ? "right" : "left", wrapText: true },
         };
         if (col === 5 && row > 0) cell.z = '"AED" #,##0.00;[Red]("AED" #,##0.00);"AED" 0.00';
       }

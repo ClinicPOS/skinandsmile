@@ -7,6 +7,42 @@ import { createRequire } from 'node:module';
 import ts from 'typescript';
 import XLSX from 'xlsx-js-style';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
+
+// Check raw ZIP headers before a parser has a chance to hide duplicate entries.
+async function assertUniqueArchive(bytes) {
+  const zip = Buffer.from(bytes);
+  const end = zip.length - 22; // The exporter writes no ZIP comment.
+  assert.equal(zip.readUInt32LE(end), 0x06054b50);
+  const count = zip.readUInt16LE(end + 10);
+  const centralOffset = zip.readUInt32LE(end + 16);
+  const paths = [], offsets = [];
+  let cursor = centralOffset;
+  for (let i = 0; i < count; i++) {
+    assert.equal(zip.readUInt32LE(cursor), 0x02014b50);
+    const length = zip.readUInt16LE(cursor + 28);
+    const name = zip.toString('utf8', cursor + 46, cursor + 46 + length);
+    const local = zip.readUInt32LE(cursor + 42);
+    assert.equal(zip.readUInt32LE(local), 0x04034b50);
+    const localLength = zip.readUInt16LE(local + 26);
+    assert.equal(zip.toString('utf8', local + 30, local + 30 + localLength), name);
+    assert.equal(zip.readUInt32LE(local + 14), zip.readUInt32LE(cursor + 16), 'CRC headers agree');
+    paths.push(name); offsets.push(local);
+    cursor += 46 + length + zip.readUInt16LE(cursor + 30) + zip.readUInt16LE(cursor + 32);
+  }
+  assert.equal(cursor, end);
+  assert.equal(new Set(paths).size, count, 'XLSX archive paths must be unique');
+  assert.equal(new Set(offsets).size, count, 'Each entry must have its own local header');
+  // Walk local headers too, catching orphan entries omitted from the directory.
+  cursor = 0;
+  for (const offset of [...offsets].sort((a, b) => a - b)) {
+    assert.equal(offset, cursor);
+    assert.equal(zip.readUInt16LE(cursor + 6) & 8, 0, 'No deferred ZIP sizes');
+    cursor += 30 + zip.readUInt16LE(cursor + 26) + zip.readUInt16LE(cursor + 28) + zip.readUInt32LE(cursor + 18);
+  }
+  assert.equal(cursor, centralOffset);
+  await JSZip.loadAsync(bytes, { checkCRC32: true });
+}
 
 const require = createRequire(import.meta.url);
 function loadModule(filename, environment = {}, cache = new Map()) {
@@ -142,16 +178,27 @@ for (const [scenario, active, expenses, commissions] of [
   if (!expectedActive.length) assert.match(data[1][0], /No active expenses or commissions/);
   const sheet = result.workbook.Sheets[name];
   assert.equal(sheet['!autofilter'].ref, `A1:H${Math.max(2, expectedActive.length + 1)}`);
-  assert.equal(sheet.A1.s.fill.fgColor.rgb, '0F766E');
+  const details = result.workbook.Sheets['Transaction Details'];
+  assert.deepEqual(sheet.A1.s, details.A1.s, 'Header matches Transaction Details');
+  const totalCell = sheet[`F${data.length}`];
+  assert.deepEqual(totalCell.s.fill, details.A3.s.fill, 'Totals use the existing yellow');
+  assert.deepEqual(totalCell.s.font, details.A3.s.font);
+  assert.deepEqual(sheet.F2.s.border, details.I2.s.border);
+  assert.deepEqual(sheet.F2.s.font, details.I2.s.font);
+  assert.equal(sheet.F2.s.fill.fgColor.rgb, 'F8FAFC');
+  assert.equal(sheet.F2.s.alignment.horizontal, 'right');
 
   // Exercise the JSON transport used by the server, then the real browser encoder.
   const transported = JSON.parse(JSON.stringify(result.workbook));
   const standardBytes = XLSX.write(JSON.parse(JSON.stringify(transported)), { type: 'buffer', bookType: 'xlsx' });
   const standardExport = XLSX.read(standardBytes);
   const bytes = encodeEodExcel(transported);
+  await assertUniqueArchive(bytes);
   const standardZip = XLSX.CFB.read(standardBytes, { type: 'buffer' });
   const frozenZip = XLSX.CFB.read(bytes, { type: 'buffer' });
   const newSheetPath = `/xl/worksheets/sheet${transported.SheetNames.indexOf(name) + 1}.xml`;
+  const stripViews = content => Buffer.from(content).toString('utf8').replace(/<sheetViews>[\s\S]*?<\/sheetViews>/, '');
+  assert.equal(stripViews(XLSX.CFB.find(frozenZip, newSheetPath).content), stripViews(XLSX.CFB.find(standardZip, newSheetPath).content), 'Only sheetViews changes in the patched worksheet');
   for (const filePath of standardZip.FullPaths.filter(p => p.endsWith('.xml') || p.endsWith('.rels'))) {
     if (filePath.endsWith(newSheetPath)) continue;
     assert.ok(Buffer.from(XLSX.CFB.find(frozenZip, filePath).content).equals(Buffer.from(XLSX.CFB.find(standardZip, filePath).content)), `Frozen header must preserve existing Excel content: ${filePath}`);
@@ -175,15 +222,37 @@ for (const [scenario, active, expenses, commissions] of [
     assert.equal(savedSheet.views[0].state, 'frozen');
     assert.equal(savedSheet.views[0].ySplit, 1);
     assert.equal(savedSheet.views[0].topLeftCell, 'A2');
-    assert.equal(savedSheet.getCell('A1').fill.fgColor.argb.slice(-6), '0F766E');
+    assert.equal(savedSheet.getCell('A1').fill.fgColor.argb.slice(-6), '1F4E78');
+    assert.equal(savedSheet.getCell(`F${data.length}`).fill.fgColor.argb.slice(-6), 'FFF2CC');
+    assert.equal(savedSheet.getCell('F2').font.size, 10);
     assert.ok(savedSheet.getColumn(3).width >= 46);
     assert.equal(savedSheet.autoFilter, sheet['!autofilter'].ref);
     assert.match(savedSheet.getCell(`F${data.length}`).numFmt, /AED/);
     if (expectedActive.length) assert.match(savedSheet.getCell('F2').numFmt, /AED/);
+    if (process.env.EOD_TEST_OUTPUT && scenario === 'Water 100 / Kim 120') {
+      fs.mkdirSync(process.env.EOD_TEST_OUTPUT, { recursive: true });
+      fs.writeFileSync(path.join(process.env.EOD_TEST_OUTPUT, 'EOD-test.xlsx'), bytes);
+    }
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
   console.log(`PASS: ${scenario}; clinic/date/active scope, totals, no double deduction, existing sheets, no new reads, XLSX round-trip and frozen header.`);
+}
+
+// Locate by sheet name rather than assuming sheet3, and preserve formulas verbatim.
+for (const sheetNames of [[name], ['Other', name], ['Other']]) {
+  const workbook = XLSX.utils.book_new();
+  for (const sheetName of sheetNames) {
+    const sheet = XLSX.utils.aoa_to_sheet([['Amount'], [12.34], [0]]);
+    sheet.A3 = { t: 'n', f: 'SUM(A2:A2)', v: 12.34 };
+    XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
+  }
+  const bytes = encodeEodExcel(workbook);
+  await assertUniqueArchive(bytes);
+  const restored = XLSX.read(bytes);
+  assert.deepEqual(restored.SheetNames, sheetNames);
+  for (const sheetName of sheetNames) assert.equal(restored.Sheets[sheetName].A3.f, 'SUM(A2:A2)');
+  await assertUniqueArchive(encodeEodExcel(JSON.parse(JSON.stringify(workbook))));
 }
 
 // Verify the browser download uses the encoded file and retains the server filename.
